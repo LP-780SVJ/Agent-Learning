@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from enum import Enum
 from codeteam.schemas.messages import Message
 
@@ -12,16 +13,19 @@ class StopReason(str, Enum):
     NO_PROGRESS = "no_progress"
     INVALID_FINAL_OUTPUT = "invalid_final_output"
 
-class ActionFingerprint:# 检测重复动作
+@dataclass(frozen=True)
+class ActionFingerprint:# 检测重复动作 工具动作指纹
     tool_name: str
     arguments_json: str
 
+
+@dataclass
 class AgentLoopState:
-    messages: list[Message]
-    step_count: int
-    tool_call_count: int
-    last_action: ActionFingerprint | None
-    stop_reason: StopReason | None
+    messages: list[Message] = field(default_factory=list)
+    step_count: int = 0
+    tool_call_count: int = 0
+    last_action: ActionFingerprint | None = None
+    stop_reason: StopReason | None = None
 
 def make_action_fingerprint(tool_name: str, arguments_json: str) -> ActionFingerprint:
     return ActionFingerprint(tool_name=tool_name, arguments_json=arguments_json)
