@@ -16,6 +16,9 @@ build/
 dist/
 *.egg-info/
 
+# Codeteam runtime artifacts
+.codeteam/backups/
+
 # Local environment files
 .env
 .env.*
