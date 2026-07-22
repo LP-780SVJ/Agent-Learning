@@ -33,4 +33,5 @@ def validate_final_output_semantics(output: AgentFinalOutput,
         if not output.user_input_request:
             raise ValueError("Semantic validation failed: user_input_request must be provided for needs_user_input status.")
         return output
-    
+
+    return output

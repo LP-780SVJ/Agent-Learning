@@ -1,3 +1,7 @@
+import json
+
+from typing import Any
+
 from dataclasses import dataclass, field
 from enum import Enum
 from codeteam.schemas.messages import Message
@@ -27,14 +31,25 @@ class AgentLoopState:
     last_action: ActionFingerprint | None = None
     stop_reason: StopReason | None = None
 
-def make_action_fingerprint(tool_name: str, arguments_json: str) -> ActionFingerprint:
+def normalize_arguments(arguments: dict[str, Any]) -> str:
+    """
+    Normalize the arguments dictionary to a JSON string with sorted keys.
+    This ensures that the same arguments produce the same string representation.
+    """
+    return json.dumps(arguments,
+                      sort_keys=True,
+                      separators=(',', ':'),
+                      ensure_ascii=False)
+
+def make_action_fingerprint(tool_name: str, arguments: dict[str, Any]) -> ActionFingerprint:
+    arguments_json = normalize_arguments(arguments)
     return ActionFingerprint(tool_name=tool_name, arguments_json=arguments_json)
 
-def record_tool_call(state: AgentLoopState, tool_name: str, arguments_json: str) -> None:
+def record_tool_call(state: AgentLoopState, tool_name: str, arguments: dict[str, Any]) -> None:
     state.tool_call_count += 1
-    state.last_action = make_action_fingerprint(tool_name, arguments_json)
+    state.last_action = make_action_fingerprint(tool_name, arguments)
 
-def is_repeated_action(state: AgentLoopState, tool_name: str, arguments_json: str) -> bool:
+def is_repeated_action(state: AgentLoopState, tool_name: str, arguments: dict[str, Any]) -> bool:
     if not state.last_action:
         return False
-    return state.last_action == make_action_fingerprint(tool_name, arguments_json)
+    return state.last_action == make_action_fingerprint(tool_name, arguments)
