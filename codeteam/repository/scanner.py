@@ -93,6 +93,7 @@ class RepositoryScanner:
             files=files,
             is_git_repo=is_git_repo,
             important_configs=self._find_important_configs(files),
+            languages=self._count_languages(files),
         )
 
     def _is_git_repo(self) -> bool:# 判断是不是Git仓库
@@ -148,6 +149,21 @@ class RepositoryScanner:
             kind=self.file_classifier.classify(relative_path),
             size_bytes=size_bytes,
         )
+
+
+    def _count_languages(self, files: list[RepositoryFile]) -> dict[str, int]:
+        languages: dict[str, int] = {}
+
+        for file in files:
+            if file.language is None:
+                continue
+
+            if file.language not in languages:
+                languages[file.language] = 0
+
+            languages[file.language] += 1
+
+        return dict(sorted(languages.items()))
 
     def _find_important_configs(self, files: list[RepositoryFile]) -> list[str]:# 查找重要的配置文件
         important_configs = []

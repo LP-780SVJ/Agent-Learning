@@ -34,6 +34,7 @@ class RepositorySnapshot:
     root: Path
     files: list[RepositoryFile]
     is_git_repo: bool
+    languages: dict[str, int] = field(default_factory=dict)
     important_configs: list[str] = field(default_factory=list)
 
     @property
