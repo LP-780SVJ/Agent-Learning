@@ -1119,55 +1119,108 @@ stderr
 
 ---
 
-{{今天必须编写的测试
+{{完成七组测试：
+1. 正常文件
+2. 空文件
+3. 语法错误
+4. 缺括号
+5. 非 UTF-8
+6. 超大文件
+7. AST 与 Tree-sitter 数量对照
+再补充：
+    Registry 默认选择
+    Registry 指定选择
+    未知语言
+    未知 Parser
 
-至少覆盖以下场景：
+测试设计
+1. 正常文件
+    SOURCE = b"""
+    class UserService:
+        def get_user(self):
+            return None
 
-测试	预期
-Tracked 正常文件	标记为 tracked
-Untracked 新文件	标记为 untracked
-.gitignore 文件	不进入可见清单
-已 tracked 后再 ignore	仍是 tracked
-文件名包含空格	正确解析
-文件名包含中文	正确解析
-文件名包含换行	-z 正确处理
-符号链接指向仓库外	不跟随
-二进制文件	标记 binary
-generated/ 文件	标记 generated
-test_*.py	标记 test
-AGENTS.md	标记 instruction、高重要性
-tracked 文件被删除	标记 deleted
-非 Git 目录	回退到文件系统扫描
-node_modules	忽略或折叠
-十八、今日验收标准
+    def create_user():
+        return UserService()
+    """
+    预期：
+    Python AST：SUCCESS
+    Tree-sitter：SUCCESS
+    class_count = 1
+    function_count = 2
+    方法也属于函数定义，所以函数数是 2。
 
-今天结束时，你应该能清晰回答：
+---
+2. 空文件
+    SOURCE = b""
+    预期：
+    Python AST：SUCCESS，Module
+    Tree-sitter：SUCCESS，module
+    函数 0
+    类 0
+    空文件是合法 Python 文件，不应该标记为错误。
 
-为什么 git add 后尚未 commit 的文件已经属于 tracked？
-为什么 .gitignore 不能忽略已经 tracked 的文件？
-为什么 Scanner 需要同时读取 tracked 和 untracked？
-为什么 git ls-files 必须使用 -z？
-git ls-files 与 ripgrep 的职责有什么区别？
-为什么文件语言和文件角色必须分开？
-Generated 为什么不应该直接删除或完全忽略？
-为什么目录树只是压缩视图，而完整文件列表必须保留？
-为什么 Scanner 不应该跟随符号链接？
-为什么大型仓库后续需要增量扫描，而不是重复全量扫描？
+---
+3. 语法错误文件
+    SOURCE = b"""
+    def valid():
+        return 1
 
-今天的最终产出应是：
+    this is not valid python !!!
+    """
+    预期：
+    Python AST：FAILED
+    Tree-sitter：PARTIAL
+    Tree-sitter 仍可能提取 valid
 
-repository/
-├── models.py
-├── git_inventory.py
-├── file_classifier.py
-├── language_detector.py
-├── tree_renderer.py
-└── scanner.py
+---
+4. 缺少括号
+    SOURCE = b"""
+    def valid():
+        return 1
 
-tests/repository/
-├── test_git_inventory.py
-├── test_file_classifier.py
-├── test_tree_renderer.py
-└── test_scanner.py}}
+    def broken(value:
+        return value
+    """
+    预期：
+    Python AST：FAILED
+    Tree-sitter：PARTIAL
+    has_errors = True
+    diagnostics 非空
+    不要强制 Tree-sitter 必须生成某个特定 MISSING 节点，因为恢复形态可能随 Grammar 版本变化。
+
+---
+5. 非 UTF-8
+    Python 文件：
+    SOURCE = (
+        b"# -*- coding: latin-1 -*-\n"
+        b"name = 'caf\xe9'\n"
+    )
+    预期：
+    PythonAstParser：
+    通过编码声明检测 latin-1，可以成功解析
+
+    TreeSitterParser：
+    当前封装只接受 UTF-8，返回 FAILED
+    但不能抛异常导致扫描器退出
+    后续支持非 UTF-8 有两种方案：
+    1. 转成 UTF-8，并维护原始字节到 UTF-8 字节的映射；
+    2. 对不支持的编码只使用原生解析器。
+    第一周版本选择第二种更稳妥。
+
+---
+6. 超大文件
+    parser = PythonAstParser(
+        max_source_bytes=64
+    )
+
+    result = parser.parse(
+        Path("large.py"),
+        b"x = 1\n" * 100,
+    )
+    预期：
+    status = SKIPPED
+    diagnostic = FILE_TOO_LARGE
+    不真正执行解析}}
 
 ---
