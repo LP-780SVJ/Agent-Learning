@@ -1119,108 +1119,378 @@ stderr
 
 ---
 
-{{完成七组测试：
-1. 正常文件
-2. 空文件
-3. 语法错误
-4. 缺括号
-5. 非 UTF-8
-6. 超大文件
-7. AST 与 Tree-sitter 数量对照
-再补充：
-    Registry 默认选择
-    Registry 指定选择
-    未知语言
-    未知 Parser
-
-测试设计
-1. 正常文件
-    SOURCE = b"""
-    class UserService:
-        def get_user(self):
-            return None
-
-    def create_user():
-        return UserService()
-    """
-    预期：
-    Python AST：SUCCESS
-    Tree-sitter：SUCCESS
-    class_count = 1
-    function_count = 2
-    方法也属于函数定义，所以函数数是 2。
+{{
+    测试设计
+建议准备一个小型仓库：
+sample_repo/
+└── src/
+    ├── app/
+    │   ├── __init__.py
+    │   ├── api.py
+    │   ├── service.py
+    │   ├── repository.py
+    │   ├── models.py
+    │   ├── dynamic.py
+    │   ├── cycle_a.py
+    │   ├── cycle_b.py
+    │   └── nested.py
+    └── vendor_shadow/
+        └── requests.py
 
 ---
-2. 空文件
-    SOURCE = b""
-    预期：
-    Python AST：SUCCESS，Module
-    Tree-sitter：SUCCESS，module
-    函数 0
-    类 0
-    空文件是合法 Python 文件，不应该标记为错误。
+1. 普通 Import
+# api.py
+import app.service
+import app.repository as repository
+断言：
+requested modules:
+app.service
+app.repository
+
+local bindings:
+app
+repository
+Graph：
+api.py → service.py
+api.py → repository.py
 
 ---
-3. 语法错误文件
-    SOURCE = b"""
-    def valid():
-        return 1
+2. From Import
+from app.service import UserService
+from app.models import User as UserModel
+断言：
+module = app.service
+name = UserService
+binding = UserService
 
-    this is not valid python !!!
-    """
-    预期：
-    Python AST：FAILED
-    Tree-sitter：PARTIAL
-    Tree-sitter 仍可能提取 valid
-
----
-4. 缺少括号
-    SOURCE = b"""
-    def valid():
-        return 1
-
-    def broken(value:
-        return value
-    """
-    预期：
-    Python AST：FAILED
-    Tree-sitter：PARTIAL
-    has_errors = True
-    diagnostics 非空
-    不要强制 Tree-sitter 必须生成某个特定 MISSING 节点，因为恢复形态可能随 Grammar 版本变化。
+module = app.models
+name = User
+binding = UserModel
 
 ---
-5. 非 UTF-8
-    Python 文件：
-    SOURCE = (
-        b"# -*- coding: latin-1 -*-\n"
-        b"name = 'caf\xe9'\n"
+3. 相对 Import
+from .service import UserService
+from . import repository
+断言：
+app.service
+app.repository
+
+---
+4. 别名
+import app.service as service_module
+from app.models import User as DomainUser
+断言本地绑定：
+service_module
+DomainUser
+
+---
+5. init.py
+# app/__init__.py
+from .service import UserService
+断言：
+模块名 = app
+而不是 app.__init__
+# api.py
+from app import UserService
+第一版至少解析到：
+app/__init__.py
+
+---
+6. 嵌套类
+class Outer:
+    class Inner:
+        def run(self):
+            pass
+断言：
+app.nested::Outer
+app.nested::Outer.Inner
+app.nested::Outer.Inner.run
+类别：
+Outer       → CLASS
+Inner       → CLASS
+Inner.run   → METHOD
+
+---
+7. 同名方法
+class UserService:
+    def get(self):
+        pass
+
+
+class OrderService:
+    def get(self):
+        pass
+断言：
+find_exact("get")
+返回两个 Symbol。
+Qualified Name 不同：
+UserService.get
+OrderService.get
+Symbol ID 不同。
+
+---
+8. 外部依赖
+import fastapi
+from pydantic import BaseModel
+若仓库模块索引中没有对应模块：
+不生成指向本地文件的 Import Edge
+Resolution：
+EXTERNAL 或 EXTERNAL_OR_UNRESOLVED
+不得把：
+src/internal/fastapi_helpers.py
+误认为 fastapi。
+
+---
+9. 循环 Import
+# cycle_a.py
+from .cycle_b import function_b
+# cycle_b.py
+from .cycle_a import function_a
+Graph：
+cycle_a.py → cycle_b.py
+cycle_b.py → cycle_a.py
+断言：
+graph.neighbors(
+    "cycle_a.py",
+    depth=5,
+)
+能够结束，不发生无限循环。
+
+---
+10. 无法解析的动态 Import
+module = importlib.import_module(
+    settings.PLUGIN_MODULE
+)
+断言：
+is_dynamic = True
+requested_module = None
+status = DYNAMIC / UNRESOLVED
+不能猜成：
+settings.PLUGIN_MODULE.py
+
+---
+推荐 pytest 结构
+tests/
+└── indexing/
+    ├── test_symbol_extractor.py
+    ├── test_symbol_index.py
+    ├── test_import_extractor.py
+    ├── test_import_resolver.py
+    └── test_import_graph.py
+核心测试示例：
+def test_nested_class_qualified_names() -> None:
+    source = """
+class Outer:
+    class Inner:
+        def run(self, value: int) -> bool:
+            return value > 0
+"""
+
+    tree = ast.parse(source)
+
+    extractor = PythonSymbolExtractor(
+        path=Path("src/app/nested.py"),
+        module_name="app.nested",
+        source=source,
     )
-    预期：
-    PythonAstParser：
-    通过编码声明检测 latin-1，可以成功解析
+    extractor.visit(tree)
 
-    TreeSitterParser：
-    当前封装只接受 UTF-8，返回 FAILED
-    但不能抛异常导致扫描器退出
-    后续支持非 UTF-8 有两种方案：
-    1. 转成 UTF-8，并维护原始字节到 UTF-8 字节的映射；
-    2. 对不支持的编码只使用原生解析器。
-    第一周版本选择第二种更稳妥。
+    qualified_names = {
+        symbol.qualified_name
+        for symbol in extractor.symbols
+    }
+
+    assert (
+        "app.nested::Outer"
+        in qualified_names
+    )
+    assert (
+        "app.nested::Outer.Inner"
+        in qualified_names
+    )
+    assert (
+        "app.nested::Outer.Inner.run"
+        in qualified_names
+    )
+Import Graph：
+def test_import_graph_direction() -> None:
+    graph = ImportGraph()
+
+    graph.add_edge(
+        ImportEdge(
+            source_path="src/app/api.py",
+            target_path="src/app/service.py",
+            import_ids=["import-1"],
+            imported_modules=["app.service"],
+            imported_names=["UserService"],
+        )
+    )
+
+    assert graph.dependencies_of(
+        "src/app/api.py"
+    ) == {
+        "src/app/service.py"
+    }
+
+    assert graph.dependents_of(
+        "src/app/service.py"
+    ) == {
+        "src/app/api.py"
+    }
+循环：
+def test_cycle_safe_neighbors() -> None:
+    graph = ImportGraph()
+
+    graph.add_edge(
+        make_edge("a.py", "b.py")
+    )
+    graph.add_edge(
+        make_edge("b.py", "a.py")
+    )
+
+    assert graph.neighbors(
+        "a.py",
+        depth=10,
+    ) == {
+        "b.py"
+    }
 
 ---
-6. 超大文件
-    parser = PythonAstParser(
-        max_source_bytes=64
-    )
+JSON 产出
+symbols.json
+{
+  "symbols": [
+    {
+      "symbol_id": "python://app.service::UserService#L8",
+      "path": "src/app/service.py",
+      "module_name": "app.service",
+      "name": "UserService",
+      "qualified_name": "app.service::UserService",
+      "kind": "class",
+      "decorators": []
+    },
+    {
+      "symbol_id": "python://app.service::UserService.refresh#L14",
+      "path": "src/app/service.py",
+      "module_name": "app.service",
+      "name": "refresh",
+      "qualified_name": "app.service::UserService.refresh",
+      "kind": "method",
+      "signature": "refresh(self, token: str) -> AccessToken"
+    }
+  ],
+  "references": []
+}
 
-    result = parser.parse(
-        Path("large.py"),
-        b"x = 1\n" * 100,
-    )
-    预期：
-    status = SKIPPED
-    diagnostic = FILE_TOO_LARGE
-    不真正执行解析}}
+---
+imports.json
+{
+  "imports": [
+    {
+      "source_path": "src/app/api.py",
+      "source_module": "app.api",
+      "kind": "from_import",
+      "module": "service",
+      "level": 1,
+      "names": [
+        {
+          "name": "UserService",
+          "alias": null,
+          "local_binding": "UserService"
+        }
+      ],
+      "resolution": {
+        "requested_module": "app.service",
+        "status": "resolved_local",
+        "target_paths": [
+          "src/app/service.py"
+        ]
+      }
+    }
+  ]
+}
+
+---
+import_graph.json
+{
+  "nodes": [
+    "src/app/api.py",
+    "src/app/service.py",
+    "src/app/repository.py"
+  ],
+  "edges": [
+    {
+      "source": "src/app/api.py",
+      "target": "src/app/service.py",
+      "modules": [
+        "app.service"
+      ],
+      "names": [
+        "UserService"
+      ]
+    },
+    {
+      "source": "src/app/service.py",
+      "target": "src/app/repository.py",
+      "modules": [
+        "app.repository"
+      ],
+      "names": [
+        "UserRepository"
+      ]
+    }
+  ],
+  "cycles": []
+}
+今日最终目录
+codeteam/
+├── symbols/
+│   ├── models.py
+│   ├── extractor.py
+│   └── index.py
+│
+├── imports/
+│   ├── models.py
+│   ├── extractor.py
+│   ├── module_index.py
+│   ├── resolver.py
+│   └── graph.py
+│
+└── repository/
+    └── source_roots.py
+
+tests/
+├── symbols/
+│   ├── test_extractor.py
+│   └── test_index.py
+│
+└── imports/
+    ├── test_extractor.py
+    ├── test_resolver.py
+    └── test_graph.py
+
+artifacts/
+├── symbols.json
+├── imports.json
+└── import_graph.json
+今天最核心的工业化认识是：
+AST / Tree-sitter
+只提供语法节点
+
+SymbolExtractor
+把节点转换成代码实体和引用事实
+
+Qualified Name + Symbol ID
+区分同名实体
+
+ImportResolver
+把模块名称映射成仓库文件
+
+ImportGraph
+把分散的文件关系变成可查询图
+
+SymbolIndex
+让 Coding Agent 不必反复扫描整个仓库
+}}
 
 ---
