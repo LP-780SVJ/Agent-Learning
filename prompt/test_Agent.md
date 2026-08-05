@@ -1120,377 +1120,469 @@ stderr
 ---
 
 {{
-    测试设计
-建议准备一个小型仓库：
-sample_repo/
-└── src/
-    ├── app/
-    │   ├── __init__.py
-    │   ├── api.py
-    │   ├── service.py
-    │   ├── repository.py
-    │   ├── models.py
-    │   ├── dynamic.py
-    │   ├── cycle_a.py
-    │   ├── cycle_b.py
-    │   └── nested.py
-    └── vendor_shadow/
-        └── requests.py
-
----
-1. 普通 Import
-# api.py
-import app.service
-import app.repository as repository
-断言：
-requested modules:
-app.service
-app.repository
-
-local bindings:
-app
-repository
-Graph：
-api.py → service.py
-api.py → repository.py
-
----
-2. From Import
-from app.service import UserService
-from app.models import User as UserModel
-断言：
-module = app.service
-name = UserService
-binding = UserService
-
-module = app.models
-name = User
-binding = UserModel
-
----
-3. 相对 Import
-from .service import UserService
-from . import repository
-断言：
-app.service
-app.repository
-
----
-4. 别名
-import app.service as service_module
-from app.models import User as DomainUser
-断言本地绑定：
-service_module
-DomainUser
-
----
-5. init.py
-# app/__init__.py
-from .service import UserService
-断言：
-模块名 = app
-而不是 app.__init__
-# api.py
-from app import UserService
-第一版至少解析到：
-app/__init__.py
-
----
-6. 嵌套类
-class Outer:
-    class Inner:
-        def run(self):
-            pass
-断言：
-app.nested::Outer
-app.nested::Outer.Inner
-app.nested::Outer.Inner.run
-类别：
-Outer       → CLASS
-Inner       → CLASS
-Inner.run   → METHOD
-
----
-7. 同名方法
-class UserService:
-    def get(self):
-        pass
-
-
-class OrderService:
-    def get(self):
-        pass
-断言：
-find_exact("get")
-返回两个 Symbol。
-Qualified Name 不同：
-UserService.get
-OrderService.get
-Symbol ID 不同。
-
----
-8. 外部依赖
-import fastapi
-from pydantic import BaseModel
-若仓库模块索引中没有对应模块：
-不生成指向本地文件的 Import Edge
-Resolution：
-EXTERNAL 或 EXTERNAL_OR_UNRESOLVED
-不得把：
-src/internal/fastapi_helpers.py
-误认为 fastapi。
-
----
-9. 循环 Import
-# cycle_a.py
-from .cycle_b import function_b
-# cycle_b.py
-from .cycle_a import function_a
-Graph：
-cycle_a.py → cycle_b.py
-cycle_b.py → cycle_a.py
-断言：
-graph.neighbors(
-    "cycle_a.py",
-    depth=5,
-)
-能够结束，不发生无限循环。
-
----
-10. 无法解析的动态 Import
-module = importlib.import_module(
-    settings.PLUGIN_MODULE
-)
-断言：
-is_dynamic = True
-requested_module = None
-status = DYNAMIC / UNRESOLVED
-不能猜成：
-settings.PLUGIN_MODULE.py
-
----
-推荐 pytest 结构
-tests/
-└── indexing/
-    ├── test_symbol_extractor.py
-    ├── test_symbol_index.py
-    ├── test_import_extractor.py
-    ├── test_import_resolver.py
-    └── test_import_graph.py
-核心测试示例：
-def test_nested_class_qualified_names() -> None:
-    source = """
-class Outer:
-    class Inner:
-        def run(self, value: int) -> bool:
-            return value > 0
-"""
-
-    tree = ast.parse(source)
-
-    extractor = PythonSymbolExtractor(
-        path=Path("src/app/nested.py"),
-        module_name="app.nested",
-        source=source,
-    )
-    extractor.visit(tree)
-
-    qualified_names = {
-        symbol.qualified_name
-        for symbol in extractor.symbols
-    }
-
-    assert (
-        "app.nested::Outer"
-        in qualified_names
-    )
-    assert (
-        "app.nested::Outer.Inner"
-        in qualified_names
-    )
-    assert (
-        "app.nested::Outer.Inner.run"
-        in qualified_names
-    )
-Import Graph：
-def test_import_graph_direction() -> None:
-    graph = ImportGraph()
-
-    graph.add_edge(
-        ImportEdge(
-            source_path="src/app/api.py",
-            target_path="src/app/service.py",
-            import_ids=["import-1"],
-            imported_modules=["app.service"],
-            imported_names=["UserService"],
-        )
-    )
-
-    assert graph.dependencies_of(
-        "src/app/api.py"
-    ) == {
-        "src/app/service.py"
-    }
-
-    assert graph.dependents_of(
-        "src/app/service.py"
-    ) == {
-        "src/app/api.py"
-    }
-循环：
-def test_cycle_safe_neighbors() -> None:
-    graph = ImportGraph()
-
-    graph.add_edge(
-        make_edge("a.py", "b.py")
-    )
-    graph.add_edge(
-        make_edge("b.py", "a.py")
-    )
-
-    assert graph.neighbors(
-        "a.py",
-        depth=10,
-    ) == {
-        "b.py"
-    }
-
----
-JSON 产出
-symbols.json
+    一次完整查询示例
+用户输入：
+修复 `InvalidRefreshTokenError` 未被登录接口捕获，
+导致 POST /api/auth/refresh 返回 HTTP 500 的问题。
+QueryAnalyzer
 {
-  "symbols": [
+  "quoted_literals": [
+    "InvalidRefreshTokenError"
+  ],
+  "exception_names": [
+    "InvalidRefreshTokenError"
+  ],
+  "error_codes": [
+    "500"
+  ],
+  "identifiers": [
+    "InvalidRefreshTokenError",
+    "POST",
+    "HTTP"
+  ],
+  "paths": [],
+  "primary_terms": [
+    "InvalidRefreshTokenError",
+    "/api/auth/refresh"
+  ],
+  "secondary_terms": [
+    "500",
+    "Invalid",
+    "Refresh",
+    "Token",
+    "Error"
+  ]
+}
+SymbolIndex
+src/auth/exceptions.py
+定义 InvalidRefreshTokenError
+ripgrep
+src/auth/service.py
+抛出 InvalidRefreshTokenError
+
+src/auth/api.py
+包含 /api/auth/refresh
+
+tests/auth/test_refresh.py
+断言 status_code == 500
+ImportGraph
+api.py → service.py
+service.py → exceptions.py
+测试映射
+src/auth/api.py
+→ tests/auth/test_api.py
+
+src/auth/service.py
+→ tests/auth/test_service.py
+候选集合
+src/auth/exceptions.py
+src/auth/service.py
+src/auth/api.py
+tests/auth/test_refresh.py
+tests/auth/test_api.py
+tests/auth/test_service.py
+下一天再正式排序出 Top 5。
+
+---
+二十一、测试设计
+1. 精确符号
+仓库：
+class UserService:
+    pass
+查询：
+UserService
+验证：
+使用 -F
+成功找到类名
+Candidate 保留 symbol 和 ripgrep 两类原因
+
+---
+2. 正则特殊字符
+文件：
+value = foo(bar)[0]
+查询：
+foo(bar)[0]
+验证：
+Literal 模式能够匹配
+不会被解释为正则
+
+---
+3. 错误信息
+文件：
+raise RuntimeError(
+    "Token has expired"
+)
+查询：
+修复报错 "Token has expired"
+验证：
+QueryAnalyzer 提取引号文本
+RipgrepClient 使用精确搜索
+
+---
+4. 中文查询
+查询：
+修复登录接口抛出 InvalidTokenError 后返回 500 的问题
+验证：
+不因中文报错
+提取 InvalidTokenError
+提取 500
+保留中文片段
+
+---
+5. 路径带空格
+文件：
+src/legacy auth/service.py
+验证：
+argv 中路径是一个完整参数
+不需要手工引号
+不会拆成两个参数
+
+---
+6. 无结果
+查询：
+DefinitelyNotExistingSymbol
+验证：
+返回 matches=[]
+不是系统异常
+CandidateGenerator 正常继续其他召回源
+
+---
+7. 超过上限
+创建 200 个命中。
+query.max_results = 10
+验证：
+只保留最多 10 个 Match
+truncated=True
+子进程被终止
+不会把全部输出读入内存
+
+---
+8. 搜索超时
+不要依赖真实大仓库制造超时。
+注入一个假的 rg：
+# fake_rg.py
+import time
+
+time.sleep(5)
+配置：
+client = RipgrepClient(
+    executable=str(fake_rg_path)
+)
+
+query.timeout_seconds = 0.1
+验证：
+抛 SearchTimeoutError
+子进程被杀死
+没有遗留进程
+
+---
+二十二、建议的 pytest 结构
+tests/
+├── search/
+│   ├── test_ripgrep_client.py
+│   ├── test_ripgrep_json.py
+│   ├── test_query_analyzer.py
+│   └── test_candidate_generator.py
+│
+└── fixtures/
+    └── search_repo/
+核心测试：
+async def test_literal_special_characters(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "sample.py"
+    source.write_text(
+        "value = foo(bar)[0]\n",
+        encoding="utf-8",
+    )
+
+    client = RipgrepClient()
+
+    result = await client.search(
+        tmp_path,
+        SearchQuery(
+            pattern="foo(bar)[0]",
+            mode=SearchMode.LITERAL,
+        ),
+    )
+
+    assert len(result.matches) == 1
+    assert (
+        result.matches[0].path
+        == "sample.py"
+    )
+结果上限：
+async def test_global_result_limit(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "many.txt"
+    source.write_text(
+        "\n".join(
+            f"match {index}"
+            for index in range(200)
+        ),
+        encoding="utf-8",
+    )
+
+    client = RipgrepClient()
+
+    result = await client.search(
+        tmp_path,
+        SearchQuery(
+            pattern="match",
+            max_results=10,
+        ),
+    )
+
+    assert len(result.matches) == 10
+    assert result.truncated
+QueryAnalyzer：
+def test_analyze_mixed_chinese_query() -> None:
+    analyzer = QueryAnalyzer()
+
+    result = analyzer.analyze(
+        "修复登录接口中的 "
+        "`InvalidRefreshTokenError`，"
+        "该异常导致 HTTP 500"
+    )
+
+    assert (
+        "InvalidRefreshTokenError"
+        in result.quoted_literals
+    )
+    assert (
+        "InvalidRefreshTokenError"
+        in result.exception_names
+    )
+    assert "500" in result.error_codes
+
+    assert "Invalid" in (
+        result.identifier_parts
+    )
+    assert "Refresh" in (
+        result.identifier_parts
+    )
+
+---
+二十三、小型评测集
+建立：
+evals/file_retrieval_day4.jsonl
+每行：
+{
+  "id": "auth-001",
+  "query": "修复 InvalidRefreshTokenError 导致接口返回 500 的问题",
+  "gold_files": [
+    "src/auth/api.py",
+    "src/auth/service.py",
+    "src/auth/exceptions.py",
+    "tests/auth/test_refresh.py"
+  ],
+  "category": "exception_and_error_code"
+}
+建议五条任务：
+1. 精确符号定位
+2. 错误消息定位
+3. 中文业务描述 + 异常名
+4. 显式路径定位
+5. 跨文件调用定位
+
+---
+1. 三组基线
+Filename
+只使用：
+文件名和路径 Token
+Ripgrep
+只使用：
+QueryAnalyzer
++
+文本搜索
+Symbol
+只使用：
+SymbolIndex exact/prefix
+今天暂时不比较：
+Import Graph
+测试文件扩展
+完整混合排序
+这些可在明天加入。
+
+---
+2. 今日指标
+由于正式排序器还没实现，今天主要统计：
+Candidate Recall
+候选集合中命中的 Gold 文件数
+÷
+Gold 文件总数
+Hit
+候选中是否至少出现一个 Gold 文件：
+命中任意一个 = 1
+否则 = 0
+Candidate Size
+平均返回多少候选文件
+结果示例：
+暂时无法在飞书文档外展示此内容
+这里的数值只展示报告格式，不是目标结果。
+你应该分析：
+Filename：
+精确，但容易漏掉业务名称不同的文件
+
+Ripgrep：
+覆盖率高，但常见词会产生噪声
+
+Symbol：
+定义定位准确，但错误文本和配置问题召回较弱
+
+---
+二十四、search_results.json 格式
+{
+  "query": {
+    "raw": "修复 InvalidRefreshTokenError 导致 HTTP 500",
+    "analyzed": {
+      "exception_names": [
+        "InvalidRefreshTokenError"
+      ],
+      "error_codes": [
+        "500"
+      ],
+      "primary_terms": [
+        "InvalidRefreshTokenError"
+      ],
+      "secondary_terms": [
+        "500",
+        "Invalid",
+        "Refresh",
+        "Token",
+        "Error"
+      ]
+    }
+  },
+  "searches": [
     {
-      "symbol_id": "python://app.service::UserService#L8",
-      "path": "src/app/service.py",
-      "module_name": "app.service",
-      "name": "UserService",
-      "qualified_name": "app.service::UserService",
-      "kind": "class",
-      "decorators": []
-    },
-    {
-      "symbol_id": "python://app.service::UserService.refresh#L14",
-      "path": "src/app/service.py",
-      "module_name": "app.service",
-      "name": "refresh",
-      "qualified_name": "app.service::UserService.refresh",
-      "kind": "method",
-      "signature": "refresh(self, token: str) -> AccessToken"
+      "pattern": "InvalidRefreshTokenError",
+      "mode": "literal",
+      "matched_files": [
+        "src/auth/exceptions.py",
+        "src/auth/service.py",
+        "tests/auth/test_refresh.py"
+      ],
+      "match_count": 6,
+      "truncated": false,
+      "elapsed_ms": 18
     }
   ],
-  "references": []
-}
-
----
-imports.json
-{
-  "imports": [
+  "candidates": [
     {
-      "source_path": "src/app/api.py",
-      "source_module": "app.api",
-      "kind": "from_import",
-      "module": "service",
-      "level": 1,
-      "names": [
+      "path": "src/auth/exceptions.py",
+      "preliminary_score": 9.0,
+      "evidence": [
         {
-          "name": "UserService",
-          "alias": null,
-          "local_binding": "UserService"
+          "source": "symbol_exact",
+          "query_term": "InvalidRefreshTokenError",
+          "detail": "Defines exact class",
+          "weight": 5.0
+        },
+        {
+          "source": "ripgrep",
+          "query_term": "InvalidRefreshTokenError",
+          "detail": "Matched at line 6",
+          "line_number": 6,
+          "weight": 2.0
         }
-      ],
-      "resolution": {
-        "requested_module": "app.service",
-        "status": "resolved_local",
-        "target_paths": [
-          "src/app/service.py"
-        ]
-      }
+      ]
     }
   ]
 }
 
 ---
-import_graph.json
-{
-  "nodes": [
-    "src/app/api.py",
-    "src/app/service.py",
-    "src/app/repository.py"
-  ],
-  "edges": [
-    {
-      "source": "src/app/api.py",
-      "target": "src/app/service.py",
-      "modules": [
-        "app.service"
-      ],
-      "names": [
-        "UserService"
-      ]
-    },
-    {
-      "source": "src/app/service.py",
-      "target": "src/app/repository.py",
-      "modules": [
-        "app.repository"
-      ],
-      "names": [
-        "UserRepository"
-      ]
-    }
-  ],
-  "cycles": []
-}
+测试思路
+
+测试小仓库设计
+
+在 tests/fixtures/search_repo/ 下创建一个小型 Python 项目，包含：
+
+search_repo/
+├── auth/
+│   ├── __init__.py
+│   ├── service.py        # class UserService, def create_user
+│   └── repository.py     # class UserRepository
+├── errors.py              # class ServiceError, TIMEOUT_ERROR = "ERR_TIMEOUT"
+├── 中文注释.py             # 包含中文注释的文件
+└── README.md              # 普通文本文件（用来验证 ripgrep 默认跳过）
+
+各测试文件覆盖的场景
+
+┌─────────────────┬────────────────────────────────────────────┐
+│    测试文件     │                  覆盖场景                  │
+├─────────────────┼────────────────────────────────────────────┤
+│ test_ripgrep_js │ begin/match/context/end                    │
+│ on.py           │ 四种消息解析；bytes 路径和 text 路径；非   │
+│                 │ UTF-8 处理                                 │
+├─────────────────┼────────────────────────────────────────────┤
+│ test_ripgrep_cl │ 精确符号搜索；正则特殊字符；无结果；结果截 │
+│ ient.py         │ 断；超时；中文搜索；路径含空格             │
+├─────────────────┼────────────────────────────────────────────┤
+│ test_query_anal │ CamelCase 拆分；snake_case；引号内容；中文 │
+│ yzer.py         │ 片段；去重；主次词分类                     │
+├─────────────────┼────────────────────────────────────────────┤
+│ test_candidate_ │ 单路召回；多路聚合；证据合并；空结果处理   │
+│ generator.py    │                                            │
+└─────────────────┴────────────────────────────────────────────┘
+
+评测
+
+最后 5 条小型评测用来量化效果：
+
+- Recall：相关文件被找回的比例（越高越好）
+- Hit Rate：至少命中一个相关文件的查询比例
+- Candidate Size：平均返回多少个候选（太多了 Ranker 压力大，太少了可能漏）
+
+---
+
 今日最终目录
 codeteam/
-├── symbols/
+├── search/
 │   ├── models.py
-│   ├── extractor.py
-│   └── index.py
-│
-├── imports/
-│   ├── models.py
-│   ├── extractor.py
-│   ├── module_index.py
-│   ├── resolver.py
-│   └── graph.py
+│   ├── ripgrep.py
+│   ├── query_analyzer.py
+│   ├── candidate_generator.py
+│   └── json_decoder.py
 │
 └── repository/
-    └── source_roots.py
+    └── filename_index.py
 
 tests/
-├── symbols/
-│   ├── test_extractor.py
-│   └── test_index.py
+├── search/
+│   ├── test_ripgrep_client.py
+│   ├── test_ripgrep_json.py
+│   ├── test_query_analyzer.py
+│   └── test_candidate_generator.py
 │
-└── imports/
-    ├── test_extractor.py
-    ├── test_resolver.py
-    └── test_graph.py
+└── fixtures/
+    └── search_repo/
+
+evals/
+├── file_retrieval_day4.jsonl
+└── evaluate_day4.py
 
 artifacts/
-├── symbols.json
-├── imports.json
-└── import_graph.json
-今天最核心的工业化认识是：
-AST / Tree-sitter
-只提供语法节点
-
-SymbolExtractor
-把节点转换成代码实体和引用事实
-
-Qualified Name + Symbol ID
-区分同名实体
-
-ImportResolver
-把模块名称映射成仓库文件
-
-ImportGraph
-把分散的文件关系变成可查询图
+└── search_results.json
+今天最关键的工业化认识是：
+ripgrep
+负责快速发现文本证据
 
 SymbolIndex
-让 Coding Agent 不必反复扫描整个仓库
+负责发现结构化代码实体
+
+QueryAnalyzer
+负责把自然语言拆成可搜索信号
+
+CandidateGenerator
+负责多路召回、聚合和保留证据
+
+FileRanker
+下一天才负责决定谁最相关
+
+ContextSelector
+之后才真正读取少量代码
 }}
 
 ---
