@@ -1,0 +1,140 @@
+{
+  "eval_results": [
+    {
+      "id": "auth-001",
+      "query": "修复 InvalidRefreshTokenError 导致接口返回 500 的问题",
+      "category": "exception_and_error_code",
+      "gold_files": [
+        "auth/service.py"
+      ],
+      "filename": {
+        "recall": 0.0,
+        "hit": 0,
+        "candidate_size": 0
+      },
+      "ripgrep": {
+        "recall": 1.0,
+        "hit": 1,
+        "candidate_size": 4
+      },
+      "symbol": {
+        "recall": 1.0,
+        "hit": 1,
+        "candidate_size": 1
+      }
+    },
+    {
+      "id": "symbol-001",
+      "query": "UserService 类在哪里定义",
+      "category": "exact_symbol",
+      "gold_files": [
+        "auth/service.py"
+      ],
+      "filename": {
+        "recall": 1.0,
+        "hit": 1,
+        "candidate_size": 1
+      },
+      "ripgrep": {
+        "recall": 1.0,
+        "hit": 1,
+        "candidate_size": 4
+      },
+      "symbol": {
+        "recall": 1.0,
+        "hit": 1,
+        "candidate_size": 1
+      }
+    },
+    {
+      "id": "error-msg-001",
+      "query": "修复报错 \"Token has expired\" 的问题",
+      "category": "error_message",
+      "gold_files": [
+        "auth/service.py",
+        "中文注释.py"
+      ],
+      "filename": {
+        "recall": 0.0,
+        "hit": 0,
+        "candidate_size": 0
+      },
+      "ripgrep": {
+        "recall": 1.0,
+        "hit": 1,
+        "candidate_size": 3
+      },
+      "symbol": {
+        "recall": 0.0,
+        "hit": 0,
+        "candidate_size": 0
+      }
+    },
+    {
+      "id": "chinese-001",
+      "query": "修复登录接口抛出 InvalidTokenError 后返回 500 的问题",
+      "category": "chinese_business",
+      "gold_files": [
+        "auth/service.py",
+        "中文注释.py"
+      ],
+      "filename": {
+        "recall": 0.0,
+        "hit": 0,
+        "candidate_size": 0
+      },
+      "ripgrep": {
+        "recall": 1.0,
+        "hit": 1,
+        "candidate_size": 4
+      },
+      "symbol": {
+        "recall": 0.0,
+        "hit": 0,
+        "candidate_size": 0
+      }
+    },
+    {
+      "id": "cross-file-001",
+      "query": "UserService 依赖了哪些类的实现",
+      "category": "cross_file_dependency",
+      "gold_files": [
+        "auth/service.py",
+        "auth/repository.py",
+        "errors.py"
+      ],
+      "filename": {
+        "recall": 0.3333,
+        "hit": 1,
+        "candidate_size": 1
+      },
+      "ripgrep": {
+        "recall": 1.0,
+        "hit": 1,
+        "candidate_size": 4
+      },
+      "symbol": {
+        "recall": 0.3333,
+        "hit": 1,
+        "candidate_size": 1
+      }
+    }
+  ],
+  "summary": {
+    "filename": {
+      "avg_recall": 0.26666,
+      "hit_rate": 0.4,
+      "avg_candidate_size": 0.4
+    },
+    "ripgrep": {
+      "avg_recall": 1.0,
+      "hit_rate": 1.0,
+      "avg_candidate_size": 3.8
+    },
+    "symbol": {
+      "avg_recall": 0.46665999999999996,
+      "hit_rate": 0.6,
+      "avg_candidate_size": 0.6
+    }
+  }
+}

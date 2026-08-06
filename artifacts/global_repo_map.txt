@@ -1,0 +1,18 @@
+# Repository map (global)
+
+AGENTS.md:
+
+pyproject.toml:
+
+src/main.py:
+│ create_app() -> FastAPI
+
+src/auth/service.py:
+│ class AuthService
+│ authenticate(username: str, password: str) -> User
+│ refresh_access_token(token: str) -> AccessToken
+
+src/common/database.py:
+│ create_session() -> AsyncSession
+
+# ... 72 lower-ranked files omitted

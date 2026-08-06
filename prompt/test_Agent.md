@@ -1120,469 +1120,333 @@ stderr
 ---
 
 {{
-    一次完整查询示例
-用户输入：
-修复 `InvalidRefreshTokenError` 未被登录接口捕获，
-导致 POST /api/auth/refresh 返回 HTTP 500 的问题。
-QueryAnalyzer
-{
-  "quoted_literals": [
-    "InvalidRefreshTokenError"
-  ],
-  "exception_names": [
-    "InvalidRefreshTokenError"
-  ],
-  "error_codes": [
-    "500"
-  ],
-  "identifiers": [
-    "InvalidRefreshTokenError",
-    "POST",
-    "HTTP"
-  ],
-  "paths": [],
-  "primary_terms": [
-    "InvalidRefreshTokenError",
-    "/api/auth/refresh"
-  ],
-  "secondary_terms": [
-    "500",
-    "Invalid",
-    "Refresh",
-    "Token",
-    "Error"
-  ]
-}
-SymbolIndex
-src/auth/exceptions.py
-定义 InvalidRefreshTokenError
-ripgrep
+  二十一、测试任务
+1. 同一查询结果稳定
+def test_same_query_is_deterministic(
+    ranker: FileRanker,
+    candidates: list[CandidateFile],
+) -> None:
+    first = ranker.rank(candidates)
+    second = ranker.rank(
+        list(reversed(candidates))
+    )
+
+    assert [
+        item.path
+        for item in first
+    ] == [
+        item.path
+        for item in second
+    ]
+候选输入顺序不同，最终结果仍应一致。
+
+---
+2. 无查询仍能展示核心结构
+准备：
+src/main.py
 src/auth/service.py
-抛出 InvalidRefreshTokenError
-
-src/auth/api.py
-包含 /api/auth/refresh
-
-tests/auth/test_refresh.py
-断言 status_code == 500
-ImportGraph
-api.py → service.py
-service.py → exceptions.py
-测试映射
-src/auth/api.py
-→ tests/auth/test_api.py
-
-src/auth/service.py
-→ tests/auth/test_service.py
-候选集合
-src/auth/exceptions.py
-src/auth/service.py
-src/auth/api.py
-tests/auth/test_refresh.py
-tests/auth/test_api.py
-tests/auth/test_service.py
-下一天再正式排序出 Top 5。
+src/common/database.py
+README.md
+generated/client.py
+无 Query 时应优先出现：
+main.py
+auth/service.py
+common/database.py
+重要配置
+不能：
+Repo Map 为空
 
 ---
-二十一、测试设计
-1. 精确符号
-仓库：
-class UserService:
-    pass
-查询：
-UserService
-验证：
-使用 -F
-成功找到类名
-Candidate 保留 symbol 和 ripgrep 两类原因
-
----
-2. 正则特殊字符
-文件：
-value = foo(bar)[0]
-查询：
-foo(bar)[0]
-验证：
-Literal 模式能够匹配
-不会被解释为正则
-
----
-3. 错误信息
-文件：
-raise RuntimeError(
-    "Token has expired"
-)
-查询：
-修复报错 "Token has expired"
-验证：
-QueryAnalyzer 提取引号文本
-RipgrepClient 使用精确搜索
-
----
-4. 中文查询
-查询：
-修复登录接口抛出 InvalidTokenError 后返回 500 的问题
-验证：
-不因中文报错
-提取 InvalidTokenError
-提取 500
-保留中文片段
-
----
-5. 路径带空格
-文件：
-src/legacy auth/service.py
-验证：
-argv 中路径是一个完整参数
-不需要手工引号
-不会拆成两个参数
-
----
-6. 无结果
-查询：
-DefinitelyNotExistingSymbol
-验证：
-返回 matches=[]
-不是系统异常
-CandidateGenerator 正常继续其他召回源
-
----
-7. 超过上限
-创建 200 个命中。
-query.max_results = 10
-验证：
-只保留最多 10 个 Match
-truncated=True
-子进程被终止
-不会把全部输出读入内存
-
----
-8. 搜索超时
-不要依赖真实大仓库制造超时。
-注入一个假的 rg：
-# fake_rg.py
-import time
-
-time.sleep(5)
-配置：
-client = RipgrepClient(
-    executable=str(fake_rg_path)
+3. 查询变化时排名变化
+auth_rank = ranker.rank(
+    candidates_for(
+        "refresh token error"
+    )
 )
 
-query.timeout_seconds = 0.1
-验证：
-抛 SearchTimeoutError
-子进程被杀死
-没有遗留进程
+order_rank = ranker.rank(
+    candidates_for(
+        "order export memory"
+    )
+)
+
+assert auth_rank[0].path != (
+    order_rank[0].path
+)
+进一步验证：
+auth 查询 Top 5 中至少 3 个 auth 文件
+order 查询 Top 5 中至少 3 个 order 文件
 
 ---
-二十二、建议的 pytest 结构
-tests/
-├── search/
-│   ├── test_ripgrep_client.py
-│   ├── test_ripgrep_json.py
-│   ├── test_query_analyzer.py
-│   └── test_candidate_generator.py
+4. Generated 不占主要 Map
+构造：
+generated/client.py：500 个 Symbol
+src/client_wrapper.py：5 个 Symbol
+查询：
+修改客户端请求重试逻辑
+即使 Generated Symbol 数量很多，也应优先：
+client_wrapper.py
+除非查询明确写出：
+generated/client.py
+
+---
+5. Map 不超过预算
+def test_map_never_exceeds_budget() -> None:
+    repo_map = builder.build(
+        ranked_files=ranked_files,
+        symbol_index=symbol_index,
+        query="refresh token",
+        mode="query",
+    )
+
+    text = renderer.render(repo_map)
+    used = token_counter.count(text)
+
+    assert used <= 1024
+建议测试：
+预算 128
+预算 256
+预算 512
+预算 1024
+
+---
+6. 大文件只展示相关符号
+文件包含：
+100 个函数
+查询只命中：
+refresh_access_token
+Map 应包含：
+refresh_access_token
+相关异常辅助函数
+而不是全部 100 个函数。
+
+---
+7. 一跳优于两跳
+图：
+api.py → service.py → repository.py
+查询直接命中 api.py。
+断言：
+score(api.py)
+>
+score(service.py)
+>
+score(repository.py)
+除非 repository.py 有更强的直接查询证据。
+
+---
+8. PageRank 不能压过精确查询
+构造：
+common.py
+被 100 个文件 Import
+
+rare_bug.py
+精确定义 UserSpecifiedRareError
+查询：
+UserSpecifiedRareError
+断言：
+rare_bug.py
+排名高于
+common.py
+
+---
+二十二、Snapshot Test
+Repo Map 是文本格式，非常适合 Snapshot Test。
+def test_query_repo_map_snapshot(
+    snapshot,
+) -> None:
+    repo_map = builder.build(
+        ranked_files=ranked_files,
+        symbol_index=symbol_index,
+        query="refresh token error",
+        mode="query",
+    )
+
+    rendered = renderer.render(repo_map)
+
+    snapshot.assert_match(
+        rendered,
+        "query_refresh_token.txt",
+    )
+当 Renderer 变化时，可以直接观察：
++ 新增了 test_refresh.py
+- 删除了 generated/client.py
+比只断言文件数更容易发现排序退化。
+
+---
+二十三、今日产出示例
+global_repo_map.txt
+# Repository map (global)
+
+AGENTS.md
+
+pyproject.toml
+
+src/main.py:
+│ create_app() -> FastAPI
+
+src/auth/service.py:
+│ class AuthService:
+│     authenticate(
+│         username: str,
+│         password: str
+│     ) -> User
+│     refresh_access_token(
+│         token: str
+│     ) -> AccessToken
+
+src/users/service.py:
+│ class UserService:
+│     get_user(user_id: int) -> User
+│     create_user(data: UserCreate) -> User
+
+src/common/database.py:
+│ create_session() -> AsyncSession
+
+# ... 72 lower-ranked files omitted
+
+---
+query_repo_map.txt
+# Repository map (query)
+# Query: 修复 InvalidRefreshTokenError 导致 refresh 接口返回 500
+
+src/auth/exceptions.py:
+│ class InvalidRefreshTokenError(TokenError)
+
+src/auth/service.py:
+│ class AuthService:
+│     refresh_access_token(
+│         token: str
+│     ) -> AccessToken
+│     _decode_refresh_token(
+│         token: str
+│     ) -> TokenPayload
+
+src/auth/api.py:
+│ class AuthController:
+│     refresh(
+│         request: RefreshRequest
+│     ) -> TokenResponse
+
+tests/auth/test_refresh.py:
+│ test_expired_token_returns_401()
+│ test_invalid_token_returns_401()
+
+src/auth/repository.py:
+│ class TokenRepository:
+│     find(token: str) -> RefreshToken | None
+
+# ... 18 lower-ranked files omitted
+今日最终目录
+codeteam/
+├── ranking/
+│   ├── models.py
+│   ├── file_ranker.py
+│   ├── symbol_ranker.py
+│   └── pagerank.py
 │
-└── fixtures/
-    └── search_repo/
-核心测试：
-async def test_literal_special_characters(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "sample.py"
-    source.write_text(
-        "value = foo(bar)[0]\n",
-        encoding="utf-8",
-    )
+├── repomap/
+│   ├── models.py
+│   ├── builder.py
+│   ├── renderer.py
+│   ├── compressor.py
+│   └── budget.py
+│
+└── usage/
+    └── token_counter.py
 
-    client = RipgrepClient()
+tests/
+├── ranking/
+│   ├── test_file_ranker.py
+│   ├── test_symbol_ranker.py
+│   └── test_pagerank.py
+│
+└── repomap/
+    ├── test_builder.py
+    ├── test_renderer.py
+    ├── test_budget.py
+    └── snapshots/
 
-    result = await client.search(
-        tmp_path,
-        SearchQuery(
-            pattern="foo(bar)[0]",
-            mode=SearchMode.LITERAL,
-        ),
-    )
+artifacts/
+├── global_repo_map.txt
+├── query_repo_map.txt
+└── ranking_debug.json
+今天最重要的工程链路是：
+CandidateGenerator
+负责“不漏”
 
-    assert len(result.matches) == 1
-    assert (
-        result.matches[0].path
-        == "sample.py"
-    )
-结果上限：
-async def test_global_result_limit(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "many.txt"
-    source.write_text(
-        "\n".join(
-            f"match {index}"
-            for index in range(200)
-        ),
-        encoding="utf-8",
-    )
+FileRanker
+负责“谁优先”
 
-    client = RipgrepClient()
+SymbolRanker
+负责“文件中展示什么”
 
-    result = await client.search(
-        tmp_path,
-        SearchQuery(
-            pattern="match",
-            max_results=10,
-        ),
-    )
+RepoMapBuilder
+负责“预算内选择多少”
 
-    assert len(result.matches) == 10
-    assert result.truncated
-QueryAnalyzer：
-def test_analyze_mixed_chinese_query() -> None:
-    analyzer = QueryAnalyzer()
-
-    result = analyzer.analyze(
-        "修复登录接口中的 "
-        "`InvalidRefreshTokenError`，"
-        "该异常导致 HTTP 500"
-    )
-
-    assert (
-        "InvalidRefreshTokenError"
-        in result.quoted_literals
-    )
-    assert (
-        "InvalidRefreshTokenError"
-        in result.exception_names
-    )
-    assert "500" in result.error_codes
-
-    assert "Invalid" in (
-        result.identifier_parts
-    )
-    assert "Refresh" in (
-        result.identifier_parts
-    )
+RepoMapRenderer
+负责“怎样高密度地展示给模型”
 
 ---
-二十三、小型评测集
-建立：
-evals/file_retrieval_day4.jsonl
-每行：
-{
-  "id": "auth-001",
-  "query": "修复 InvalidRefreshTokenError 导致接口返回 500 的问题",
-  "gold_files": [
-    "src/auth/api.py",
-    "src/auth/service.py",
-    "src/auth/exceptions.py",
-    "tests/auth/test_refresh.py"
-  ],
-  "category": "exception_and_error_code"
-}
-建议五条任务：
-1. 精确符号定位
-2. 错误消息定位
-3. 中文业务描述 + 异常名
-4. 显式路径定位
-5. 跨文件调用定位
+测试 — 验证所有设计假设
 
----
-1. 三组基线
-Filename
-只使用：
-文件名和路径 Token
-Ripgrep
-只使用：
-QueryAnalyzer
-+
-文本搜索
-Symbol
-只使用：
-SymbolIndex exact/prefix
-今天暂时不比较：
-Import Graph
-测试文件扩展
-完整混合排序
-这些可在明天加入。
+至少覆盖 8 个测试：
 
----
-2. 今日指标
-由于正式排序器还没实现，今天主要统计：
-Candidate Recall
-候选集合中命中的 Gold 文件数
-÷
-Gold 文件总数
-Hit
-候选中是否至少出现一个 Gold 文件：
-命中任意一个 = 1
-否则 = 0
-Candidate Size
-平均返回多少候选文件
-结果示例：
-暂时无法在飞书文档外展示此内容
-这里的数值只展示报告格式，不是目标结果。
-你应该分析：
-Filename：
-精确，但容易漏掉业务名称不同的文件
-
-Ripgrep：
-覆盖率高，但常见词会产生噪声
-
-Symbol：
-定义定位准确，但错误文本和配置问题召回较弱
-
----
-二十四、search_results.json 格式
-{
-  "query": {
-    "raw": "修复 InvalidRefreshTokenError 导致 HTTP 500",
-    "analyzed": {
-      "exception_names": [
-        "InvalidRefreshTokenError"
-      ],
-      "error_codes": [
-        "500"
-      ],
-      "primary_terms": [
-        "InvalidRefreshTokenError"
-      ],
-      "secondary_terms": [
-        "500",
-        "Invalid",
-        "Refresh",
-        "Token",
-        "Error"
-      ]
-    }
-  },
-  "searches": [
-    {
-      "pattern": "InvalidRefreshTokenError",
-      "mode": "literal",
-      "matched_files": [
-        "src/auth/exceptions.py",
-        "src/auth/service.py",
-        "tests/auth/test_refresh.py"
-      ],
-      "match_count": 6,
-      "truncated": false,
-      "elapsed_ms": 18
-    }
-  ],
-  "candidates": [
-    {
-      "path": "src/auth/exceptions.py",
-      "preliminary_score": 9.0,
-      "evidence": [
-        {
-          "source": "symbol_exact",
-          "query_term": "InvalidRefreshTokenError",
-          "detail": "Defines exact class",
-          "weight": 5.0
-        },
-        {
-          "source": "ripgrep",
-          "query_term": "InvalidRefreshTokenError",
-          "detail": "Matched at line 6",
-          "line_number": 6,
-          "weight": 2.0
-        }
-      ]
-    }
-  ]
-}
+┌──────────────────────┬───────────────────────────────────────┐
+│         测试         │               验证什么                │
+├──────────────────────┼───────────────────────────────────────┤
+│ 同一查询结果稳定     │ 候选顺序不同，排序结果相同            │
+├──────────────────────┼───────────────────────────────────────┤
+│ 无查询不返回空 Map   │ Global Map 应有核心模块               │
+├──────────────────────┼───────────────────────────────────────┤
+│ 查询变化排名变化     │ auth 查询 → auth 文件排前；order 查询 │
+│                      │  → order 文件排前                     │
+├──────────────────────┼───────────────────────────────────────┤
+│ Generated 不占主要   │ 500 符号的生成文件 < 5 符号的人工文件 │
+│ Map                  │                                       │
+├──────────────────────┼───────────────────────────────────────┤
+│ Map 不超预算         │ token_counter.count(rendered) ≤       │
+│                      │ budget                                │
+├──────────────────────┼───────────────────────────────────────┤
+│ 大文件只展示相关符号 │ 100 函数文件只展示查询命中的 2-3 个   │
+├──────────────────────┼───────────────────────────────────────┤
+│ 一跳优于两跳         │ score(api.py) > score(service.py) >   │
+│                      │ score(repository.py)                  │
+├──────────────────────┼───────────────────────────────────────┤
+│ PageRank             │ 定义了 RareError 的文件 > 被 100      │
+│ 不压过精确查询       │ 个文件依赖的 common.py                │
+└──────────────────────┴───────────────────────────────────────┘
 
 ---
 测试思路
 
-测试小仓库设计
+准备一个小型测试仓库，包含这些文件：
 
-在 tests/fixtures/search_repo/ 下创建一个小型 Python 项目，包含：
+test_repo/
+├── src/
+│   ├── main.py                ← 入口
+│   ├── auth/
+│   │   ├── service.py         ← class AuthService (多个方法)
+│   │   ├── api.py             ← import service
+│   │   └── exceptions.py      ← class InvalidRefreshTokenError
+│   ├── orders/
+│   │   ├── exporter.py        ← 导出相关
+│   │   └── worker.py          ← 订单 worker
+│   ├── common/
+│   │   └── database.py        ← 被 3 个文件 import
+│   └── generated/
+│       └── openapi_client.py  ← 500 个类（生成代码）
+├── tests/
+│   └── test_auth.py
+├── AGENTS.md
+└── pyproject.toml
 
-search_repo/
-├── auth/
-│   ├── __init__.py
-│   ├── service.py        # class UserService, def create_user
-│   └── repository.py     # class UserRepository
-├── errors.py              # class ServiceError, TIMEOUT_ERROR = "ERR_TIMEOUT"
-├── 中文注释.py             # 包含中文注释的文件
-└── README.md              # 普通文本文件（用来验证 ripgrep 默认跳过）
-
-各测试文件覆盖的场景
-
-┌─────────────────┬────────────────────────────────────────────┐
-│    测试文件     │                  覆盖场景                  │
-├─────────────────┼────────────────────────────────────────────┤
-│ test_ripgrep_js │ begin/match/context/end                    │
-│ on.py           │ 四种消息解析；bytes 路径和 text 路径；非   │
-│                 │ UTF-8 处理                                 │
-├─────────────────┼────────────────────────────────────────────┤
-│ test_ripgrep_cl │ 精确符号搜索；正则特殊字符；无结果；结果截 │
-│ ient.py         │ 断；超时；中文搜索；路径含空格             │
-├─────────────────┼────────────────────────────────────────────┤
-│ test_query_anal │ CamelCase 拆分；snake_case；引号内容；中文 │
-│ yzer.py         │ 片段；去重；主次词分类                     │
-├─────────────────┼────────────────────────────────────────────┤
-│ test_candidate_ │ 单路召回；多路聚合；证据合并；空结果处理   │
-│ generator.py    │                                            │
-└─────────────────┴────────────────────────────────────────────┘
-
-评测
-
-最后 5 条小型评测用来量化效果：
-
-- Recall：相关文件被找回的比例（越高越好）
-- Hit Rate：至少命中一个相关文件的查询比例
-- Candidate Size：平均返回多少个候选（太多了 Ranker 压力大，太少了可能漏）
+这样你就能验证：
+- 「refresh token error」→ auth 文件排前三
+- 「order export」→ orders 文件排前三
+- Generated 文件即使有 500 个类也不应该盖过 src/auth/service.py
+- common/database.py 的 Global PageRank 高但不影响特定查询的排名
 
 ---
-
-今日最终目录
-codeteam/
-├── search/
-│   ├── models.py
-│   ├── ripgrep.py
-│   ├── query_analyzer.py
-│   ├── candidate_generator.py
-│   └── json_decoder.py
-│
-└── repository/
-    └── filename_index.py
-
-tests/
-├── search/
-│   ├── test_ripgrep_client.py
-│   ├── test_ripgrep_json.py
-│   ├── test_query_analyzer.py
-│   └── test_candidate_generator.py
-│
-└── fixtures/
-    └── search_repo/
-
-evals/
-├── file_retrieval_day4.jsonl
-└── evaluate_day4.py
-
-artifacts/
-└── search_results.json
-今天最关键的工业化认识是：
-ripgrep
-负责快速发现文本证据
-
-SymbolIndex
-负责发现结构化代码实体
-
-QueryAnalyzer
-负责把自然语言拆成可搜索信号
-
-CandidateGenerator
-负责多路召回、聚合和保留证据
-
-FileRanker
-下一天才负责决定谁最相关
-
-ContextSelector
-之后才真正读取少量代码
 }}
 
 ---

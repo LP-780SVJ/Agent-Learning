@@ -1,0 +1,22 @@
+# Repository map (query)
+# Query: 修复 InvalidRefreshTokenError 导致 refresh 接口返回 500
+
+src/auth/exceptions.py:
+│ class InvalidRefreshTokenError(TokenError)
+
+src/auth/service.py:
+│ refresh_access_token(token: str) -> AccessToken
+│ _decode_refresh_token(token: str) -> TokenPayload
+
+src/auth/api.py:
+│ class AuthController
+│ refresh(request: RefreshRequest) -> TokenResponse
+
+tests/test_auth.py:
+│ test_expired_token_returns_401()
+│ test_invalid_token_returns_401()
+
+src/common/database.py:
+│ create_session
+
+# ... 18 lower-ranked files omitted

@@ -1,0 +1,5 @@
+{"id": "auth-001", "query": "修复 InvalidRefreshTokenError 导致接口返回 500 的问题", "gold_files": ["auth/service.py"], "category": "exception_and_error_code"}
+{"id": "symbol-001", "query": "UserService 类在哪里定义", "gold_files": ["auth/service.py"], "category": "exact_symbol"}
+{"id": "error-msg-001", "query": "修复报错 \"Token has expired\" 的问题", "gold_files": ["auth/service.py", "中文注释.py"], "category": "error_message"}
+{"id": "chinese-001", "query": "修复登录接口抛出 InvalidTokenError 后返回 500 的问题", "gold_files": ["auth/service.py", "中文注释.py"], "category": "chinese_business"}
+{"id": "cross-file-001", "query": "UserService 依赖了哪些类的实现", "gold_files": ["auth/service.py", "auth/repository.py", "errors.py"], "category": "cross_file_dependency"}
