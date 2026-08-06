@@ -5,6 +5,21 @@ Token 计数器：估算文本占用的 Token 数量。
 生产环境可替换为 tiktoken 或模型适配层的真实 tokenizer。
 """
 from __future__ import annotations
+from typing import Protocol
+
+class TokenCounter(Protocol):
+    """Token 计数器的接口协议。
+
+    所有 Token 计数器必须实现 count_text 方法。
+    不同实现可以有不同的精度和性能特征：
+    - ApproximateTokenCounter：字节数/4，快但不精确
+    - TiktokenCounter：本地精确计数，需要模型分词器
+    - ProviderTokenCounter：调用 API 端点，最精确但最慢
+    """
+
+    def count_text(self, text: str) -> int:
+        """估算或精确计算文本的 Token 数量。"""
+        ...
 
 
 class ApproximateTokenCounter:

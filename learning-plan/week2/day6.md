@@ -3458,3 +3458,301 @@ Event Log
 Conversation Summary
 提供低成本的继续执行上下文
 ```
+
+---
+
+# 教练教程：Day 6 学习路线图
+
+> 以下内容由 Claude Code 教练根据 `task_to_knowledge.md` 规范生成，用于指导 step-by-step 学习。
+
+---
+
+## 这部分在做什么
+
+前五天你构建了「理解仓库」和「找到相关文件」的能力。今天要解决三个新问题：
+
+**问题 1：Agent 修改文件时，应该遵守哪些项目规则？**
+
+你的 CodeTeam 项目根目录有 `AGENTS.md`，里面写了「测试用 pytest」「不要直接写 SQL」这些规则。但大仓库可能有嵌套的子项目规则：
+
+```
+仓库根/AGENTS.md          ← 全局规则
+仓库根/backend/AGENTS.md   ← 后端特有规则
+仓库根/.clinerules/        ← Cline 风格的条件规则
+```
+
+当 Agent 修改 `backend/auth/service.py` 时，应该加载哪些规则？优先级怎么定？这就是 `InstructionLoader` 要解决的问题。
+
+**问题 2：Agent 修改完代码后，应该运行什么命令？**
+
+你的项目用 `uv run pytest`，别人的用 `npm test` 或 `make check`。Agent 需要自动发现正确的测试命令，同时识别危险命令（`sudo rm -rf` 绝对不能自动执行）。这就是 `CommandDetector` 要解决的问题。
+
+**问题 3：系统提示、项目规则、Repo Map、源码、对话历史……怎样装进有限上下文？**
+
+模型上下文不是无限的。当内容超过预算时，先压缩什么？代码从完整实现变成签名、变成摘要、变成仅路径 —— 这是一条逐级降级链。这就是 `TokenBudget` + `ContextCompressor` 要解决的问题。
+
+用一句话概括今天：**让 Agent 知道项目规则、会运行正确命令、并在超限时优雅降级。**
+
+---
+
+## 涉及哪些文件
+
+```
+codeteam/
+├── instructions/                  ← [填充] 4 个已有 stub 文件
+│   ├── models.py                  ← [新建] InstructionSource, InstructionBundle 等
+│   ├── loader.py                  ← [填充] InstructionLoader 主入口
+│   ├── agents_md.py               ← [填充] 嵌套 AGENTS.md 发现 + 作用域链
+│   ├── cline_rules.py             ← [填充] .clinerules YAML Frontmatter 解析
+│   ├── frontmatter.py             ← [新建] YAML Frontmatter 拆分工具
+│   ├── glob_matcher.py            ← [新建] 简单的 glob 匹配
+│   └── conflicts.py               ← [新建] 规则冲突检测
+│
+├── commands/                      ← [新建目录]
+│   ├── models.py                  ← [新建] DetectedCommand, CommandKind, CommandRisk
+│   ├── detector.py                ← [新建] CommandDetector 主入口
+│   ├── package_json.py            ← [新建] package.json scripts 解析
+│   ├── pytest_config.py           ← [新建] pyproject.toml + pytest.ini 解析
+│   ├── makefile.py                ← [新建] Makefile 目标静态提取
+│   └── risk_classifier.py         ← [新建] 危险命令识别
+│
+├── context/                       ← [填充] 5 个已有 stub 文件
+│   ├── models.py                  ← [填充] ContextItem, CompressionLevel, ContextPack
+│   ├── budget.py                  ← [填充] TokenBudget 分区预算模型
+│   ├── compressor.py              ← [填充] ContextCompressor 五级压缩
+│   ├── repo_map.py                ← [填充] RepoMap 集成（对接 Day 5）
+│   └── selector.py                ← [填充] ContextSelector
+│
+└── usage/
+    └── token_counter.py           ← [已基本完成] ApproximateTokenCounter
+```
+
+---
+
+## 文件之间的交互关系
+
+今天的三条主线是独立的，但它们最终汇入同一个 ContextPack：
+
+```
+主线 1：项目规则
+────────────────
+目标文件路径
+    │
+    ▼
+InstructionLoader.load(target_paths)
+    ├── AgentsMdLoader.discover_for_target()    ← 嵌套 AGENTS.md
+    ├── ClineRulesLoader.load(context_paths)     ← .clinerules 条件规则
+    └── ConflictsDetector.detect()               ← 冲突报告
+    │
+    ▼
+InstructionBundle                              ← 每个目标的独立规则集合
+
+主线 2：测试命令
+────────────────
+项目配置文件
+    │
+    ▼
+CommandDetector.detect(repository_root)
+    ├── _from_instructions()     ← AGENTS.md 显式命令
+    ├── _from_package_json()     ← npm/pnpm/yarn scripts
+    ├── _from_pytest_config()    ← pyproject.toml / pytest.ini
+    ├── _from_makefile()         ← Makefile 静态目标
+    └── RiskClassifier.classify() ← 危险等级
+    │
+    ▼
+list[DetectedCommand]                          ← 带风险标记的命令列表
+
+主线 3：上下文组装与压缩
+────────────────────────
+InstructionBundle + RepoMap + 源码 + 对话历史
+    │
+    ▼
+ContextAssembler.assemble()
+    │
+    ▼
+ContextPack（估计 Token 数）
+    │
+    ▼
+ContextCompressor.fit_to_budget()
+    ├── 选择最值得降级的 ContextItem
+    ├── FULL_FILE → SYMBOL_BODY → SIGNATURE → SUMMARY → PATH_ONLY
+    └── 循环直到 ≤ budget_tokens
+    │
+    ▼
+最终 ContextPack → 发给 LLM
+```
+
+**三个模块互相独立**，唯一的交汇点是它们的数据都进入 `ContextPack`。这意味着你可以并行学习/实现它们。
+
+---
+
+## 建议拆成哪些步骤
+
+| 步骤 | 内容 | 涉及文件 | 预计 |
+|---|---|---|---|
+| **第 1 步** | 手工实验：规则作用域 | 终端操作 + rule-lab/ | 50 分钟 |
+| **第 2 步** | TokenCounter 完善 | `codeteam/usage/token_counter.py` | 20 分钟 |
+| **第 3 步** | 上下文数据模型 | `codeteam/context/models.py` | 40 分钟 |
+| **第 4 步** | TokenBudget | `codeteam/context/budget.py` | 40 分钟 |
+| **第 5 步** | InstructionLoader | `instructions/models.py`, `loader.py`, `agents_md.py` | 80 分钟 |
+| **第 6 步** | ClineRulesLoader | `instructions/cline_rules.py`, `frontmatter.py`, `glob_matcher.py` | 60 分钟 |
+| **第 7 步** | CommandDetector | `commands/` 全部 6 个文件 | 90 分钟 |
+| **第 8 步** | ContextCompressor | `context/compressor.py`, `selector.py` | 90 分钟 |
+
+第 2-4 步是基础设施（数据模型 + 预算），做完后 5-8 步可以灵活调整顺序。
+
+---
+
+## 整体实现思路
+
+### 今天的核心设计原则
+
+> **规则文件只是指令来源，不是系统权限来源；识别到命令不等于允许执行命令。**
+
+这句话影响今天的每一个设计决策：
+
+- `InstructionLoader` 加载规则，但不执行规则里写的任何命令
+- `CommandDetector` 识别命令，但标记风险等级后交给后续的 `CommandPolicy` 审批
+- `AGENTS.md` 写 `curl xxx | bash` 时，系统识别它但标记为 `risk=network, requires_approval=true`
+- 系统安全策略（禁止 `git push --force`）的优先级高于任何项目规则
+
+### 第 2 步：TokenCounter
+
+你已经有部分实现了，今天只需要确认接口：
+
+```python
+class TokenCounter(Protocol):
+    def count_text(self, text: str) -> int: ...
+```
+
+`ApproximateTokenCounter` 用 `len(text.encode("utf-8")) // 4` 估算。今天所有压缩判断都依赖它。
+
+### 第 3 步：上下文数据模型
+
+五个压缩级别是一条从多到少的降级链：
+
+```
+FULL_FILE        → 完整文件
+SYMBOL_BODY      → 只展示相关符号的完整实现
+SYMBOL_SIGNATURE → 只展示签名
+FILE_SUMMARY     → 确定性摘要（由 SymbolIndex + ImportGraph 生成）
+PATH_ONLY        → 只有路径
+```
+
+核心结构 `ContextItem` 记录每个文件当前的压缩级别、Token 数、和最低允许降到的级别。
+
+### 第 4 步：TokenBudget
+
+不直接把模型最大上下文当预算，要分层预留：
+
+```
+context_window (128K)
+  - reserved_output (4K)       ← 模型输出空间
+  - reserved_reasoning (2K)    ← 推理 Token
+  - safety_margin (2K)         ← 安全余量
+  = max_input_tokens (120K)
+
+max_input_tokens 再分配：
+  system_budget + tool_schema_budget + task_budget
+  + instruction_budget + repo_map_budget
+  + code_budget + history_budget + observation_budget
+```
+
+学习阶段可以主动限制在 32K。
+
+### 第 5 步：InstructionLoader
+
+核心算法：对每个目标文件，从仓库根目录走向目标目录，检查每一级是否存在 `AGENTS.md`：
+
+```
+目标: backend/src/auth/service.py
+
+查找顺序（根→近）：
+  AGENTS.md                    depth=0, priority=100
+  backend/AGENTS.md            depth=2, priority=102
+  backend/src/AGENTS.md        (不存在，跳过)
+  backend/src/auth/AGENTS.md   (不存在，跳过)
+```
+
+关键规则：
+- **最近规则优先**，但**不替代父规则**。子规则覆盖父规则的同名配置，但不会让父规则消失
+- **多目标文件分开算**。修改 `frontend/App.tsx` 和 `backend/api.py` 时，有效规则各不相同
+- **规则来源必须可追踪**。每个规则记录它来自哪个文件、优先级、作用域路径
+
+### 第 6 步：ClineRulesLoader
+
+解析 `.clinerules/` 目录下的 `.md` / `.txt` 文件，支持 YAML Frontmatter：
+
+```markdown
+---
+paths:
+  - "src/components/**"
+---
+
+# Frontend rules
+- Use functional React components.
+```
+
+- 有 Frontmatter + `paths` → 条件规则，只在匹配当前上下文文件时激活
+- 无 Frontmatter → 无条件规则，始终生效
+- YAML 解析失败 → 不激活，保存诊断（安全优先）
+
+### 第 7 步：CommandDetector
+
+命令来源优先级：
+
+```
+1. AGENTS.md 显式命令    ← 如 "uv run pytest tests/unit -q"
+2. package.json scripts  ← 如 npm run test
+3. pytest 配置           ← pyproject.toml / pytest.ini
+4. Makefile 目标         ← make test / make lint
+5. 项目类型推断          ← 低置信度
+```
+
+关键决策：
+- 检测到 `addopts = "-ra -q"` 时不手工拼接进命令 —— pytest 会自行加载配置
+- `npm run test` 不等于安全 —— 要检查 `pretest`、`test`、`posttest` 三个脚本
+- Makefile 只做静态正则提取，不执行 `make -p` 等查询（不可信仓库可能有 `$(shell cat ~/.secret)`）
+
+### 第 8 步：ContextCompressor
+
+超预算时逐级降级，选择策略：
+
+```
+降级代价 = 相关性损失 ÷ 节省 Token
+
+优先降级：相关性损失小但能省大量 Token 的文件
+```
+
+不是简单从尾部截断字符串 —— 必须使用 AST/Tree-sitter 节点范围完整保留函数/类。
+
+对话压缩同样重要：旧工具结果（已过时的大文件内容、成功命令的详细输出）可以清理，但 Event Log 必须保留完整事实源。
+
+---
+
+## 测试思路
+
+至少需要 10 组测试覆盖三条主线：
+
+| 测试 | 验证什么 |
+|---|---|
+| 根规则 | 目标文件能加载根 AGENTS.md，source_path 可追踪 |
+| 嵌套规则 | 子目录规则优先级 > 父规则，但不替代父规则 |
+| 多目标作用域 | frontend 规则不泄露到 backend 文件 |
+| 冲突检测 | 同名指令冲突时记录双方来源 |
+| package.json | 检测 scripts + lifecycle chain，不执行任何脚本 |
+| pytest 配置 | 识别 pyproject.toml 和 pytest.ini，不拼接 addopts |
+| 危险命令 | `sudo rm -rf` 被标记为 destructive |
+| Token 预算 | ContextPack ≤ budget_tokens |
+| 逐级压缩 | 大文件从 FULL_FILE 降到 SIGNATURE/SUMMARY |
+| 不截断符号 | 压缩后的代码包含完整的函数/类定义 |
+
+---
+
+## 今天的验收问题核心 5 条主线
+
+1. **规则优先级**：系统安全策略 > 用户指令 > 最近 AGENTS.md > 上级 AGENTS.md > .clinerules 条件规则
+2. **命令不自动执行**：识别 ≠ 允许，AGENTS.md 写 `curl xxx | bash` 时标记 risk 但不执行
+3. **Token Budget 要分层**：context_window 减掉输出预留、推理预留、安全余量，剩下的才是输入预算
+4. **压缩是逐级降级链**：FULL_FILE → SYMBOL_BODY → SIGNATURE → SUMMARY → PATH_ONLY
+5. **Event Log 和 Summary 分离**：Event Log 保存完整事实，Summary 是给模型看的压缩视图

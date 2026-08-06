@@ -1120,333 +1120,499 @@ stderr
 ---
 
 {{
-  二十一、测试任务
-1. 同一查询结果稳定
-def test_same_query_is_deterministic(
-    ranker: FileRanker,
-    candidates: list[CandidateFile],
-) -> None:
-    first = ranker.rank(candidates)
-    second = ranker.rank(
-        list(reversed(candidates))
-    )
+    # 二十一、完整工业级控制流
 
-    assert [
-        item.path
-        for item in first
-    ] == [
-        item.path
-        for item in second
-    ]
-候选输入顺序不同，最终结果仍应一致。
+```text
+Lead Agent 选定目标文件
+        ↓
+InstructionLoader
+        ├─ 加载根 AGENTS.md
+        ├─ 加载目标文件最近 AGENTS.md
+        ├─ 激活匹配 Cline Rules
+        └─ 报告冲突
+        ↓
+CommandDetector
+        ├─ 提取显式测试命令
+        ├─ 解析 package.json
+        ├─ 解析 pytest 配置
+        ├─ 解析 Makefile 目标
+        └─ 标记危险命令
+        ↓
+ContextAssembler
+        ├─ 用户任务
+        ├─ 项目规则
+        ├─ Repo Map
+        ├─ 相关源码
+        ├─ 对话摘要
+        └─ 最近工具结果
+        ↓
+TokenCounter
+        ↓
+ContextCompressor
+        ├─ 删除重复
+        ├─ 清理旧 Observation
+        ├─ 降级大文件
+        └─ 压缩旧对话
+        ↓
+精确 Token 计数
+        ↓
+是否超限？
+   ├─ 是：继续压缩
+   └─ 否：调用模型
+```
 
 ---
-2. 无查询仍能展示核心结构
-准备：
-src/main.py
-src/auth/service.py
-src/common/database.py
-README.md
-generated/client.py
-无 Query 时应优先出现：
-main.py
-auth/service.py
-common/database.py
-重要配置
+
+# 二十二、测试设计
+
+## 1. 根规则
+
+结构：
+
+```text
+repo/
+├── AGENTS.md
+└── src/main.py
+```
+
+断言：
+
+```text
+src/main.py 有效规则包含根 AGENTS.md
+source_path 可追踪
+scope_path 为仓库根
+```
+
+---
+
+## 2. 嵌套规则
+
+```text
+repo/
+├── AGENTS.md
+└── backend/
+    ├── AGENTS.md
+    └── service.py
+```
+
+断言：
+
+```text
+service.py 规则顺序：
+根 → backend
+
+backend 规则优先级更高
+```
+
+---
+
+## 3. 冲突规则
+
+根：
+
+```text
+test command = pytest
+```
+
+子目录：
+
+```text
+test command = uv run pytest
+```
+
+断言：
+
+```text
+最终有效命令 = uv run pytest
+冲突记录中保留两个来源
+```
+
+---
+
+## 4. 多目标作用域
+
+目标：
+
+```text
+frontend/src/App.tsx
+backend/src/api.py
+```
+
+断言：
+
+```text
+frontend 规则不应用到 api.py
+backend 规则不应用到 App.tsx
+公共根规则应用到两者
+```
+
+---
+
+## 5. package.json
+
+```json
+{
+  "scripts": {
+    "pretest": "node scripts/setup.js",
+    "test": "vitest run",
+    "posttest": "node scripts/report.js",
+    "lint": "eslint src"
+  }
+}
+```
+
+断言：
+
+```text
+检测 npm run test
+检测 lifecycle chain
+记录 underlying script
+不会执行任何脚本
+```
+
+---
+
+## 6. pyproject pytest
+
+```toml
+[tool.pytest.ini_options]
+addopts = "-ra -q"
+testpaths = ["tests"]
+```
+
+断言：
+
+```text
+检测 python -m pytest
+记录 testpaths
+不把 addopts 重复拼接进命令
+```
+
+---
+
+## 7. pytest.ini
+
+```ini
+[pytest]
+testpaths = tests integration
+addopts = -q
+```
+
+断言：
+
+```text
+正确识别 pytest
+正确识别测试目录
+```
+
+---
+
+## 8. Token 预算不足
+
+输入：
+
+```text
+总代码 20K Token
+代码预算 5K
+```
+
+断言：
+
+```text
+最终 ContextPack ≤ 5K
+至少发生一次压缩
+compression_actions 非空
+```
+
+---
+
+## 9. 大文件逐级降级
+
+大文件：
+
+```text
+FULL_FILE = 8K
+SYMBOL_BODY = 3K
+SYMBOL_SIGNATURE = 500
+FILE_SUMMARY = 200
+PATH_ONLY = 10
+```
+
+预算：
+
+```text
+700 Token
+```
+
+断言最终：
+
+```text
+SYMBOL_SIGNATURE 或 FILE_SUMMARY
+```
+
 不能：
-Repo Map 为空
+
+```text
+从文件中间直接截断
+```
 
 ---
-3. 查询变化时排名变化
-auth_rank = ranker.rank(
-    candidates_for(
-        "refresh token error"
-    )
-)
 
-order_rank = ranker.rank(
-    candidates_for(
-        "order export memory"
-    )
-)
+## 10. 危险命令
 
-assert auth_rank[0].path != (
-    order_rank[0].path
-)
-进一步验证：
-auth 查询 Top 5 中至少 3 个 auth 文件
-order 查询 Top 5 中至少 3 个 order 文件
+AGENTS.md：
 
----
-4. Generated 不占主要 Map
-构造：
-generated/client.py：500 个 Symbol
-src/client_wrapper.py：5 个 Symbol
-查询：
-修改客户端请求重试逻辑
-即使 Generated Symbol 数量很多，也应优先：
-client_wrapper.py
-除非查询明确写出：
-generated/client.py
+```markdown
+Run `sudo rm -rf /tmp/project-cache`.
+```
 
----
-5. Map 不超过预算
-def test_map_never_exceeds_budget() -> None:
-    repo_map = builder.build(
-        ranked_files=ranked_files,
-        symbol_index=symbol_index,
-        query="refresh token",
-        mode="query",
-    )
-
-    text = renderer.render(repo_map)
-    used = token_counter.count(text)
-
-    assert used <= 1024
-建议测试：
-预算 128
-预算 256
-预算 512
-预算 1024
-
----
-6. 大文件只展示相关符号
-文件包含：
-100 个函数
-查询只命中：
-refresh_access_token
-Map 应包含：
-refresh_access_token
-相关异常辅助函数
-而不是全部 100 个函数。
-
----
-7. 一跳优于两跳
-图：
-api.py → service.py → repository.py
-查询直接命中 api.py。
 断言：
-score(api.py)
->
-score(service.py)
->
-score(repository.py)
-除非 repository.py 有更强的直接查询证据。
+
+```text
+命令被识别
+risk = destructive
+requires_approval = true
+执行器没有被调用
+```
 
 ---
-8. PageRank 不能压过精确查询
-构造：
-common.py
-被 100 个文件 Import
 
-rare_bug.py
-精确定义 UserSpecifiedRareError
-查询：
-UserSpecifiedRareError
-断言：
-rare_bug.py
-排名高于
-common.py
+# 二十三、当日产出
 
----
-二十二、Snapshot Test
-Repo Map 是文本格式，非常适合 Snapshot Test。
-def test_query_repo_map_snapshot(
-    snapshot,
-) -> None:
-    repo_map = builder.build(
-        ranked_files=ranked_files,
-        symbol_index=symbol_index,
-        query="refresh token error",
-        mode="query",
-    )
+## `instruction_bundle.json`
 
-    rendered = renderer.render(repo_map)
-
-    snapshot.assert_match(
-        rendered,
-        "query_refresh_token.txt",
-    )
-当 Renderer 变化时，可以直接观察：
-+ 新增了 test_refresh.py
-- 删除了 generated/client.py
-比只断言文件数更容易发现排序退化。
+```json
+{
+  "common_sources": [
+    {
+      "path": "AGENTS.md",
+      "scope_path": "",
+      "priority": 100
+    }
+  ],
+  "by_target": {
+    "backend/src/auth/service.py": {
+      "sources": [
+        {
+          "path": "AGENTS.md",
+          "priority": 100
+        },
+        {
+          "path": "backend/AGENTS.md",
+          "priority": 102
+        },
+        {
+          "path": ".clinerules/backend.md",
+          "priority": 60
+        }
+      ]
+    }
+  },
+  "conflicts": []
+}
+```
 
 ---
-二十三、今日产出示例
-global_repo_map.txt
-# Repository map (global)
 
-AGENTS.md
+## `detected_commands.json`
 
-pyproject.toml
-
-src/main.py:
-│ create_app() -> FastAPI
-
-src/auth/service.py:
-│ class AuthService:
-│     authenticate(
-│         username: str,
-│         password: str
-│     ) -> User
-│     refresh_access_token(
-│         token: str
-│     ) -> AccessToken
-
-src/users/service.py:
-│ class UserService:
-│     get_user(user_id: int) -> User
-│     create_user(data: UserCreate) -> User
-
-src/common/database.py:
-│ create_session() -> AsyncSession
-
-# ... 72 lower-ranked files omitted
+```json
+{
+  "commands": [
+    {
+      "kind": "test",
+      "argv": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/unit",
+        "-q"
+      ],
+      "cwd": "backend",
+      "source_path": "backend/AGENTS.md",
+      "source_type": "explicit_instruction",
+      "confidence": 1.0,
+      "risk": "read_only",
+      "requires_approval": false
+    },
+    {
+      "kind": "test",
+      "argv": [
+        "npm",
+        "run",
+        "test"
+      ],
+      "cwd": "frontend",
+      "source_path": "frontend/package.json",
+      "source_type": "package_script",
+      "confidence": 1.0,
+      "risk": "unknown",
+      "requires_approval": true,
+      "underlying_script": "vitest run",
+      "lifecycle_chain": [
+        "pretest",
+        "test",
+        "posttest"
+      ]
+    }
+  ]
+}
+```
 
 ---
-query_repo_map.txt
-# Repository map (query)
-# Query: 修复 InvalidRefreshTokenError 导致 refresh 接口返回 500
 
-src/auth/exceptions.py:
-│ class InvalidRefreshTokenError(TokenError)
+## `context_budget_report.json`
 
-src/auth/service.py:
-│ class AuthService:
-│     refresh_access_token(
-│         token: str
-│     ) -> AccessToken
-│     _decode_refresh_token(
-│         token: str
-│     ) -> TokenPayload
+```json
+{
+  "max_input_tokens": 28000,
+  "estimated_before": 41720,
+  "exact_after": 27640,
+  "sections": {
+    "system": 1400,
+    "tools": 2350,
+    "task": 430,
+    "instructions": 1720,
+    "repo_map": 2840,
+    "code": 12100,
+    "history": 3120,
+    "observations": 3680
+  },
+  "compression_actions": [
+    {
+      "path": "src/common/utils.py",
+      "from": "full_file",
+      "to": "file_summary",
+      "tokens_before": 4380,
+      "tokens_after": 310
+    },
+    {
+      "path": "src/auth/models.py",
+      "from": "symbol_body",
+      "to": "symbol_signature",
+      "tokens_before": 1300,
+      "tokens_after": 280
+    },
+    {
+      "action": "replace_old_tool_results",
+      "tokens_before": 6400,
+      "tokens_after": 1200
+    }
+  ]
+}
+```
 
-src/auth/api.py:
-│ class AuthController:
-│     refresh(
-│         request: RefreshRequest
-│     ) -> TokenResponse
+---
 
-tests/auth/test_refresh.py:
-│ test_expired_token_returns_401()
-│ test_invalid_token_returns_401()
+# 二十四、推荐目录结构
 
-src/auth/repository.py:
-│ class TokenRepository:
-│     find(token: str) -> RefreshToken | None
-
-# ... 18 lower-ranked files omitted
-今日最终目录
+```text
 codeteam/
-├── ranking/
+├── instructions/
 │   ├── models.py
-│   ├── file_ranker.py
-│   ├── symbol_ranker.py
-│   └── pagerank.py
+│   ├── loader.py
+│   ├── agents_md.py
+│   ├── cline_rules.py
+│   ├── frontmatter.py
+│   ├── glob_matcher.py
+│   ├── directives.py
+│   └── conflicts.py
 │
-├── repomap/
+├── commands/
 │   ├── models.py
-│   ├── builder.py
-│   ├── renderer.py
+│   ├── detector.py
+│   ├── package_json.py
+│   ├── pytest_config.py
+│   ├── makefile.py
+│   └── risk_classifier.py
+│
+├── context/
+│   ├── models.py
+│   ├── budget.py
 │   ├── compressor.py
-│   └── budget.py
+│   ├── code_compressor.py
+│   ├── conversation_compressor.py
+│   └── assembler.py
 │
+└── usage/
+    ├── token_counter.py
+    ├── approximate_counter.py
+    └── provider_counter.py
+
+tests/
+├── instructions/
+├── commands/
+└── context/
+```
+---
+# 今日最终产出
+
+```text
+codeteam/
+├── instructions/
+│   ├── loader.py
+│   ├── agents_md.py
+│   └── cline_rules.py
+├── commands/
+│   └── detector.py
+├── context/
+│   ├── budget.py
+│   └── compressor.py
 └── usage/
     └── token_counter.py
 
-tests/
-├── ranking/
-│   ├── test_file_ranker.py
-│   ├── test_symbol_ranker.py
-│   └── test_pagerank.py
-│
-└── repomap/
-    ├── test_builder.py
-    ├── test_renderer.py
-    ├── test_budget.py
-    └── snapshots/
-
 artifacts/
-├── global_repo_map.txt
-├── query_repo_map.txt
-└── ranking_debug.json
-今天最重要的工程链路是：
-CandidateGenerator
-负责“不漏”
+├── instruction_bundle.json
+├── detected_commands.json
+└── context_budget_report.json
+```
 
-FileRanker
-负责“谁优先”
+今天最核心的工业化链路是：
 
-SymbolRanker
-负责“文件中展示什么”
+```text
+InstructionLoader
+决定“当前文件应遵守什么”
 
-RepoMapBuilder
-负责“预算内选择多少”
+CommandDetector
+决定“项目建议运行什么”
 
-RepoMapRenderer
-负责“怎样高密度地展示给模型”
+CommandPolicy
+决定“系统允许运行什么”
 
----
-测试 — 验证所有设计假设
+TokenBudget
+决定“上下文能放多少”
 
-至少覆盖 8 个测试：
+ContextCompressor
+决定“信息不足时保留什么、舍弃什么”
 
-┌──────────────────────┬───────────────────────────────────────┐
-│         测试         │               验证什么                │
-├──────────────────────┼───────────────────────────────────────┤
-│ 同一查询结果稳定     │ 候选顺序不同，排序结果相同            │
-├──────────────────────┼───────────────────────────────────────┤
-│ 无查询不返回空 Map   │ Global Map 应有核心模块               │
-├──────────────────────┼───────────────────────────────────────┤
-│ 查询变化排名变化     │ auth 查询 → auth 文件排前；order 查询 │
-│                      │  → order 文件排前                     │
-├──────────────────────┼───────────────────────────────────────┤
-│ Generated 不占主要   │ 500 符号的生成文件 < 5 符号的人工文件 │
-│ Map                  │                                       │
-├──────────────────────┼───────────────────────────────────────┤
-│ Map 不超预算         │ token_counter.count(rendered) ≤       │
-│                      │ budget                                │
-├──────────────────────┼───────────────────────────────────────┤
-│ 大文件只展示相关符号 │ 100 函数文件只展示查询命中的 2-3 个   │
-├──────────────────────┼───────────────────────────────────────┤
-│ 一跳优于两跳         │ score(api.py) > score(service.py) >   │
-│                      │ score(repository.py)                  │
-├──────────────────────┼───────────────────────────────────────┤
-│ PageRank             │ 定义了 RareError 的文件 > 被 100      │
-│ 不压过精确查询       │ 个文件依赖的 common.py                │
-└──────────────────────┴───────────────────────────────────────┘
+Event Log
+保存完整事实
+
+Conversation Summary
+提供低成本的继续执行上下文
+```
 
 ---
-测试思路
 
-准备一个小型测试仓库，包含这些文件：
+# 测试思路
 
-test_repo/
-├── src/
-│   ├── main.py                ← 入口
-│   ├── auth/
-│   │   ├── service.py         ← class AuthService (多个方法)
-│   │   ├── api.py             ← import service
-│   │   └── exceptions.py      ← class InvalidRefreshTokenError
-│   ├── orders/
-│   │   ├── exporter.py        ← 导出相关
-│   │   └── worker.py          ← 订单 worker
-│   ├── common/
-│   │   └── database.py        ← 被 3 个文件 import
-│   └── generated/
-│       └── openapi_client.py  ← 500 个类（生成代码）
-├── tests/
-│   └── test_auth.py
-├── AGENTS.md
-└── pyproject.toml
+至少需要 10 组测试覆盖三条主线：
 
-这样你就能验证：
-- 「refresh token error」→ auth 文件排前三
-- 「order export」→ orders 文件排前三
-- Generated 文件即使有 500 个类也不应该盖过 src/auth/service.py
-- common/database.py 的 Global PageRank 高但不影响特定查询的排名
+| 测试 | 验证什么 |
+|---|---|
+| 根规则 | 目标文件能加载根 AGENTS.md，source_path 可追踪 |
+| 嵌套规则 | 子目录规则优先级 > 父规则，但不替代父规则 |
+| 多目标作用域 | frontend 规则不泄露到 backend 文件 |
+| 冲突检测 | 同名指令冲突时记录双方来源 |
+| package.json | 检测 scripts + lifecycle chain，不执行任何脚本 |
+| pytest 配置 | 识别 pyproject.toml 和 pytest.ini，不拼接 addopts |
+| 危险命令 | `sudo rm -rf` 被标记为 destructive |
+| Token 预算 | ContextPack ≤ budget_tokens |
+| 逐级压缩 | 大文件从 FULL_FILE 降到 SIGNATURE/SUMMARY |
+| 不截断符号 | 压缩后的代码包含完整的函数/类定义 |
 
 ---
+
 }}
 
 ---
