@@ -276,6 +276,57 @@ class SymbolExtractor(ast.NodeVisitor):
                 )
                 self._references.append(ref)
 
+    def _extract_parameters(self, args: ast.arguments) -> list[Parameter]:
+        """从 ast.arguments 中提取参数列表。
+
+        Python AST 的参数分 5 类：
+        - posonlyargs: / 之前的仅限位置参数（较少见）
+        - args: 普通位置参数（含 self）
+        - vararg: *args
+        - kwonlyargs: * 之后的仅限关键字参数
+        - kwarg: **kwargs
+        """
+        params: list[Parameter] = []
+
+        # 普通参数
+        for arg in args.args:
+            params.append(self._make_parameter(arg))
+
+        # 仅限位置参数
+        for arg in args.posonlyargs:
+            params.append(self._make_parameter(arg))
+
+        # *args
+        if args.vararg:
+            params.append(self._make_parameter(args.vararg))
+
+        # 仅限关键字参数
+        for arg in args.kwonlyargs:
+            params.append(self._make_parameter(arg))
+
+        # **kwargs
+        if args.kwarg:
+            params.append(self._make_parameter(args.kwarg))
+
+        return params
+
+    @staticmethod
+    def _make_parameter(arg: ast.arg) -> Parameter:
+        """将单个 ast.arg 节点转换为 Parameter 模型。
+
+        ast.arg 结构：
+            arg(
+                arg='user_id',              # 参数名
+                annotation=Name(id='int'),   # 类型注解（可选）
+                ...
+            )
+        """
+        type_text: str | None = None
+        if arg.annotation:
+            type_text = ast.unparse(arg.annotation)
+
+        return Parameter(name=arg.arg, type_annotation=type_text)
+
     def _build_signature(self, node: ast.FunctionDef | ast.AsyncFunctionDef, is_async: bool) -> str:
         """构建函数/方法的签名字符串。
 

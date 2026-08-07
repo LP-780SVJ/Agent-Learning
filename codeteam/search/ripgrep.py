@@ -10,6 +10,10 @@ from __future__ import annotations
 import subprocess
 import threading
 
+
+from pathlib import Path
+from codeteam.repository.paths import normalize_repo_path
+
 from codeteam.search.models import (
     SearchQuery,
     SearchMatch,
@@ -162,7 +166,8 @@ class RipgrepClient:
                 # 提取匹配信息
                 file_path = extract_path(data["path"])
                 # 将绝对路径转为相对于搜索目录的路径
-                file_path = self._make_relative(file_path, search_path)
+                # file_path = self._make_relative(file_path, search_path)
+                file_path = normalize_repo_path(Path(search_path), file_path)
 
                 line_text = data["lines"]["text"].rstrip("\n")
                 line_no = data["line_number"]
@@ -237,7 +242,7 @@ class RipgrepClient:
             error=error,
         )
 
-    
+    '''被normalize_repo_path替代
     @staticmethod
     def _make_relative(file_path: str, search_path: str) -> str:
         """将绝对路径转为相对于 search_path 的路径。
@@ -255,5 +260,5 @@ class RipgrepClient:
             relative = file_path[len(search_path):]
             return relative.lstrip("/")
 
-        return file_path
+        return file_path'''
 

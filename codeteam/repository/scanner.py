@@ -14,6 +14,7 @@ import subprocess
 from codeteam.repository.file_classifier import FileClassifier
 from codeteam.repository.language_detector import LanguageDetector
 from codeteam.repository.models import FileKind, RepositoryFile, RepositorySnapshot
+from codeteam.repository.paths import normalize_repo_path
 
 
 _IMPORTANT_CONFIG_FILENAMES = {
@@ -143,10 +144,12 @@ class RepositoryScanner:
         full_path = self.root / relative_path
         size_bytes = full_path.stat().st_size
 
+        normalized_path = normalize_repo_path(self.root, relative_path)# 规范化路径，返回相对于仓库根目录的POSIX风格路径
+
         return RepositoryFile(
-            path=relative_path,
-            language=self.language_detector.detect(relative_path),
-            kind=self.file_classifier.classify(relative_path),
+            path=normalized_path,
+            language=self.language_detector.detect(normalized_path),
+            kind=self.file_classifier.classify(normalized_path),
             size_bytes=size_bytes,
         )
 

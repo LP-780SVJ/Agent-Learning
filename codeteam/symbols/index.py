@@ -129,3 +129,18 @@ class SymbolIndex:
     def total_files(self) -> int:
         """索引覆盖的文件数。"""
         return len(self._by_file)
+
+
+    def _by_kind(self, kind: str) -> list[Symbol]:
+        """按符号种类筛选（内部方法，供统计使用）。
+
+        Args:
+            kind: 种类值，如 "class"、"function"、"method"
+
+        Returns:
+            该种类的所有 Symbol 列表
+        """
+        return [
+            sym for sym in self._by_qualified.values()
+            if sym.kind.value == kind
+        ]

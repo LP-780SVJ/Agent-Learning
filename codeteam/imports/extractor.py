@@ -140,6 +140,21 @@ class ImportExtractor(ast.NodeVisitor):
 
         return False
 
+    @staticmethod
+    def _extract_string_arg(node: ast.Call) -> str | None:
+        """提取函数调用的第一个字符串常量参数。
+
+        能解析：__import__("os") → "os"
+        不能解析：__import__(variable) → None
+                   __import__()        → None（无参数）
+        """
+        if not node.args:
+            return None
+        first_arg = node.args[0]
+        if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+            return first_arg.value
+        return None
+
     # ── 工具方法 ─────────────────────────────────────────────
     def _line(self, node: ast.AST) -> int:
         """获取节点的行号（从 0 开始）。"""
