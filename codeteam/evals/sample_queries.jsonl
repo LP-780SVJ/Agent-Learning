@@ -1,0 +1,3 @@
+{"id":"sym-001","category":"exact_symbol","query":"找到 TokenCounter 类的定义","gold_files":["codeteam/usage/token_counter.py"],"gold_rationale":{"codeteam/usage/token_counter.py":"定义了 ApproximateTokenCounter 和 TokenCounter Protocol"}}
+{"id":"sym-002","category":"exact_symbol","query":"ImportGraph 的 add_edge 方法在哪里","gold_files":["codeteam/imports/graph.py"],"gold_rationale":{"codeteam/imports/graph.py":"ImportGraph 类定义，包含 add_edge 方法"}}
+{"id":"err-001","category":"error_message","query":"修复报错 'Unknown parser'","gold_files":["codeteam/parsing/registry.py"],"gold_rationale":{"codeteam/parsing/registry.py":"ParserRegistry 中定义了 UnknownParserError"}}

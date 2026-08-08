@@ -120,6 +120,8 @@ class PythonImportResolver:
 
         if target_name:
             target_module = ".".join(base_parts + [target_name])
+        elif record.name:
+            target_module = ".".join(base_parts + [record.name])
         else:
             # from . import X → 目标模块就是基准包本身
             target_module = ".".join(base_parts)

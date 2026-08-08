@@ -35,19 +35,23 @@ class TreeSitterParser:
 
     def parse(self, source_code: str, file_path: str = "") -> ParseResult:
         # 步骤 1：编码为 UTF-8 bytes
-        try:
-            source_bytes = source_code.encode("utf-8")
-        except UnicodeEncodeError:
-            return ParseResult(
-                status=ParseStatus.PARTIAL,
-                file_path=file_path,
-                diagnostics=[
-                    ParseDiagnostic(
-                        kind=DiagnosticKind.ERROR,
-                        message="Source code is not valid UTF-8",
-                    )
-                ],
-            )
+        received_bytes = isinstance(source_code, bytes)
+        if received_bytes:
+            source_bytes = source_code
+        else:
+            try:
+                source_bytes = source_code.encode("utf-8")
+            except (AttributeError, UnicodeEncodeError):
+                return ParseResult(
+                    status=ParseStatus.PARTIAL,
+                    file_path=file_path,
+                    diagnostics=[
+                        ParseDiagnostic(
+                            kind=DiagnosticKind.ERROR,
+                            message="Source code is not valid UTF-8",
+                        )
+                    ],
+                )
 
         # 步骤 2：文件大小检测
         byte_size = len(source_bytes)
@@ -75,11 +79,16 @@ class TreeSitterParser:
         self._visit_node(tree.root_node, source_bytes, counters, errors)
 
         # 步骤 5：判断最终状态
-        status = (
-            ParseStatus.PARTIAL
-            if tree.root_node.has_error
-            else ParseStatus.SUCCESS
-        )
+        status = ParseStatus.SUCCESS
+        if tree.root_node.has_error or received_bytes:
+            status = ParseStatus.PARTIAL
+        if received_bytes:
+            errors.append(
+                ParseDiagnostic(
+                    kind=DiagnosticKind.WARNING,
+                    message="Source code was provided as bytes; parsed as raw bytes.",
+                )
+            )
 
         return ParseResult(
             status=status,

@@ -40,6 +40,28 @@ DANGEROUS_COMMANDS = {
     "killall",
     "pkill",
 }
+SHELL_STRING_EXECUTORS = {
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+}
+INTERPRETER_STRING_EXEC_FLAGS = {
+    "python": {"-c"},
+    "python3": {"-c"},
+    "node": {"-e", "-p"},
+    "ruby": {"-e"},
+    "perl": {"-e"},
+    "php": {"-r"},
+}
+PYTHON_EXECUTABLE_NAMES = {
+    "python",
+    "python3",
+    "python3.11",
+    "python3.12",
+}
 
 
 @dataclass
@@ -153,10 +175,72 @@ def _validate_argv(argv: list[str], cwd: Path, config: ShellToolConfig) -> None:
         raise ValueError(f"Dangerous command is not allowed: {command_name}")
     if command_name == "git" and "push" in argv[1:]:
         raise ValueError("Dangerous command is not allowed: git push")
+    _reject_string_execution(argv, command_name)
 
     for argument in argv[1:]:
         if _looks_like_path_argument(argument, cwd):
             _ensure_path_argument_inside_workspace(argument, cwd, config)
+
+    _validate_python_script_execution(argv, command_name, cwd, config)
+
+
+def _reject_string_execution(argv: list[str], command_name: str) -> None:
+    if command_name in SHELL_STRING_EXECUTORS and "-c" in argv[1:]:
+        raise ValueError(
+            f"String execution is not allowed for shell command: {command_name} -c"
+        )
+
+    flags = INTERPRETER_STRING_EXEC_FLAGS.get(command_name, set())
+    for argument in argv[1:]:
+        if argument in flags:
+            raise ValueError(
+                "Interpreter string execution is not allowed: "
+                f"{command_name} {argument}"
+            )
+
+
+def _validate_python_script_execution(
+    argv: list[str],
+    command_name: str,
+    cwd: Path,
+    config: ShellToolConfig,
+) -> None:
+    if not _is_python_command(command_name):
+        return
+
+    script_argument = _first_non_option_argument(argv[1:])
+    if script_argument is None:
+        return
+    if script_argument == "-m":
+        return
+    if script_argument.startswith("-"):
+        return
+
+    _ensure_path_argument_inside_workspace(script_argument, cwd, config)
+
+
+def _is_python_command(command_name: str) -> bool:
+    if command_name in PYTHON_EXECUTABLE_NAMES:
+        return True
+    return command_name.startswith("python") and command_name[6:7].isdigit()
+
+
+def _first_non_option_argument(arguments: list[str]) -> str | None:
+    skip_next = False
+    options_with_values = {"-m", "-W", "-X"}
+    for argument in arguments:
+        if skip_next:
+            skip_next = False
+            continue
+        if argument in options_with_values:
+            if argument == "-m":
+                return argument
+            skip_next = True
+            continue
+        if argument.startswith("-"):
+            continue
+        return argument
+    return None
 
 
 def _build_env(requested_env: dict[str, str], config: ShellToolConfig) -> dict[str, str]:

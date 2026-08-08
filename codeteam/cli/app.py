@@ -69,18 +69,23 @@ def main(argv: list[str] | None = None) -> None:
         help="运行评测实验"
     )
     eval_parser.add_argument(
-        "--dataset", 
-        required=True, 
+        "--dataset",
+        required=True,
         help="评测数据 JSONL 文件"
     )
     eval_parser.add_argument(
+        "--repo",
+        default=".",
+        help="目标仓库路径（默认当前目录）",
+    )
+    eval_parser.add_argument(
         "--methods",
-        default="hybrid", 
+        default="hybrid",
         help="方法列表，逗号分隔"
     )
     eval_parser.add_argument(
-        "--output", 
-        default="evals/results/", 
+        "--output",
+        default="evals/results/",
         help="结果输出目录"
     )
 
@@ -93,7 +98,8 @@ def main(argv: list[str] | None = None) -> None:
         from codeteam.cli.context_command import run_context
         run_context(args)
     elif args.command == "eval":
-        pass
+        from codeteam.cli.eval_command import run_eval
+        run_eval(args)
     else:
         parser.print_help()
         sys.exit(1)

@@ -16,9 +16,9 @@ _RISK_PATTERNS: list[tuple[list[str], CommandRisk]] = [
     (["git", "reset", "--hard"], CommandRisk.DESTRUCTIVE),
     (["git", "clean", "-fd"], CommandRisk.DESTRUCTIVE),
     (["drop", "database"], CommandRisk.DESTRUCTIVE),
+    (["git", "push", "--force"], CommandRisk.DESTRUCTIVE),
     # 远程变更
     (["git", "push"], CommandRisk.NETWORK),
-    (["git", "push", "--force"], CommandRisk.DESTRUCTIVE),
     (["npm", "publish"], CommandRisk.NETWORK),
     (["docker", "push"], CommandRisk.NETWORK),
     # 网络下载 + 管道执行

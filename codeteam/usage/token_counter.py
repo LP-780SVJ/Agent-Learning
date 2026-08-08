@@ -46,3 +46,6 @@ class ApproximateTokenCounter:
             return 0
         # UTF-8 编码后每 4 字节约等于 1 Token
         return max(1, len(text.encode("utf-8")) // 4)# 即使空字符串或极短字符串，也要返回至少 1 Token——预算计算中 0 会导致除零或误判
+
+    def count_text(self, text: str) -> int:
+        return self.count(text)

@@ -105,6 +105,29 @@ _GENERIC_CHINESE_TERMS: set[str] = {
     "有没有",
     "能不能",
 }
+_GENERIC_IDENTIFIER_PARTS: set[str] = {
+    "py",
+    "js",
+    "ts",
+    "tsx",
+    "jsx",
+    "md",
+    "toml",
+}
+
+_DOMAIN_EXPANSIONS: dict[str, list[str]] = {
+    "刷新过期令牌": ["refresh_token", "refresh_access_token", "expired_token"],
+    "刷新令牌": ["refresh_token", "refresh_access_token", "refresh", "token"],
+    "过期令牌": ["expired_token", "refresh_access_token", "InvalidRefreshTokenError"],
+    "库存预占": ["inventory", "release_inventory_holds"],
+    "释放库存": ["inventory", "release_inventory_holds"],
+    "订单导出": ["orders", "export", "export_orders_to_csv"],
+    "数据库会话": ["database", "session", "create_session"],
+    "规则": ["AGENTS.md", "rules"],
+    "不允许手动修改": ["AGENTS.md", "Do not modify", "generated"],
+    "生成代码": ["AGENTS.md", "generated", "Do not modify"],
+    "测试用例": ["tests", "pytest", "test"],
+}
 
 
 # ── 辅助函数 ───────────────────────────────────────────────
@@ -165,7 +188,10 @@ def _split_identifier(value: str) -> list[str]:
     result: list[str] = []
     for segment in _SEPARATOR_RE.split(value):
         result.extend(_split_camel_case(segment))
-    return [item for item in result if item]
+    return [
+        item for item in result
+        if item and item.lower() not in _GENERIC_IDENTIFIER_PARTS
+    ]
 
 
 def _identifier_priority(value: str) -> float:
@@ -220,6 +246,14 @@ def _extract_paths(text: str) -> list[str]:
     return _deduplicate(cleaned)
 
 
+def _expand_domain_terms(query: str) -> list[str]:
+    expansions: list[str] = []
+    for chinese_term, terms in _DOMAIN_EXPANSIONS.items():
+        if chinese_term in query:
+            expansions.extend(terms)
+    return _deduplicate(expansions)
+
+
 # ── QueryAnalyzer ───────────────────────────────────────────
 
 class QueryAnalyzer:
@@ -245,6 +279,15 @@ class QueryAnalyzer:
         identifiers = _deduplicate(
             _IDENTIFIER_RE.findall(query)
         )
+        domain_expansions = _expand_domain_terms(query)
+        expansion_identifiers = [
+            term for term in domain_expansions
+            if _IDENTIFIER_RE.fullmatch(term)
+        ]
+        identifiers = _deduplicate([
+            *identifiers,
+            *expansion_identifiers,
+        ])
 
         exceptions = _deduplicate(
             _EXCEPTION_RE.findall(query)
@@ -266,6 +309,8 @@ class QueryAnalyzer:
             identifier_parts.extend(
                 _split_identifier(identifier)
             )
+        for expanded in domain_expansions:
+            identifier_parts.extend(_split_identifier(expanded))
 
         chinese_spans = [
             item
@@ -279,6 +324,16 @@ class QueryAnalyzer:
             *exceptions,
             *[
                 item
+                for item in domain_expansions
+                if (
+                    "/" in item
+                    or "." in item
+                    or "_" in item
+                    or item.endswith(".md")
+                )
+            ],
+            *[
+                item
                 for item in identifiers
                 if _identifier_priority(item) >= 2
             ],
@@ -287,6 +342,11 @@ class QueryAnalyzer:
         secondary_terms = _deduplicate([
             *error_codes,
             *identifier_parts,
+            *[
+                item
+                for item in domain_expansions
+                if item not in primary_terms
+            ],
             *chinese_spans,
         ])
 

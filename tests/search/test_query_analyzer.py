@@ -189,6 +189,24 @@ class TestChineseSpanExtraction:
         for span in result.chinese_spans:
             assert span in result.secondary_terms
 
+    def test_expands_refresh_token_business_terms(self, analyzer: QueryAnalyzer) -> None:
+        result = analyzer.analyze("用户刷新过期令牌的流程")
+
+        assert "refresh_access_token" in result.primary_terms
+        assert "refresh_token" in result.primary_terms
+
+    def test_expands_inventory_business_terms(self, analyzer: QueryAnalyzer) -> None:
+        result = analyzer.analyze("取消订单后如何释放库存预占")
+
+        assert "release_inventory_holds" in result.primary_terms
+        assert "inventory" in result.secondary_terms
+
+    def test_expands_generated_code_rule_terms(self, analyzer: QueryAnalyzer) -> None:
+        result = analyzer.analyze("生成代码目录不允许手动修改的规则在哪里")
+
+        assert "AGENTS.md" in result.primary_terms
+        assert "generated" in result.secondary_terms
+
 
 # ── 文件路径提取 ────────────────────────────────────────────────
 

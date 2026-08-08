@@ -35,7 +35,7 @@ class TokenBudget:
     reserved_reasoning: int = 2048
     """预留的推理（thinking）空间。"""
 
-    safety_margin: int = 2048
+    safety_margin: int = 1856
     """安全余量，防止意外溢出。"""
 
     # ── 子预算 ──────────────────────────────────────────────

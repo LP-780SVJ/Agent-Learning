@@ -19,15 +19,17 @@ from codeteam.tools.shell import (
 class ShellToolTests(unittest.TestCase):
     def test_run_command_captures_stdout_and_stderr_separately(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = ShellToolConfig(Path(temp_dir))
+            workspace = Path(temp_dir)
+            script = self._write_script(
+                workspace,
+                "capture.py",
+                "import sys; sys.stdout.write('out'); sys.stderr.write('err')",
+            )
+            config = ShellToolConfig(workspace)
 
             payload = self._run_json(
                 RunCommandArgs(
-                    argv=[
-                        sys.executable,
-                        "-c",
-                        "import sys; sys.stdout.write('out'); sys.stderr.write('err')",
-                    ],
+                    argv=[sys.executable, str(script.relative_to(workspace))],
                 ),
                 config,
             )
@@ -39,19 +41,21 @@ class ShellToolTests(unittest.TestCase):
 
     def test_nonzero_exit_code_does_not_crash_registry(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            script = self._write_script(
+                workspace,
+                "fail.py",
+                "import sys; sys.stderr.write('failed'); sys.exit(2)",
+            )
             registry = ToolRegistry()
-            registry.register(create_shell_tool(Path(temp_dir)))
+            registry.register(create_shell_tool(workspace))
 
             result = registry.execute(
                 ToolCall(
                     call_id="call-nonzero",
                     name="run_command",
                     arguments={
-                        "argv": [
-                            sys.executable,
-                            "-c",
-                            "import sys; sys.stderr.write('failed'); sys.exit(2)",
-                        ],
+                        "argv": [sys.executable, str(script.relative_to(workspace))],
                     },
                 )
             )
@@ -64,16 +68,18 @@ class ShellToolTests(unittest.TestCase):
 
     def test_timeout_kills_command(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = ShellToolConfig(Path(temp_dir))
+            workspace = Path(temp_dir)
+            script = self._write_script(
+                workspace,
+                "sleep.py",
+                "import time; time.sleep(5)",
+            )
+            config = ShellToolConfig(workspace)
 
             started_at = time.monotonic()
             payload = self._run_json(
                 RunCommandArgs(
-                    argv=[
-                        sys.executable,
-                        "-c",
-                        "import time; time.sleep(5)",
-                    ],
+                    argv=[sys.executable, str(script.relative_to(workspace))],
                     timeout_seconds=0.2,
                 ),
                 config,
@@ -110,7 +116,7 @@ class ShellToolTests(unittest.TestCase):
                     call_id="call-bad-cwd",
                     name="run_command",
                     arguments={
-                        "argv": [sys.executable, "-c", "print('ok')"],
+                        "argv": ["pytest", "--version"],
                         "cwd": "../outside",
                     },
                 )
@@ -122,15 +128,17 @@ class ShellToolTests(unittest.TestCase):
 
     def test_truncates_stdout_and_stderr(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = ShellToolConfig(Path(temp_dir))
+            workspace = Path(temp_dir)
+            script = self._write_script(
+                workspace,
+                "large_output.py",
+                "import sys; sys.stdout.write('x'*20); sys.stderr.write('y'*20)",
+            )
+            config = ShellToolConfig(workspace)
 
             payload = self._run_json(
                 RunCommandArgs(
-                    argv=[
-                        sys.executable,
-                        "-c",
-                        "import sys; sys.stdout.write('x'*20); sys.stderr.write('y'*20)",
-                    ],
+                    argv=[sys.executable, str(script.relative_to(workspace))],
                     max_output_bytes=5,
                 ),
                 config,
@@ -148,7 +156,7 @@ class ShellToolTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Environment variable"):
                 run_command(
                     RunCommandArgs(
-                        argv=[sys.executable, "-c", "print('ok')"],
+                        argv=["pytest", "--version"],
                         env={"SECRET_TOKEN": "secret"},
                     ),
                     config,
@@ -156,15 +164,17 @@ class ShellToolTests(unittest.TestCase):
 
     def test_accepts_allowed_env_override(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = ShellToolConfig(Path(temp_dir))
+            workspace = Path(temp_dir)
+            script = self._write_script(
+                workspace,
+                "env.py",
+                "import os; print(os.getenv('PYTHONUNBUFFERED'))",
+            )
+            config = ShellToolConfig(workspace)
 
             payload = self._run_json(
                 RunCommandArgs(
-                    argv=[
-                        sys.executable,
-                        "-c",
-                        "import os; print(os.getenv('PYTHONUNBUFFERED'))",
-                    ],
+                    argv=[sys.executable, str(script.relative_to(workspace))],
                     env={"PYTHONUNBUFFERED": "1"},
                 ),
                 config,
@@ -205,15 +215,17 @@ class ShellToolTests(unittest.TestCase):
 
     def test_registry_executes_run_command_tool(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            script = self._write_script(workspace, "hello.py", "print('hello')")
             registry = ToolRegistry()
-            registry.register(create_shell_tool(Path(temp_dir)))
+            registry.register(create_shell_tool(workspace))
 
             result = registry.execute(
                 ToolCall(
                     call_id="call-run",
                     name="run_command",
                     arguments={
-                        "argv": [sys.executable, "-c", "print('hello')"],
+                        "argv": [sys.executable, str(script.relative_to(workspace))],
                     },
                 )
             )
@@ -223,12 +235,77 @@ class ShellToolTests(unittest.TestCase):
             self.assertEqual(payload["stdout"], "hello\n")
             self.assertEqual(payload["stderr"], "")
 
+    def test_rejects_shell_dash_c_string_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = ShellToolConfig(Path(temp_dir))
+
+            with self.assertRaisesRegex(ValueError, "String execution"):
+                run_command(
+                    RunCommandArgs(argv=["sh", "-c", "cat /etc/hosts"]),
+                    config,
+                )
+
+    def test_rejects_bash_dash_c_hidden_dangerous_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = ShellToolConfig(Path(temp_dir))
+
+            with self.assertRaisesRegex(ValueError, "String execution"):
+                run_command(
+                    RunCommandArgs(argv=["bash", "-c", "rm -rf ."]),
+                    config,
+                )
+
+    def test_rejects_python_dash_c_outside_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = ShellToolConfig(Path(temp_dir))
+
+            with self.assertRaisesRegex(ValueError, "Interpreter string execution"):
+                run_command(
+                    RunCommandArgs(
+                        argv=[
+                            sys.executable,
+                            "-c",
+                            "print(open('/etc/hosts').read())",
+                        ],
+                    ),
+                    config,
+                )
+
+    def test_rejects_node_dash_e_string_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = ShellToolConfig(Path(temp_dir))
+
+            with self.assertRaisesRegex(ValueError, "Interpreter string execution"):
+                run_command(
+                    RunCommandArgs(argv=["node", "-e", "console.log('x')"]),
+                    config,
+                )
+
+    def test_allows_cat_workspace_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "note.txt").write_text("inside\n", encoding="utf-8")
+            config = ShellToolConfig(workspace)
+
+            payload = self._run_json(
+                RunCommandArgs(argv=["cat", "note.txt"]),
+                config,
+            )
+
+            self.assertEqual(payload["stdout"], "inside\n")
+            self.assertEqual(payload["exit_code"], 0)
+
     def _run_json(
         self,
         args: RunCommandArgs,
         config: ShellToolConfig,
     ) -> dict[str, object]:
         return json.loads(run_command(args, config))
+
+    def _write_script(self, root: Path, name: str, content: str) -> Path:
+        path = root / name
+        path.write_text(content + "\n", encoding="utf-8")
+        return path
 
 
 if __name__ == "__main__":

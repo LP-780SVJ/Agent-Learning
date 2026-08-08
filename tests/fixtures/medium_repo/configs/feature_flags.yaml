@@ -1,0 +1,9 @@
+auth:
+  refresh_rotation_enabled: true
+orders:
+  stream_export_enabled: true
+inventory:
+  reservation_audit_enabled: true
+billing:
+  webhook_signature_required: true
+

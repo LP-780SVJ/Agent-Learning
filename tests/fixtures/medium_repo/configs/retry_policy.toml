@@ -1,0 +1,9 @@
+[invoice_retry]
+initial_delay_seconds = 30
+max_attempts = 5
+backoff_multiplier = 2
+
+[webhook_retry]
+initial_delay_seconds = 10
+max_attempts = 3
+

@@ -1,6 +1,8 @@
 # Agent-Learning
 
-`week1` 分支完成了一个最小可测试的 coding agent 基础框架：用 Pydantic 定义消息、工具调用、工具结果和最终输出模型；实现工具注册器、calculator、文件工具和受控 Shell 工具；补齐 Mock LLM、Agent Loop、停止条件、事件记录、错误分类、重试判断、token 用量与成本统计。当前重点不是接入真实模型，而是把 “模型输出 -> 工具执行 -> 停止条件 -> 最终结果校验” 这条主链路搭起来，并通过单元测试保证 Agent 不会无限循环、不会重复执行相同动作、不会在验证失败时错误标记完成。
+`Agent-Learning` 是一个学习型 coding agent 框架。Week1 搭好了 “模型输出 -> 工具执行 -> 停止条件 -> 最终结果校验” 主链路；Week2 增加了仓库扫描、解析、符号索引、ImportGraph、代码检索、Repo Map、Context 构建、CLI 和文件检索 eval。
+
+所有开发和验收命令都必须使用项目虚拟环境：`.venv/bin/python`。不要使用系统默认 `python3` 跑测试或 CLI。
 
 ## Code Framework
 
@@ -75,34 +77,65 @@ messages
 
 停止结果由 `AgentLoopResult` 返回，包含 `status`、`stop_reason`、`messages`、`final_output`、`error`、`steps_used`、`tool_calls_used`、事件列表、token 用量、成本和耗时。
 
-## Executable Commands
+## Development Setup
 
-当前项目没有独立 CLI 或可执行入口，主要通过 Python 模块导入和测试来运行。可以用下面的方式创建环境并安装依赖：
+创建环境并安装依赖：
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-python -m pip install -U pip
-python -m pip install "pydantic==2.13.4"
+.venv/bin/python -m pip install -U pip
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements-dev.txt
 ```
-
-如果本机没有 `python3.11`，Python `3.12` 也可以运行当前代码；建议团队统一到 Python 3.11。
 
 ## Test Commands
 
 运行全部测试：
 
 ```bash
-.venv/bin/python -m unittest discover tests
+.venv/bin/python -m pytest -q
 ```
 
-运行指定模块测试：
+运行部分测试：
 
 ```bash
-.venv/bin/python -m unittest tests/test_agent_loop_stop_conditions.py
-.venv/bin/python -m unittest tests/test_file_tools.py
-.venv/bin/python -m unittest tests/test_shell_tool.py
+.venv/bin/python -m pytest tests/search tests/ranking -q
+.venv/bin/python -m pytest tests/test_shell_tool.py -q
 ```
+
+## CLI Usage
+
+检查仓库索引健康状态：
+
+```bash
+.venv/bin/python -m codeteam.cli.app inspect-repo . --format json
+.venv/bin/python -m codeteam.cli.app inspect-repo tests/fixtures/test_repo --format json
+```
+
+根据任务构建上下文：
+
+```bash
+.venv/bin/python -m codeteam.cli.app context \
+  "refresh token 异常从 service 层传播到 API 层的完整链路" \
+  --path tests/fixtures/test_repo \
+  --top-k 5 \
+  --budget 1024 \
+  --format json
+```
+
+运行 Week2 文件检索评测：
+
+```bash
+.venv/bin/python -m codeteam.cli.app eval \
+  --dataset evals/week2/file_retrieval.jsonl \
+  --repo tests/fixtures/test_repo \
+  --methods filename,ripgrep,ripgrep_symbol,hybrid \
+  --output evals/week2
+```
+
+Week2 eval fixture 位于 `tests/fixtures/test_repo/`，数据集和报告位于 `evals/week2/`。
+Medium benchmark 的被检索仓库位于 `tests/fixtures/medium_repo/`，数据集位于仓库外的 `evals/medium_repo/file_retrieval.jsonl`，避免 eval JSONL 被检索器当成候选文件。
 
 ## Week1 Acceptance Highlights
 

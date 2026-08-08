@@ -95,6 +95,19 @@ class ContextCompressor:
                 item=candidate,
                 target_level=next_level,
             )
+            if compressed.token_count >= before_tokens:
+                path_only = self.compress_item(
+                    item=candidate,
+                    target_level=CompressionLevel.PATH_ONLY,
+                )
+                if path_only.token_count < before_tokens:
+                    compressed = path_only
+                    next_level = CompressionLevel.PATH_ONLY
+                else:
+                    actions.append(
+                        f"{candidate.path}: 降级不会减少 token，停止压缩该 item"
+                    )
+                    break
 
             # 替换
             self._replace_item(items, candidate, compressed)

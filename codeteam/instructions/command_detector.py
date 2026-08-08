@@ -10,6 +10,7 @@ CommandDetector: 从仓库配置文件推断测试、lint、构建命令。
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from pydantic import BaseModel
 
@@ -20,6 +21,19 @@ class DetectedCommand(BaseModel):
     command: str           # 实际可执行的命令
     source: str            # 来源文件名
     description: str = ""  # 人类可读描述
+
+
+_LABELED_COMMAND_RE = re.compile(
+    r"""
+    ^\s*(?:[-*]\s*)?
+    (?P<label>Run\s+tests?|Tests?|Lint|Type\s+check|Typecheck|Build|Run)
+    \s*:\s*
+    (?P<body>.+?)
+    \s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 
 
 class CommandDetector:
@@ -121,28 +135,59 @@ class CommandDetector:
 
         content = agents_md.read_text(encoding="utf-8")
 
-        # 查找 ```bash 代码块中的命令
-        import re
+        explicit_commands: list[DetectedCommand] = []
         in_bash_block = False
-        for line in content.split("\n"):
-            if line.strip().startswith("```bash"):
-                in_bash_block = True
+        for line_number, line in enumerate(content.splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                if in_bash_block:
+                    in_bash_block = False
+                    continue
+                language = stripped.removeprefix("```").strip().lower()
+                in_bash_block = language in {"", "bash", "sh", "shell", "zsh"}
                 continue
-            if in_bash_block and line.strip().startswith("```"):
-                in_bash_block = False
-                continue
-            if in_bash_block and line.strip():
-                cmd = line.strip()
-                category = self._classify_command(cmd)
-                if category and not any(
-                    c.command == cmd for c in commands
-                ):
-                    commands.append(DetectedCommand(
+
+            if in_bash_block and stripped:
+                category = self._classify_command(stripped)
+                if category:
+                    explicit_commands.append(DetectedCommand(
                         category=category,
-                        command=cmd,
-                        source="AGENTS.md",
-                        description="从 AGENTS.md 提取",
+                        command=stripped,
+                        source=f"AGENTS.md:{line_number}",
+                        description="从 AGENTS.md fenced code block 提取",
                     ))
+                continue
+
+            labeled = _LABELED_COMMAND_RE.match(line)
+            if labeled:
+                label = labeled.group("label")
+                body = labeled.group("body")
+                command = self._extract_command_text(body)
+                category = self._classify_label(label) or self._classify_command(command)
+                if command and category:
+                    explicit_commands.append(DetectedCommand(
+                        category=category,
+                        command=command,
+                        source=f"AGENTS.md:{line_number}",
+                        description="从 AGENTS.md 显式标签提取",
+                    ))
+
+        if not explicit_commands:
+            return
+
+        # AGENTS.md 是显式项目指令；同一类别下优先展示它，而不是 pyproject 推断值。
+        explicit_categories = {cmd.category for cmd in explicit_commands}
+        commands[:] = [
+            cmd for cmd in commands
+            if cmd.category not in explicit_categories
+        ]
+        seen: set[tuple[str, str]] = set()
+        for cmd in explicit_commands:
+            key = (cmd.category, cmd.command)
+            if key in seen:
+                continue
+            seen.add(key)
+            commands.append(cmd)
 
     def _from_package_json(
         self, root: Path, commands: list[DetectedCommand]
@@ -199,3 +244,25 @@ class CommandDetector:
         if "mypy" in cmd_lower:
             return "typecheck"
         return None
+
+    @staticmethod
+    def _classify_label(label: str) -> str | None:
+        label_lower = label.lower().replace(" ", "")
+        if label_lower in {"runtests", "runtest", "tests", "test"}:
+            return "test"
+        if label_lower == "lint":
+            return "lint"
+        if label_lower in {"typecheck", "typechecks"}:
+            return "typecheck"
+        if label_lower == "build":
+            return "build"
+        if label_lower == "run":
+            return "run"
+        return None
+
+    @staticmethod
+    def _extract_command_text(text: str) -> str:
+        inline = _INLINE_CODE_RE.search(text)
+        if inline:
+            return inline.group(1).strip()
+        return text.strip().lstrip("-* ").strip()

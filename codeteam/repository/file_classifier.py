@@ -30,6 +30,7 @@ _GENERATED_DIRS = {
     "dist",
     "build",
     "htmlcov",
+    "generated",
 }
 
 _VENDORED_DIRS = {
@@ -83,6 +84,16 @@ _ASSET_EXTENSIONS = {
     ".gif",
     ".svg",
     ".ico",
+}
+
+_BINARY_EXTENSIONS = {
+    ".bin",
+    ".dll",
+    ".dylib",
+    ".exe",
+    ".o",
+    ".pyc",
+    ".so",
 }
 
 _SOURCE_EXTENSIONS = {
@@ -139,6 +150,9 @@ class FileClassifier:
 
         if suffix in _ASSET_EXTENSIONS:
             return FileKind.ASSET
+
+        if suffix in _BINARY_EXTENSIONS:
+            return FileKind.BINARY
 
         if suffix in _SOURCE_EXTENSIONS:
             return FileKind.SOURCE

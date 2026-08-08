@@ -20,6 +20,7 @@ from codeteam.commands.models import CommandKind, CommandRisk, DetectedCommand
 from codeteam.commands.package_json import detect_from_package_json
 from codeteam.commands.pytest_config import detect_from_pytest
 from codeteam.commands.risk_classifier import classify_risk
+from codeteam.instructions.loader import InstructionLoader
 
 
 # ===================================================================
@@ -333,3 +334,46 @@ class TestCommandDetectorIntegration:
             # 应去重（两个 TEST 命令可能被合并）
             test_cmds = [c for c in commands if c.kind == CommandKind.TEST]
             assert len(test_cmds) >= 1
+
+    def test_agents_commands_override_pyproject_inferred_commands(self) -> None:
+        """AGENTS.md 显式命令应优先于 pyproject 推断命令。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "app.py").write_text("print('ok')\n")
+            (root / "pyproject.toml").write_text(
+                "[tool.pytest]\n"
+                "testpaths = ['tests']\n"
+                "[tool.ruff]\n"
+                "line-length = 88\n"
+                "[tool.mypy]\n"
+                "python_version = '3.11'\n"
+            )
+            (root / "AGENTS.md").write_text(
+                "## Commands\n\n"
+                "- Run tests: `uv run pytest tests/ -q`\n"
+                "- Lint: `uv run ruff check src tests`\n"
+                "- Type check: `uv run mypy src`\n"
+            )
+
+            instructions = InstructionLoader().load(
+                repository_root=root,
+                target_paths=["src/app.py"],
+            )
+            commands = CommandDetector().detect(
+                repository_root=root,
+                instructions=instructions,
+            )
+
+            by_kind = {cmd.kind: cmd for cmd in commands}
+            assert by_kind[CommandKind.TEST].argv == [
+                "uv", "run", "pytest", "tests/", "-q",
+            ]
+            assert by_kind[CommandKind.LINT].argv == [
+                "uv", "run", "ruff", "check", "src", "tests",
+            ]
+            assert by_kind[CommandKind.TYPECHECK].argv == [
+                "uv", "run", "mypy", "src",
+            ]
+            assert by_kind[CommandKind.TEST].source_path == "AGENTS.md"
+            assert by_kind[CommandKind.TEST].source_type == "explicit_instruction"

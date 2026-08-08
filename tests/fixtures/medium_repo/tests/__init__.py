@@ -1,0 +1,2 @@
+"""Fixture tests package."""
+

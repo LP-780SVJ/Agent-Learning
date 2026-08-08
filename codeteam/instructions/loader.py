@@ -57,6 +57,8 @@ class InstructionLoader:
                 diagnostics=["target_paths 为空，未加载任何规则"]
             )
 
+        diagnostics: list[str] = []
+
         # 步骤 1：对每个目标文件发现 AGENTS.md 链
         per_target: dict[str, list[InstructionSource]] = {}
         all_sources: list[list[InstructionSource]] = []
@@ -104,7 +106,6 @@ class InstructionLoader:
             )
 
         # 步骤 4：收集诊断信息
-        diagnostics: list[str] = []
         for target, sources in per_target.items():
             if not sources:
                 diagnostics.append(

@@ -48,7 +48,7 @@ class _Weight:
     RIPGREP_SECONDARY = 1.0
     FILENAME_FULL = 4.0
     FILENAME_PART = 1.0
-    IMPORT_NEIGHBOR = 1.5
+    IMPORT_NEIGHBOR = 3.0
     TEST_PAIR = 1.0
     IMPORTANT_CONFIG = 2.0
 
@@ -307,12 +307,15 @@ class CandidateGenerator:
         高优先级 term 上限 50，低优先级 term 上限 20。
         防止 service、user 这类常见词淹没其他信号。
         """
+        if self.ripgrep is None:
+            return
+
         # Primary terms → 权重 2.0，上限 50
         for term in analyzed.primary_terms:
             query = SearchQuery(
                 pattern=term,
                 mode=SearchMode.LITERAL,
-                file_types=["py"],
+                file_types=[],
                 max_results=_PRIMARY_TERM_MAX,
             )
             result = self.ripgrep.search(query, search_path)
@@ -337,7 +340,7 @@ class CandidateGenerator:
             query = SearchQuery(
                 pattern=term,
                 mode=SearchMode.LITERAL,
-                file_types=["py"],
+                file_types=[],
                 max_results=_SECONDARY_TERM_MAX,
             )
             result = self.ripgrep.search(query, search_path)
@@ -368,11 +371,21 @@ class CandidateGenerator:
         只做一层扩展（depth=1），防止扩散到整个仓库。
         最多增加 IMPORT_MAX_NEIGHBORS 个文件。
         """
-        # 按分数排序，只从高分候选扩展
-        strong_candidates = sorted(
-            candidates.values(),
-            key=lambda c: -c.preliminary_score,
-        )[:10]  # 只从 top 10 扩展
+        explicit_candidates = [
+            candidate for candidate in candidates.values()
+            if any(
+                evidence.source == CandidateSource.EXPLICIT_PATH
+                for evidence in candidate.evidence
+            )
+        ]
+        if explicit_candidates:
+            strong_candidates = explicit_candidates
+        else:
+            # 按分数排序，只从高分候选扩展
+            strong_candidates = sorted(
+                candidates.values(),
+                key=lambda c: -c.preliminary_score,
+            )[:10]  # 只从 top 10 扩展
 
         added_count = 0
         for candidate in strong_candidates:
@@ -381,30 +394,32 @@ class CandidateGenerator:
 
             # outgoing: 这个文件依赖了谁？
             for dep in self.import_graph.dependencies_of(candidate.path):
-                if dep not in candidates:
-                    self._add_evidence(
-                        candidates,
-                        dep,
-                        CandidateEvidence(
-                            source=CandidateSource.IMPORT_DEPENDENCY,
-                            detail=f"被 '{candidate.path}' 依赖",
-                            weight=_Weight.IMPORT_NEIGHBOR,
-                        ),
-                    )
+                was_new = dep not in candidates
+                self._add_evidence(
+                    candidates,
+                    dep,
+                    CandidateEvidence(
+                        source=CandidateSource.IMPORT_DEPENDENCY,
+                        detail=f"被 '{candidate.path}' 依赖",
+                        weight=_Weight.IMPORT_NEIGHBOR,
+                    ),
+                )
+                if was_new:
                     added_count += 1
 
             # incoming: 谁依赖了这个文件？
             for dep in self.import_graph.dependents_of(candidate.path):
-                if dep not in candidates:
-                    self._add_evidence(
-                        candidates,
-                        dep,
-                        CandidateEvidence(
-                            source=CandidateSource.IMPORT_DEPENDENT,
-                            detail=f"依赖了 '{candidate.path}'",
-                            weight=_Weight.IMPORT_NEIGHBOR,
-                        ),
-                    )
+                was_new = dep not in candidates
+                self._add_evidence(
+                    candidates,
+                    dep,
+                    CandidateEvidence(
+                        source=CandidateSource.IMPORT_DEPENDENT,
+                        detail=f"依赖了 '{candidate.path}'",
+                        weight=_Weight.IMPORT_NEIGHBOR,
+                    ),
+                )
+                if was_new:
                     added_count += 1
 
     # ── 来源 7：测试文件 ─────────────────────────────────────
@@ -465,6 +480,8 @@ class CandidateGenerator:
         "版本", "配置", "环境", "lint", "format",
         "dependencies", "build", "test", "deploy",
         "pip", "npm", "cargo", "go mod",
+        "规则", "不允许", "手动修改", "生成代码", "generated",
+        "agents.md", "do not modify",
     }
 
     _IMPORTANT_CONFIGS = [

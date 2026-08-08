@@ -12,8 +12,15 @@ from pathlib import Path
 import subprocess
 
 from codeteam.repository.file_classifier import FileClassifier
+from codeteam.repository.git_inventory import GitInventory
 from codeteam.repository.language_detector import LanguageDetector
-from codeteam.repository.models import FileKind, RepositoryFile, RepositorySnapshot
+from codeteam.repository.models import (
+    FileImportance,
+    FileKind,
+    GitStatus,
+    RepositoryFile,
+    RepositorySnapshot,
+)
 from codeteam.repository.paths import normalize_repo_path
 
 
@@ -37,6 +44,8 @@ _WALK_IGNORED_DIRS = {
     ".mypy_cache",
     ".ruff_cache",
     ".codeteam",
+    "node_modules",
+    "vendor",
 }
 
 '''
@@ -75,14 +84,22 @@ class RepositoryScanner:
     def scan(self) -> RepositorySnapshot:
         is_git_repo = self._is_git_repo()
 
+        status_by_path: dict[str, GitStatus] = {}
         if is_git_repo:
-            relative_paths = self._git_files()
+            inventory_records = GitInventory(self.root).scan()
+            relative_paths = [record.path for record in inventory_records]
+            status_by_path = {
+                record.path: record.status for record in inventory_records
+            }
         else:
             relative_paths = self._walk_files()
         files = []
 
         for relative_path in relative_paths:
-            repository_file = self._build_repository_file(relative_path)
+            repository_file = self._build_repository_file(
+                relative_path,
+                status=status_by_path.get(relative_path, GitStatus.UNKNOWN),
+            )
 
             if repository_file.kind == FileKind.IGNORED:
                 continue
@@ -140,17 +157,24 @@ class RepositoryScanner:
 
         return paths
 
-    def _build_repository_file(self, relative_path: str) -> RepositoryFile:# 把路径构建为RepositoryFile对象
+    def _build_repository_file(
+        self,
+        relative_path: str,
+        status: GitStatus = GitStatus.UNKNOWN,
+    ) -> RepositoryFile:# 把路径构建为RepositoryFile对象
         full_path = self.root / relative_path
-        size_bytes = full_path.stat().st_size
+        size_bytes = full_path.stat().st_size if full_path.exists() else 0
 
         normalized_path = normalize_repo_path(self.root, relative_path)# 规范化路径，返回相对于仓库根目录的POSIX风格路径
 
+        kind = self.file_classifier.classify(normalized_path)
         return RepositoryFile(
             path=normalized_path,
             language=self.language_detector.detect(normalized_path),
-            kind=self.file_classifier.classify(normalized_path),
+            kind=kind,
             size_bytes=size_bytes,
+            status=status,
+            importance=self._importance_for(normalized_path, kind),
         )
 
 
@@ -179,6 +203,12 @@ class RepositoryScanner:
 
         return sorted(important_configs)
 
+    def _importance_for(self, relative_path: str, kind: FileKind) -> FileImportance:
+        file_name = Path(relative_path).name
+        if kind == FileKind.INSTRUCTION or file_name in {"AGENTS.md", ".clinerules"}:
+            return FileImportance.HIGH
+        return FileImportance.NORMAL
+
     def _walk_files(self) -> list[str]:
         relative_paths = []
 
@@ -192,6 +222,11 @@ class RepositoryScanner:
 
             for file_name in file_names:
                 full_path = current_path / file_name
+                if full_path.is_symlink():
+                    try:
+                        full_path.resolve(strict=True).relative_to(self.root)
+                    except (FileNotFoundError, ValueError):
+                        continue
                 relative_path = full_path.relative_to(self.root).as_posix()
                 relative_paths.append(relative_path)
 

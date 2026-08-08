@@ -21,12 +21,28 @@ class FileKind(str, Enum):
     IGNORED = "ignored"# 忽略文件
 
 
+class GitStatus(str, Enum):
+    TRACKED = "tracked"
+    UNTRACKED = "untracked"
+    DELETED = "deleted"
+    IGNORED = "ignored"
+    UNKNOWN = "unknown"
+
+
+class FileImportance(str, Enum):
+    HIGH = "high"
+    NORMAL = "normal"
+    LOW = "low"
+
+
 @dataclass
 class RepositoryFile:
     path: str
     language: str | None
     kind: FileKind
     size_bytes: int
+    status: GitStatus = GitStatus.UNKNOWN
+    importance: FileImportance = FileImportance.NORMAL
 
 
 @dataclass

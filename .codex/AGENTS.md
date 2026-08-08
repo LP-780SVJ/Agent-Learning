@@ -8,6 +8,8 @@ This project is a learning-oriented coding agent framework. The main goal is to 
 
 Use Python 3.11 for development.
 
+Must use the project virtual environment for commands: `.venv/bin/python`. Do not use the system default `python3`.
+
 Create and activate a virtual environment with:
 
 ```bash

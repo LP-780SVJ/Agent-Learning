@@ -153,7 +153,7 @@ class InspectRepository:
 
                 # 解析
                 parse_result = self.parser_registry.parse(
-                    source_code, "python", repo_file.path
+                    source_code, "python:strict", repo_file.path
                 )
 
                 if parse_result.status == ParseStatus.SUCCESS:
