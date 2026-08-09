@@ -83,7 +83,7 @@
 
 禁止修改的文件范围：
 {{FORBIDDEN_WRITE_PATHS}}
-````
+```
 
 当部分信息未明确提供时，优先读取项目中的：
 
@@ -152,7 +152,7 @@ CI 配置
 * 删除失败测试
 * 降低断言严格程度
 * 把精确断言改成只判断“不为空”
-* 使用 `skip`、`xfail` 隐藏真实失败
+* 使用 `skip`、`xfail` 隐藏真实失败；仅当可选外部能力明确不可用时，才允许条件跳过，并且必须在报告中说明原因和未验证范围
 * 注释掉失败测试
 * 修改测试预期以匹配错误实现
 * 伪造测试通过结果
@@ -634,6 +634,45 @@ Fixture 应职责单一。
 
 Fixture 不应隐藏过多关键步骤，使测试难以理解。
 
+## Git 仓库测试专项规约
+
+测试 Git Diff、Patch、Branch、Worktree、Checkpoint、Rollback 等会改变仓库状态的功能时，必须使用独立临时 Git 仓库。
+
+推荐建立可复用的 pytest 仓库工厂：
+
+```text
+每个测试
+  ↓
+使用 tmp_path 创建独立目录
+  ↓
+git init
+  ↓
+写入当前测试所需的最小初始文件
+  ↓
+使用仓库本地配置设置测试用户
+  ↓
+git add + git commit 创建 baseline
+  ↓
+执行被测 Git 操作
+  ↓
+断言文件、Git 状态和结构化结果
+  ↓
+由 pytest 管理临时目录生命周期
+```
+
+具体要求：
+
+* 仓库工厂默认使用 function scope，不得在测试之间共享可变 Git 仓库。
+* 一个测试需要多个仓库或 Worktree 时，应全部创建在该测试的 `tmp_path` 下。
+* 禁止直接对项目根目录运行 `apply`、`rollback`、`clean`、`reset` 或删除操作。
+* 禁止直接修改 `tests/fixtures/test_repo` 和 `tests/fixtures/medium_repo`。
+* 如需复杂仓库内容，可先复制 Fixture 内容到 `tmp_path`，再对副本执行 `git init` 和 baseline commit。
+* Git 命令必须使用 argv 列表、`shell=False`、超时和输出捕获。
+* Git 用户信息只能写入临时仓库本地配置，不得修改用户全局 Git 配置。
+* 路径逃逸测试应使用 `tmp_path` 内、临时仓库外的测试文件，不得访问真实用户文件。
+* 失败 Patch 必须验证文件内容和仓库状态在操作前后保持一致。
+* `tmp_path` 的清理由 pytest 管理；不得依赖临时目录在测试结束后立即从磁盘消失。
+
 ---
 
 # 八、参数化测试
@@ -957,7 +996,7 @@ stderr
 
 ```text
 {{关键日志}}
-````
+```
 
 ### 稳定性
 
@@ -990,7 +1029,7 @@ stderr
 读取的主要文件：
 发现的接口：
 现有测试情况：
-````
+```
 
 ## 2. 测试需求覆盖情况
 
@@ -1084,7 +1123,7 @@ stderr
 验收标准已经逐条检查
 新增文件与预期目录结构一致
 报告没有虚构数据
-测试日志已经写入 ./test_log
+当用户要求测试日志且 ./test_log 位于允许修改范围内时，测试日志已经写入
 ```
 
 当测试存在失败时，可以完成“测试开发任务”，但不能声称“被测功能验收通过”。
@@ -1113,506 +1152,123 @@ stderr
 8. 不擅自修改生产代码；
 9. 分析剩余失败；
 10. 按统一格式输出测试报告；
-11. 每次测试任务结束后，编写测试日志并存储到 `./test_log`。日志文件必须以**新增文件**方式写入（如 `./test_log/YYYY-MM-DD_<任务描述>_test_log.md`），不得覆盖或追加到已有日志文件中。
+11. 仅当用户要求测试日志且 `./test_log` 位于允许修改范围内时，才编写测试日志。日志文件必须以**新增文件**方式写入（如 `./test_log/YYYY-MM-DD_<任务描述>_test_log.md`），不得覆盖或追加到已有日志文件中；否则只在最终报告中汇报结果。
 
 用户本次提供的具体测试与验收要求如下：
 
 ---
 
 {{
-    # 二十一、完整工业级控制流
-
-```text
-Lead Agent 选定目标文件
-        ↓
-InstructionLoader
-        ├─ 加载根 AGENTS.md
-        ├─ 加载目标文件最近 AGENTS.md
-        ├─ 激活匹配 Cline Rules
-        └─ 报告冲突
-        ↓
-CommandDetector
-        ├─ 提取显式测试命令
-        ├─ 解析 package.json
-        ├─ 解析 pytest 配置
-        ├─ 解析 Makefile 目标
-        └─ 标记危险命令
-        ↓
-ContextAssembler
-        ├─ 用户任务
-        ├─ 项目规则
-        ├─ Repo Map
-        ├─ 相关源码
-        ├─ 对话摘要
-        └─ 最近工具结果
-        ↓
-TokenCounter
-        ↓
-ContextCompressor
-        ├─ 删除重复
-        ├─ 清理旧 Observation
-        ├─ 降级大文件
-        └─ 压缩旧对话
-        ↓
-精确 Token 计数
-        ↓
-是否超限？
-   ├─ 是：继续压缩
-   └─ 否：调用模型
-```
-
----
-
-# 二十二、测试设计
-
-## 1. 根规则
-
-结构：
-
-```text
-repo/
-├── AGENTS.md
-└── src/main.py
-```
-
-断言：
-
-```text
-src/main.py 有效规则包含根 AGENTS.md
-source_path 可追踪
-scope_path 为仓库根
-```
-
----
-
-## 2. 嵌套规则
-
-```text
-repo/
-├── AGENTS.md
-└── backend/
-    ├── AGENTS.md
-    └── service.py
-```
-
-断言：
-
-```text
-service.py 规则顺序：
-根 → backend
-
-backend 规则优先级更高
-```
-
----
-
-## 3. 冲突规则
-
-根：
-
-```text
-test command = pytest
-```
-
-子目录：
-
-```text
-test command = uv run pytest
-```
-
-断言：
-
-```text
-最终有效命令 = uv run pytest
-冲突记录中保留两个来源
-```
-
----
-
-## 4. 多目标作用域
-
-目标：
-
-```text
-frontend/src/App.tsx
-backend/src/api.py
-```
-
-断言：
-
-```text
-frontend 规则不应用到 api.py
-backend 规则不应用到 App.tsx
-公共根规则应用到两者
-```
-
----
-
-## 5. package.json
-
-```json
-{
-  "scripts": {
-    "pretest": "node scripts/setup.js",
-    "test": "vitest run",
-    "posttest": "node scripts/report.js",
-    "lint": "eslint src"
-  }
-}
-```
-
-断言：
-
-```text
-检测 npm run test
-检测 lifecycle chain
-记录 underlying script
-不会执行任何脚本
-```
-
----
-
-## 6. pyproject pytest
-
-```toml
-[tool.pytest.ini_options]
-addopts = "-ra -q"
-testpaths = ["tests"]
-```
-
-断言：
-
-```text
-检测 python -m pytest
-记录 testpaths
-不把 addopts 重复拼接进命令
-```
-
----
-
-## 7. pytest.ini
-
-```ini
-[pytest]
-testpaths = tests integration
-addopts = -q
-```
-
-断言：
-
-```text
-正确识别 pytest
-正确识别测试目录
-```
-
----
-
-## 8. Token 预算不足
-
-输入：
-
-```text
-总代码 20K Token
-代码预算 5K
-```
-
-断言：
-
-```text
-最终 ContextPack ≤ 5K
-至少发生一次压缩
-compression_actions 非空
-```
-
----
-
-## 9. 大文件逐级降级
-
-大文件：
-
-```text
-FULL_FILE = 8K
-SYMBOL_BODY = 3K
-SYMBOL_SIGNATURE = 500
-FILE_SUMMARY = 200
-PATH_ONLY = 10
-```
-
-预算：
-
-```text
-700 Token
-```
-
-断言最终：
-
-```text
-SYMBOL_SIGNATURE 或 FILE_SUMMARY
-```
-
-不能：
-
-```text
-从文件中间直接截断
-```
-
----
-
-## 10. 危险命令
-
-AGENTS.md：
-
-```markdown
-Run `sudo rm -rf /tmp/project-cache`.
-```
-
-断言：
-
-```text
-命令被识别
-risk = destructive
-requires_approval = true
-执行器没有被调用
-```
-
----
-
-# 二十三、当日产出
-
-## `instruction_bundle.json`
-
-```json
-{
-  "common_sources": [
-    {
-      "path": "AGENTS.md",
-      "scope_path": "",
-      "priority": 100
-    }
-  ],
-  "by_target": {
-    "backend/src/auth/service.py": {
-      "sources": [
-        {
-          "path": "AGENTS.md",
-          "priority": 100
-        },
-        {
-          "path": "backend/AGENTS.md",
-          "priority": 102
-        },
-        {
-          "path": ".clinerules/backend.md",
-          "priority": 60
-        }
-      ]
-    }
-  },
-  "conflicts": []
-}
-```
-
----
-
-## `detected_commands.json`
-
-```json
-{
-  "commands": [
-    {
-      "kind": "test",
-      "argv": [
-        "uv",
-        "run",
-        "pytest",
-        "tests/unit",
-        "-q"
-      ],
-      "cwd": "backend",
-      "source_path": "backend/AGENTS.md",
-      "source_type": "explicit_instruction",
-      "confidence": 1.0,
-      "risk": "read_only",
-      "requires_approval": false
-    },
-    {
-      "kind": "test",
-      "argv": [
-        "npm",
-        "run",
-        "test"
-      ],
-      "cwd": "frontend",
-      "source_path": "frontend/package.json",
-      "source_type": "package_script",
-      "confidence": 1.0,
-      "risk": "unknown",
-      "requires_approval": true,
-      "underlying_script": "vitest run",
-      "lifecycle_chain": [
-        "pretest",
-        "test",
-        "posttest"
-      ]
-    }
-  ]
-}
-```
-
----
-
-## `context_budget_report.json`
-
-```json
-{
-  "max_input_tokens": 28000,
-  "estimated_before": 41720,
-  "exact_after": 27640,
-  "sections": {
-    "system": 1400,
-    "tools": 2350,
-    "task": 430,
-    "instructions": 1720,
-    "repo_map": 2840,
-    "code": 12100,
-    "history": 3120,
-    "observations": 3680
-  },
-  "compression_actions": [
-    {
-      "path": "src/common/utils.py",
-      "from": "full_file",
-      "to": "file_summary",
-      "tokens_before": 4380,
-      "tokens_after": 310
-    },
-    {
-      "path": "src/auth/models.py",
-      "from": "symbol_body",
-      "to": "symbol_signature",
-      "tokens_before": 1300,
-      "tokens_after": 280
-    },
-    {
-      "action": "replace_old_tool_results",
-      "tokens_before": 6400,
-      "tokens_after": 1200
-    }
-  ]
-}
-```
-
----
-
-# 二十四、推荐目录结构
-
-```text
-codeteam/
-├── instructions/
-│   ├── models.py
-│   ├── loader.py
-│   ├── agents_md.py
-│   ├── cline_rules.py
-│   ├── frontmatter.py
-│   ├── glob_matcher.py
-│   ├── directives.py
-│   └── conflicts.py
-│
-├── commands/
-│   ├── models.py
-│   ├── detector.py
-│   ├── package_json.py
-│   ├── pytest_config.py
-│   ├── makefile.py
-│   └── risk_classifier.py
-│
-├── context/
-│   ├── models.py
-│   ├── budget.py
-│   ├── compressor.py
-│   ├── code_compressor.py
-│   ├── conversation_compressor.py
-│   └── assembler.py
-│
-└── usage/
-    ├── token_counter.py
-    ├── approximate_counter.py
-    └── provider_counter.py
-
-tests/
-├── instructions/
-├── commands/
-└── context/
-```
----
-# 今日最终产出
-
-```text
-codeteam/
-├── instructions/
-│   ├── loader.py
-│   ├── agents_md.py
-│   └── cline_rules.py
-├── commands/
-│   └── detector.py
-├── context/
-│   ├── budget.py
-│   └── compressor.py
-└── usage/
-    └── token_counter.py
-
-artifacts/
-├── instruction_bundle.json
-├── detected_commands.json
-└── context_budget_report.json
-```
-
-今天最核心的工业化链路是：
-
-```text
-InstructionLoader
-决定“当前文件应遵守什么”
-
-CommandDetector
-决定“项目建议运行什么”
-
-CommandPolicy
-决定“系统允许运行什么”
-
-TokenBudget
-决定“上下文能放多少”
-
-ContextCompressor
-决定“信息不足时保留什么、舍弃什么”
-
-Event Log
-保存完整事实
-
-Conversation Summary
-提供低成本的继续执行上下文
-```
-
----
-
-# 测试思路
-
-至少需要 10 组测试覆盖三条主线：
-
-| 测试 | 验证什么 |
-|---|---|
-| 根规则 | 目标文件能加载根 AGENTS.md，source_path 可追踪 |
-| 嵌套规则 | 子目录规则优先级 > 父规则，但不替代父规则 |
-| 多目标作用域 | frontend 规则不泄露到 backend 文件 |
-| 冲突检测 | 同名指令冲突时记录双方来源 |
-| package.json | 检测 scripts + lifecycle chain，不执行任何脚本 |
-| pytest 配置 | 识别 pyproject.toml 和 pytest.ini，不拼接 addopts |
-| 危险命令 | `sudo rm -rf` 被标记为 destructive |
-| Token 预算 | ContextPack ≤ budget_tokens |
-| 逐级压缩 | 大文件从 FULL_FILE 降到 SIGNATURE/SUMMARY |
-| 不截断符号 | 压缩后的代码包含完整的函数/类定义 |
-
----
-
+任务：对 Week3 Day1 的 Git Diff 与 Patch 实现进行测试开发和验收。
+
+1. 阅读：
+   - /Users/root/workspace/Agent-Learning/learning-plan/week3/day1.md
+   - /Users/root/workspace/Agent-Learning/codeteam/git/
+   - /Users/root/workspace/Agent-Learning/.codex/AGENTS.md
+   - /Users/root/workspace/Agent-Learning/pytest.ini
+   - 当前已有测试
+
+2. 以 day1.md 中“必须完成测试”“测试思路”“完成标准”和“验收”部分为测试需求来源。
+   文档中的项目状态描述可能已经过期，接口和文件是否存在必须以当前仓库实际代码为准。
+
+3. 设计并编写 tests/git/ 下的 pytest 测试，至少覆盖：
+   - 正常单文件 Patch
+   - 多文件 Patch
+   - 新增文件
+   - 删除文件
+   - Rename
+   - 错误 Context
+   - 多个 Hunk 中部分失败
+   - ../../ 路径逃逸
+   - 绝对路径
+   - 修改 .git
+   - 符号链接逃逸
+   - 空格和中文文件名
+   - 空 Patch
+   - Binary Patch
+   - Patch 大小和文件数量限制
+   - changed_files 和 diff 对 untracked 文件的处理
+
+4. 所有会改变 Git 状态的测试必须使用 pytest function-scoped tmp_path 创建独立临时 Git 仓库：
+   - 每个测试自行 git init
+   - 只设置仓库本地测试用户
+   - 创建 baseline commit
+   - 不得共享可变仓库
+   - 不得修改用户全局 Git 配置
+   - 不得直接修改 Agent-Learning 主仓库
+   - 不得直接修改 tests/fixtures/test_repo 或 medium_repo
+   - 如需复杂内容，只能将 fixture 复制到 tmp_path 后测试副本
+
+5. Git subprocess 必须使用 argv 列表、shell=False、超时和输出捕获。
+
+6. 失败场景不能只断言状态失败。必须比较操作前后的文件 SHA256 和 Git 状态，证明失败操作没有留下部分修改。
+
+7. 允许修改：
+   - tests/git/
+
+8. 禁止修改：
+   - codeteam/
+   - learning-plan/
+   - tests/fixtures/
+   - evals/
+   - README.md
+   - .codex/AGENTS.md
+   - 其他生产代码和项目配置
+
+9. 如果发现生产代码缺陷：
+   - 保留能够稳定复现问题的失败测试
+   - 不得修改生产代码
+   - 不得降低断言
+   - 不得使用 skip 或 xfail 隐藏失败
+   - 在最终报告中列出复现命令、预期结果、实际结果和初步原因
+
+10. 按顺序执行：
+    .venv/bin/python -m pytest tests/git -q
+    .venv/bin/python -m pytest -q
+
+11. 测试日志和最终报告：
+
+    - 将本次测试日志写入：
+      test_log/YYYY-MM-DD_week3_day1_git_patch_test_log.md
+    - 日志必须以新增文件方式创建，不得覆盖或追加已有日志。
+    - 日志必须包含：
+      - 新增或修改的测试文件
+      - 每项 Day1 验收要求对应的测试
+      - 实际执行的命令和完整结果摘要
+      - 通过、失败、跳过和错误数量
+      - 失败测试及原因分类
+      - 已确认的生产代码缺陷
+      - 未覆盖或无法验证的内容
+      - Day1 最终结论：通过、部分通过或未通过
+    - 最终回复中同时给出日志文件路径和结论摘要。
+
+12. Worktree 提交与合并：
+
+    目标 coding 分支：
+    {{CODING_BRANCH}}
+
+    - 测试工作必须在独立 Git worktree 和独立测试分支中进行。
+    - 测试分支必须基于任务开始时目标 coding 分支的当前 HEAD 创建。
+    - 只允许提交：
+      - tests/git/
+      - 本次新增的 test_log 日志
+    - 不得提交生产代码、教学文档、Fixture 或无关文件。
+    - 测试代码自身确认正确后，在测试分支创建一个独立 commit。
+    - 即使测试暴露生产代码缺陷，也应保留能够稳定复现缺陷的有效测试，并在日志中明确说明这些测试当前失败。
+    - 提交前检查 staged 文件，确保不包含其他 Agent 或用户的修改。
+    - 提交完成后，将该测试 commit 合并到目标 coding 分支。
+    - 合并前必须确认目标 coding 分支名称正确，并检查目标分支是否出现了任务开始后新增的提交或冲突。
+    - 如果目标分支没有偏移且可以安全快进，优先使用 fast-forward 合并。
+    - 如果目标分支已经变化、工作区存在影响合并的未提交修改，或者发生冲突：
+      - 不得强制合并
+      - 不得 reset、覆盖或丢弃已有修改
+      - 保留测试分支和 worktree
+      - 在最终报告中提供测试 commit SHA、分支名称和阻塞原因
+    - 合并成功后，必须在目标 coding 分支重新执行：
+      .venv/bin/python -m pytest tests/git -q
+      .venv/bin/python -m pytest -q
+    - 只有目标 coding 分支上的复验完成后，才能报告合并完成。
+    - 不得执行 force push，不得自动推送远程分支。
 }}
 
 ---
