@@ -69,7 +69,113 @@ def extract_patch_paths(root: Path, patch: bytes) -> list[str]:
         message = result.stderr.decode("utf-8", errors="replace")
         raise PatchParseError(message or "Unable to parse patch paths.")
 
-    return parse_numstat_paths(result.stdout)
+    return _dedupe_paths(
+        [
+            *parse_rename_copy_header_paths(patch),
+            *parse_numstat_paths(result.stdout),
+        ]
+    )
+
+
+def parse_rename_copy_header_paths(patch: bytes) -> list[str]:
+    """从 rename/copy header 中补充 old/new 两侧路径。"""
+    paths: list[str] = []
+    source_path: str | None = None
+    target_prefix: bytes | None = None
+
+    for line in patch.splitlines():
+        if line.startswith(b"diff --git "):
+            source_path = None
+            target_prefix = None
+            continue
+
+        if line.startswith(b"rename from "):
+            source_path = decode_git_patch_path(line[len(b"rename from "):])
+            target_prefix = b"rename to "
+            continue
+
+        if line.startswith(b"copy from "):
+            source_path = decode_git_patch_path(line[len(b"copy from "):])
+            target_prefix = b"copy to "
+            continue
+
+        if source_path is not None and target_prefix is not None:
+            if line.startswith(target_prefix):
+                target_path = decode_git_patch_path(line[len(target_prefix):])
+                paths.append(source_path)
+                paths.append(target_path)
+                source_path = None
+                target_prefix = None
+                continue
+
+    return paths
+
+
+def decode_git_patch_path(path_token: bytes) -> str:
+    """解码 Git patch header 中可能出现的 C-style quoted 路径。"""
+    token = path_token.strip()
+
+    if not token:
+        raise PatchParseError("Patch path cannot be empty.")
+
+    if token.startswith(b'"'):
+        if not token.endswith(b'"') or len(token) == 1:
+            raise PatchParseError("Malformed quoted patch path.")
+        return os.fsdecode(_decode_c_quoted_bytes(token[1:-1]))
+
+    return os.fsdecode(token)
+
+
+def _decode_c_quoted_bytes(data: bytes) -> bytes:
+    decoded = bytearray()
+    cursor = 0
+
+    while cursor < len(data):
+        byte = data[cursor]
+
+        if byte != ord("\\"):
+            decoded.append(byte)
+            cursor += 1
+            continue
+
+        cursor += 1
+        if cursor >= len(data):
+            raise PatchParseError("Malformed quoted patch path.")
+
+        escaped = data[cursor]
+
+        if ord("0") <= escaped <= ord("7"):
+            octal = bytearray([escaped])
+            cursor += 1
+            while (
+                cursor < len(data)
+                and len(octal) < 3
+                and ord("0") <= data[cursor] <= ord("7")
+            ):
+                octal.append(data[cursor])
+                cursor += 1
+            decoded.append(int(octal.decode("ascii"), 8))
+            continue
+
+        escape_map = {
+            ord("a"): b"\a",
+            ord("b"): b"\b",
+            ord("f"): b"\f",
+            ord("n"): b"\n",
+            ord("r"): b"\r",
+            ord("t"): b"\t",
+            ord("v"): b"\v",
+            ord("\\"): b"\\",
+            ord('"'): b'"',
+        }
+
+        if escaped not in escape_map:
+            raise PatchParseError("Unsupported quoted patch path escape.")
+
+        decoded.extend(escape_map[escaped])
+        cursor += 1
+
+    return bytes(decoded)
 
 def parse_numstat_paths(
     data: bytes,
@@ -79,57 +185,68 @@ def parse_numstat_paths(
 
     cursor = 0
 
-    while cursor < len(data):
-        tab1 = data.index(b"\t", cursor)
-        tab2 = data.index(b"\t", tab1 + 1)
+    try:
+        while cursor < len(data):
+            tab1 = data.index(b"\t", cursor)
+            tab2 = data.index(b"\t", tab1 + 1)
 
-        path_end = data.index(
-            b"\0",
-            tab2 + 1,
-        )
-
-        first_path = data[
-            tab2 + 1:path_end
-        ]
-
-        cursor = path_end + 1
-
-        if first_path:
-            paths.append(
-                os.fsdecode(first_path)
+            path_end = data.index(
+                b"\0",
+                tab2 + 1,
             )
-            continue
 
-        # Rename / Copy
-        old_end = data.index(
-            b"\0",
-            cursor,
-        )
+            first_path = data[
+                tab2 + 1:path_end
+            ]
 
-        old_path = data[
-            cursor:old_end
-        ]
+            cursor = path_end + 1
 
-        cursor = old_end + 1
+            if first_path:
+                paths.append(
+                    os.fsdecode(first_path)
+                )
+                continue
 
-        new_end = data.index(
-            b"\0",
-            cursor,
-        )
+            # Some numstat -z producers encode rename/copy as:
+            # additions<TAB>deletions<TAB>NUL old-path NUL new-path NUL.
+            old_end = data.index(
+                b"\0",
+                cursor,
+            )
 
-        new_path = data[
-            cursor:new_end
-        ]
+            old_path = data[
+                cursor:old_end
+            ]
 
-        cursor = new_end + 1
+            cursor = old_end + 1
 
-        paths.append(
-            os.fsdecode(old_path)
-        )
-        paths.append(
-            os.fsdecode(new_path)
-        )
+            new_end = data.index(
+                b"\0",
+                cursor,
+            )
 
+            new_path = data[
+                cursor:new_end
+            ]
+
+            cursor = new_end + 1
+
+            if not old_path or not new_path:
+                raise PatchParseError("Malformed rename/copy numstat output.")
+
+            paths.append(
+                os.fsdecode(old_path)
+            )
+            paths.append(
+                os.fsdecode(new_path)
+            )
+    except ValueError as error:
+        raise PatchParseError("Malformed git numstat output.") from error
+
+    return _dedupe_paths(paths)
+
+
+def _dedupe_paths(paths: list[str]) -> list[str]:
     return list(dict.fromkeys(paths))
 
 class PatchValidator:
