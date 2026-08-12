@@ -3,6 +3,7 @@ from __future__ import annotations
 from enum import Enum
 
 from pydantic import BaseModel, Field
+from pathlib import Path
 
 
 class GitChangeKind(str, Enum):
@@ -95,3 +96,21 @@ class PatchResult(BaseModel):
     stdout: str = ""
     applied: bool = False
     failure_reason: str | None = None
+
+class WorktreeInfo(BaseModel):
+    """一个任务 Worktree 的结构化信息。
+    字段说明：
+    - task_id: 任务 ID
+    - branch_name: 分支名
+    - path: linked worktree 的真实目录
+    - base_ref: 创建 worktree 时用户传入的起点
+    - base_sha: base_ref 解析出来的真实 commit sha
+    - head_sha: worktree 创建完成后，它当前 HEAD 的 commit sha
+    """
+
+    task_id: str
+    branch_name: str
+    path: Path
+    base_ref: str
+    base_sha: str
+    head_sha: str

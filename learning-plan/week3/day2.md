@@ -4244,3 +4244,957 @@ Task
 [10]: https://git-scm.com/docs/git-rev-parse?utm_source=chatgpt.com "Git - git-rev-parse Documentation"
 [11]: https://git-scm.com/docs/git-check-ref-format "Git - git-check-ref-format Documentation"
 [12]: https://git-scm.com/docs/git-worktree?utm_source=chatgpt.com "git-worktree Documentation - Git"
+
+---
+
+# Day 2 学习教程：Git Branch 与 Worktree 管理
+
+## 这部分在做什么
+
+今天要做的是给 Coding Agent 增加“任务隔离空间”。
+
+Day 1 已经让 Agent 能做到：
+
+```text
+收到 Patch
+→ 校验 Patch
+→ 应用 Patch
+→ 查看 Git Diff
+```
+
+但这仍然默认所有修改都发生在同一个 Working Tree 里。如果未来两个 Agent 同时执行两个任务，它们可能会互相污染文件状态、Git 状态和测试结果。
+
+Day 2 要解决的问题是：
+
+```text
+每个任务
+都有自己的 Branch
+都有自己的 Worktree
+都有自己的文件目录
+```
+
+这样：
+
+```text
+task-001 修改文件
+不会影响 task-002
+也不会影响 main 工作区
+```
+
+你可以把 Worktree 理解成：
+
+```text
+同一个 Git 仓库
+开出多个互相隔离的工作目录
+```
+
+这对 Coding Agent 很重要，因为 Agent 写代码、跑测试、失败回滚，都应该发生在自己的任务空间里，而不是直接弄乱用户当前正在编辑的目录。
+
+## 当前仓库现况
+
+根据当前仓库和日志：
+
+- `codeteam/git/` 已经有 Day 1 的 Git Diff、Patch、Workspace 基础模块。
+- 当前已有：
+  - `codeteam/git/models.py`
+  - `codeteam/git/errors.py`
+  - `codeteam/git/diff.py`
+  - `codeteam/git/patch.py`
+  - `codeteam/git/workspace.py`
+- 当前还没有：
+  - `codeteam/git/worktree.py`
+  - `tests/git/test_worktree.py`
+- Day 1 测试日志显示 Git/Patch 模块大部分通过，但有一个已知问题：
+
+```text
+Rename Patch 应用成功，
+但 PatchResult.affected_paths 遗漏旧路径。
+```
+
+这个问题属于 Day 1 的 Patch 元数据缺陷，不是 Day 2 Worktree 主线。今天可以先记录它，但不要让它挡住 WorktreeManager 的学习。
+
+## 涉及哪些文件
+
+今天建议主要涉及这些文件：
+
+```text
+codeteam/git/models.py
+codeteam/git/errors.py
+codeteam/git/workspace.py
+codeteam/git/worktree.py
+tests/git/test_worktree.py
+```
+
+每个文件的职责如下。
+
+### `codeteam/git/models.py`
+
+这里放 Git 相关的数据模型。
+
+Day 1 已经有：
+
+```text
+GitChange
+GitDiff
+PatchResult
+```
+
+Day 2 建议新增：
+
+```text
+WorktreeInfo
+```
+
+它用来描述一个任务 Worktree 的结果，例如：
+
+```text
+task_id
+branch_name
+path
+base_ref
+base_sha
+head_sha
+```
+
+为什么放在 `models.py`？
+
+因为 `WorktreeManager.create(...)` 最终不应该只返回一个字符串路径，而应该返回结构化对象。后续 Agent Loop、CheckpointManager、CommandRunner 都可以读这个对象。
+
+### `codeteam/git/errors.py`
+
+这里放 Git 模块统一异常。
+
+Day 1 已经有：
+
+```text
+GitWorkspaceError
+NotGitRepositoryError
+GitCommandError
+PatchParseError
+PatchSecurityError
+```
+
+Day 2 可以考虑新增：
+
+```text
+WorktreeError
+BranchAlreadyExistsError
+WorktreeAlreadyExistsError
+InvalidTaskIdError
+```
+
+第一版也可以只新增一个 `WorktreeError`，先把错误边界理清楚。
+
+### `codeteam/git/workspace.py`
+
+这个文件现在负责：
+
+```text
+定位 Git root
+执行 git diff
+执行 git apply
+返回 GitWorkspace
+```
+
+Day 2 不建议把 Worktree 逻辑塞进 `GitWorkspace`。
+
+更好的拆分是：
+
+```text
+GitWorkspace
+负责“一个具体工作目录里的 Git 操作”
+
+WorktreeManager
+负责“为任务创建和管理新的工作目录”
+```
+
+所以 `workspace.py` 可以被 `worktree.py` 使用，但不应该变成一个巨大的万能类。
+
+### `codeteam/git/worktree.py`
+
+这是今天的核心新文件。
+
+建议实现：
+
+```text
+WorktreeManager
+```
+
+它负责：
+
+```text
+校验 task_id
+计算 branch_name
+计算 worktree_path
+解析 base_ref 到 base_sha
+检查 branch 是否已存在
+检查 worktree 路径是否已存在
+执行 git worktree add -b ...
+验证创建结果
+返回 WorktreeInfo
+```
+
+### `tests/git/test_worktree.py`
+
+这是今天建议新增的测试文件。
+
+它要证明：
+
+```text
+create() 能创建独立 worktree
+task worktree 修改文件不会影响 main
+两个 task_id 会生成不同 branch 和 path
+branch 已存在时会拒绝
+路径已存在时会拒绝
+非法 task_id 会拒绝
+```
+
+## 文件之间的交互关系
+
+整体流程可以这样看：
+
+```text
+用户任务 task-001
+        ↓
+WorktreeManager.create(task_id="task-001", base_ref="main")
+        ↓
+校验 task_id
+        ↓
+生成 branch_name = codeteam/task-001
+        ↓
+生成 worktree_path = <worktree_root>/task-001
+        ↓
+git rev-parse main
+        ↓
+得到 base_sha
+        ↓
+git show-ref --verify refs/heads/codeteam/task-001
+        ↓
+确认 branch 不存在
+        ↓
+git worktree add -b codeteam/task-001 <path> main
+        ↓
+创建 linked worktree
+        ↓
+GitWorkspace(<path>)
+        ↓
+后续 Agent 在这个独立目录里 apply_patch / diff / run tests
+```
+
+从模块角度看：
+
+```text
+worktree.py
+    ├─ 使用 subprocess 执行 git worktree / git rev-parse
+    ├─ 使用 models.py 里的 WorktreeInfo 返回结构化结果
+    ├─ 使用 errors.py 里的异常表达失败
+    └─ 创建完成后，后续可以交给 GitWorkspace 继续操作
+```
+
+重点是：
+
+```text
+WorktreeManager 不负责应用 Patch
+GitWorkspace 不负责创建 Worktree
+```
+
+两个职责分开，代码以后才好维护。
+
+## 建议拆成哪些步骤
+
+### 第 1 步：定义 `WorktreeInfo` 数据模型
+
+目标：
+
+```text
+让 create() 的返回值有统一结构
+```
+
+建议修改：
+
+```text
+codeteam/git/models.py
+```
+
+大致字段：
+
+```text
+task_id: str
+branch_name: str
+path: Path
+base_ref: str
+base_sha: str
+head_sha: str
+```
+
+为什么先做它：
+
+后面的 `WorktreeManager.create()`、测试断言、Agent Loop 接入，都需要知道“创建出来的 worktree 长什么样”。
+
+这一步会学习：
+
+- `BaseModel` 和 `dataclass` 的区别
+- 为什么已有 Git 模型用 Pydantic `BaseModel`
+- `Path` 类型什么时候适合放进模型
+- `str | Path` 和 `Path` 的区别
+
+### 第 2 步：设计 Worktree 相关异常
+
+目标：
+
+```text
+让失败原因清楚，而不是全部 RuntimeError
+```
+
+建议修改：
+
+```text
+codeteam/git/errors.py
+```
+
+第一版可以先加：
+
+```text
+WorktreeError
+```
+
+如果你想更细，可以继续加：
+
+```text
+InvalidTaskIdError
+BranchAlreadyExistsError
+WorktreeAlreadyExistsError
+```
+
+为什么第二步做它：
+
+Worktree 创建涉及很多拒绝场景。如果错误类型统一，测试就能清楚验证“为什么失败”。
+
+### 第 3 步：创建 `WorktreeManager` 的最小骨架
+
+目标：
+
+```text
+先让类能被实例化
+```
+
+建议新增：
+
+```text
+codeteam/git/worktree.py
+```
+
+最小设计：
+
+```text
+class WorktreeManager:
+    __init__(repo_root, worktree_root)
+```
+
+其中：
+
+```text
+repo_root
+= 主 Git 仓库路径
+
+worktree_root
+= 所有任务 worktree 存放的位置
+```
+
+为什么要单独传 `worktree_root`？
+
+因为 Agent 创建的临时工作目录不应该随便散落在项目里。后续可以统一放到：
+
+```text
+/tmp/codeteam-worktrees/
+```
+
+或者项目本地：
+
+```text
+.codeteam/worktrees/
+```
+
+第一版测试建议用 `tmp_path`，避免污染真实项目。
+
+### 第 4 步：实现 task_id 和 branch_name 规则
+
+目标：
+
+```text
+task_id="task-001"
+→ branch_name="codeteam/task-001"
+```
+
+建议规则：
+
+```text
+只允许字母、数字、点、下划线、短横线
+不允许空字符串
+不允许 ..
+不允许 /
+不允许 \
+不允许以 . 开头
+```
+
+为什么要限制？
+
+因为 `task_id` 未来可能来自用户任务、队列系统或模型输出。它最后会进入：
+
+```bash
+git worktree add -b codeteam/<task_id> ...
+```
+
+不能让它变成路径逃逸或奇怪 Git ref。
+
+这一小步会学习：
+
+- 字符串校验
+- `re.fullmatch(...)`
+- 为什么安全边界要在 subprocess 前面做
+
+### 第 5 步：封装 Git 命令执行
+
+目标：
+
+```text
+统一执行 git 命令
+统一 timeout
+统一 stdout/stderr
+统一 shell=False
+```
+
+建议在 `WorktreeManager` 里写一个内部方法：
+
+```text
+_run_git(args: list[str], cwd: Path | None = None) -> bytes
+```
+
+注意：
+
+```text
+args 只包含 git 后面的参数
+```
+
+例如：
+
+```text
+["rev-parse", "--verify", "main"]
+["worktree", "add", "-b", branch_name, path, base_ref]
+```
+
+内部真正执行：
+
+```text
+["git", *args]
+```
+
+这里延续 Day 1 的安全习惯：
+
+```text
+永远 shell=False
+永远 argv list
+不要拼接字符串命令
+```
+
+### 第 6 步：实现 base_ref 到 base_sha
+
+目标：
+
+```text
+base_ref="main"
+→ base_sha="具体 commit sha"
+```
+
+建议使用：
+
+```bash
+git rev-parse --verify main^{commit}
+```
+
+为什么要拿 `base_sha`？
+
+因为 `main` 是会移动的。今天创建任务时，`main` 指向 Commit A；明天 main 可能已经到了 Commit B。
+
+`base_sha` 是不可变的，可以记录：
+
+```text
+这个任务到底从哪个 Commit 开始
+```
+
+这对 Checkpoint、Review、Merge 都很重要。
+
+### 第 7 步：实现冲突检查
+
+目标：
+
+```text
+创建前先拒绝明显冲突
+```
+
+需要检查：
+
+```text
+branch 是否已经存在
+worktree path 是否已经存在
+```
+
+可以用：
+
+```bash
+git show-ref --verify --quiet refs/heads/codeteam/task-001
+```
+
+判断 branch 是否存在。
+
+路径检查用 Python：
+
+```text
+worktree_path.exists()
+```
+
+注意：
+
+```text
+不要使用 git worktree add --force
+```
+
+因为 Git 默认拒绝同一个 branch 被多个 worktree checkout，这是保护机制，不应该绕过。
+
+### 第 8 步：执行 `git worktree add -b`
+
+目标：
+
+```text
+真正创建任务 worktree
+```
+
+命令形态：
+
+```bash
+git worktree add -b codeteam/task-001 <worktree_path> <base_ref>
+```
+
+它做三件事：
+
+```text
+创建 branch
+创建 linked worktree
+把 branch checkout 到这个 worktree
+```
+
+成功后，你应该得到：
+
+```text
+<worktree_path>/
+├── .git
+├── codeteam/
+├── tests/
+└── ...
+```
+
+注意 linked worktree 里的 `.git` 通常是文件，不是目录。
+
+所以后续判断 Git 仓库时不要写：
+
+```text
+(path / ".git").is_dir()
+```
+
+要交给：
+
+```bash
+git rev-parse --show-toplevel
+```
+
+这点和 `GitWorkspace` 当前实现是匹配的。
+
+### 第 9 步：验证创建结果并返回 `WorktreeInfo`
+
+目标：
+
+```text
+不要只相信 git 命令成功，要确认结果符合预期
+```
+
+建议检查：
+
+```text
+git -C <worktree_path> branch --show-current
+git -C <worktree_path> rev-parse HEAD
+```
+
+确认：
+
+```text
+当前 branch == branch_name
+当前 HEAD == base_sha
+```
+
+然后返回：
+
+```text
+WorktreeInfo(...)
+```
+
+这样后续 Agent 可以拿着这个对象继续工作。
+
+### 第 10 步：写测试证明隔离性
+
+目标：
+
+```text
+用测试证明 worktree 真的隔离 main
+```
+
+建议新增：
+
+```text
+tests/git/test_worktree.py
+```
+
+重点不是测 Git 本身，而是测你的封装有没有满足 Agent 需要的不变量。
+
+## 整体实现思路
+
+第一版建议不要直接支持所有功能。先实现最小可靠闭环：
+
+```text
+WorktreeManager(repo_root, worktree_root)
+    ↓
+create(task_id, base_ref="HEAD")
+    ↓
+校验 task_id
+    ↓
+生成 codeteam/<task_id>
+    ↓
+解析 base_sha
+    ↓
+检查 branch/path 冲突
+    ↓
+git worktree add -b ...
+    ↓
+验证 branch/head
+    ↓
+返回 WorktreeInfo
+```
+
+第一版暂时可以不做：
+
+```text
+delete/remove worktree
+prune
+list
+detached mode
+handoff
+merge
+```
+
+原因是今天的核心学习目标是：
+
+```text
+Branch + Worktree 如何给 Agent 提供任务隔离
+```
+
+等这个闭环稳定后，再扩展清理、列表和 detached 模式。
+
+## 测试思路
+
+建议新增：
+
+```text
+tests/git/test_worktree.py
+```
+
+测试不要依赖真实项目目录，应该用 pytest 的 `tmp_path` 创建临时 Git 仓库。
+
+建议测试场景：
+
+### 1. 能创建 worktree 和 branch
+
+验证：
+
+```text
+manager.create("task-001")
+```
+
+返回：
+
+```text
+branch_name == "codeteam/task-001"
+path.exists() == True
+base_sha == head_sha
+```
+
+并用 Git 命令确认：
+
+```text
+git branch --show-current
+```
+
+在 linked worktree 中返回：
+
+```text
+codeteam/task-001
+```
+
+### 2. Worktree 修改不会污染 main
+
+流程：
+
+```text
+main 里有 app.py，内容 old
+create task-001 worktree
+在 task-001/app.py 写入 new
+读取 main/app.py
+```
+
+断言：
+
+```text
+task worktree 是 new
+main 仍然是 old
+```
+
+这是今天最重要的测试。
+
+### 3. 两个任务有不同 branch 和 path
+
+创建：
+
+```text
+task-001
+task-002
+```
+
+断言：
+
+```text
+branch_name 不同
+path 不同
+两个 path 都存在
+```
+
+### 4. 重复 task_id 被拒绝
+
+先创建：
+
+```text
+task-001
+```
+
+再创建：
+
+```text
+task-001
+```
+
+预期：
+
+```text
+抛出 WorktreeError 或更具体的 BranchAlreadyExistsError
+```
+
+因为同一个任务不应该创建两个共享同一 branch 的 worktree。
+
+### 5. 非法 task_id 被拒绝
+
+建议拒绝：
+
+```text
+""
+"../evil"
+"task/001"
+".hidden"
+"task\\001"
+```
+
+这个测试证明：
+
+```text
+用户输入不会直接变成危险路径或危险 branch ref
+```
+
+### 6. 不允许覆盖已有目录
+
+先手动创建：
+
+```text
+worktree_root/task-001/
+```
+
+再调用：
+
+```text
+manager.create("task-001")
+```
+
+预期失败。
+
+这可以避免误删或覆盖已有文件。
+
+## 如何运行验证
+
+单独运行 Day 2 测试：
+
+```bash
+.venv/bin/python -m pytest tests/git/test_worktree.py -q
+```
+
+运行全部 Git 相关测试：
+
+```bash
+.venv/bin/python -m pytest tests/git -q
+```
+
+运行全量测试：
+
+```bash
+.venv/bin/python -m pytest -q
+```
+
+注意：根据 Day 1 测试日志，当前 `tests/git/test_apply_patch.py::test_patch_can_rename_file` 可能仍然失败。它不是 Day 2 WorktreeManager 的失败。你可以在学习 Day 2 时先关注：
+
+```bash
+.venv/bin/python -m pytest tests/git/test_worktree.py -q
+```
+
+等 Worktree 学完后，再回头修 Day 1 rename metadata。
+
+## 今天需要重点理解的 Python 语法
+
+### `class` 是什么
+
+今天你会写：
+
+```text
+class WorktreeManager:
+```
+
+类可以理解成“把一组数据和函数放在一起的工具”。
+
+`WorktreeManager` 里面会保存：
+
+```text
+repo_root
+worktree_root
+```
+
+也会提供方法：
+
+```text
+create(...)
+```
+
+这比写一堆散落函数更清楚。
+
+### `Path` 是什么
+
+`Path` 是 Python 标准库里处理路径的对象。
+
+例如：
+
+```text
+Path("/tmp") / "task-001"
+```
+
+会得到：
+
+```text
+/tmp/task-001
+```
+
+比字符串拼接更安全。
+
+### `BaseModel` 是什么
+
+你当前 Git 模型使用 Pydantic：
+
+```text
+class GitDiff(BaseModel):
+```
+
+所以 `WorktreeInfo` 也可以继续用 `BaseModel`，这样模型风格一致。
+
+它的好处是：
+
+```text
+字段类型清楚
+可以序列化成 JSON
+测试输出更稳定
+```
+
+### `subprocess.run(...)` 是什么
+
+今天会继续用 Python 执行 Git 命令。
+
+要坚持：
+
+```text
+shell=False
+argv list
+timeout
+capture stdout/stderr
+```
+
+也就是：
+
+```text
+["git", "worktree", "add", "-b", branch_name, path, base_ref]
+```
+
+不要写：
+
+```text
+"git worktree add -b ..."
+```
+
+这是安全边界。
+
+### 为什么要拆小函数
+
+`create()` 如果直接写成一个巨大函数，会很难测。
+
+建议拆成：
+
+```text
+_validate_task_id
+_branch_name_for_task
+_worktree_path_for_task
+_resolve_commit
+_branch_exists
+_run_git
+_verify_created_worktree
+```
+
+每个函数只做一件事，测试和排错都会容易很多。
+
+## 今天的验收标准
+
+完成后，你应该能做到：
+
+```python
+manager = WorktreeManager(repo_root=repo, worktree_root=tmp_path / "worktrees")
+info = manager.create(task_id="task-001", base_ref="HEAD")
+```
+
+并满足：
+
+```text
+info.branch_name == "codeteam/task-001"
+info.path 存在
+info.base_sha == info.head_sha
+linked worktree 当前 branch 是 codeteam/task-001
+在 linked worktree 修改文件，不影响 main worktree
+重复 task_id 被拒绝
+非法 task_id 被拒绝
+已有路径不会被覆盖
+```
+
+这一天的核心不是“记住 git worktree 命令”，而是理解：
+
+```text
+Coding Agent 的每个任务都应该有自己的 Git 身份和文件系统执行空间。
+```
+
+当这个能力稳定后，后面的 Checkpoint、Rollback、CommandRunner、Docker Sandbox 才有可靠落脚点。
