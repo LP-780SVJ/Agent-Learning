@@ -1159,52 +1159,67 @@ stderr
 ---
 
 {{
-任务：对 Week3 Day1 的 Git Diff 与 Patch 实现进行测试开发和验收。
+任务：对 Week3 Day2 的 Git Branch 与 Worktree 实现进行测试开发和验收。
 
 1. 阅读：
-   - /Users/root/workspace/Agent-Learning/learning-plan/week3/day1.md
+   - /Users/root/workspace/Agent-Learning/learning-plan/week3/day2.md
    - /Users/root/workspace/Agent-Learning/codeteam/git/
    - /Users/root/workspace/Agent-Learning/.codex/AGENTS.md
    - /Users/root/workspace/Agent-Learning/pytest.ini
-   - 当前已有测试
+   - 当前已有测试，尤其是 tests/git/
 
-2. 以 day1.md 中“必须完成测试”“测试思路”“完成标准”和“验收”部分为测试需求来源。
+2. 以 day2.md 中“测试思路”“如何运行验证”“完成标准”“验收”和 WorktreeManager 相关章节为测试需求来源。
    文档中的项目状态描述可能已经过期，接口和文件是否存在必须以当前仓库实际代码为准。
+   注意：day2.md 中提到 Day1 rename metadata 可能仍然失败，这是过期信息。当前 tests/git 应该整体通过，不得将 Day1 失败视为可忽略背景。
 
 3. 设计并编写 tests/git/ 下的 pytest 测试，至少覆盖：
-   - 正常单文件 Patch
-   - 多文件 Patch
-   - 新增文件
-   - 删除文件
-   - Rename
-   - 错误 Context
-   - 多个 Hunk 中部分失败
-   - ../../ 路径逃逸
-   - 绝对路径
-   - 修改 .git
-   - 符号链接逃逸
-   - 空格和中文文件名
-   - 空 Patch
-   - Binary Patch
-   - Patch 大小和文件数量限制
-   - changed_files 和 diff 对 untracked 文件的处理
+   - WorktreeManager 能创建 linked worktree 和对应 task branch
+   - create 返回结构化 WorktreeInfo，包含 worktree path、branch_name、base_sha/head_sha 等当前实现提供的字段
+   - linked worktree 中 git branch --show-current 返回任务分支
+   - linked worktree 的 HEAD 基于指定 base_ref
+   - linked worktree 的 .git 可以是文件，不得错误假设它必须是目录
+   - task worktree 修改文件不会污染 main worktree
+   - task worktree 修改文件不会污染其他 task worktree
+   - 两个不同 task_id 生成不同 branch 和 path
+   - 重复 task_id 或重复 branch 被拒绝
+   - 非法 task_id 被拒绝，包括：
+     - ""
+     - "../evil"
+     - "task/001"
+     - ".hidden"
+     - "task\\001"
+   - worktree path 已存在时拒绝覆盖
+   - base_ref 不存在时失败清晰
+   - 不允许使用 git worktree add --force
+   - Git subprocess 使用 argv、shell=False、超时和输出捕获
 
 4. 所有会改变 Git 状态的测试必须使用 pytest function-scoped tmp_path 创建独立临时 Git 仓库：
    - 每个测试自行 git init
    - 只设置仓库本地测试用户
    - 创建 baseline commit
+   - 如需 main 分支，测试内显式创建或重命名为 main
    - 不得共享可变仓库
    - 不得修改用户全局 Git 配置
    - 不得直接修改 Agent-Learning 主仓库
    - 不得直接修改 tests/fixtures/test_repo 或 medium_repo
    - 如需复杂内容，只能将 fixture 复制到 tmp_path 后测试副本
+   - 一个测试需要多个 linked worktree 时，所有 worktree 都必须位于该测试的 tmp_path 下
 
 5. Git subprocess 必须使用 argv 列表、shell=False、超时和输出捕获。
+   不得使用 shell=True。
+   不得使用 --force 绕过 Git worktree 的安全保护。
+   不得修改全局 Git config。
 
-6. 失败场景不能只断言状态失败。必须比较操作前后的文件 SHA256 和 Git 状态，证明失败操作没有留下部分修改。
+6. 失败场景不能只断言抛异常。必须额外证明失败操作没有留下部分状态：
+   - 比较操作前后的 main worktree 文件 SHA256
+   - 比较操作前后的 git status --porcelain
+   - 检查未创建非法 branch
+   - 检查未创建逃逸 path
+   - 检查已有目录内容未被覆盖
 
 7. 允许修改：
    - tests/git/
+   - test_log/
 
 8. 禁止修改：
    - codeteam/
@@ -1213,6 +1228,8 @@ stderr
    - evals/
    - README.md
    - .codex/AGENTS.md
+   - prompt/test_Agent.md
+   - pytest.ini
    - 其他生产代码和项目配置
 
 9. 如果发现生产代码缺陷：
@@ -1221,54 +1238,62 @@ stderr
    - 不得降低断言
    - 不得使用 skip 或 xfail 隐藏失败
    - 在最终报告中列出复现命令、预期结果、实际结果和初步原因
+   - 按 P0/P1/P2/P3 标注严重等级
 
 10. 按顺序执行：
+    .venv/bin/python -m pytest tests/git/test_worktree.py -q
     .venv/bin/python -m pytest tests/git -q
     .venv/bin/python -m pytest -q
+    .venv/bin/python -m ruff check tests/git
+    .venv/bin/python -m mypy tests/git
+
+    如果测试文件被拆分为多个 worktree 相关文件，第一条命令可以替换为对应的 worktree 测试文件或测试目录，但必须在日志中写清楚实际执行命令。
 
 11. 测试日志和最终报告：
 
-    - 将本次测试日志写入：
-      test_log/YYYY-MM-DD_week3_day1_git_patch_test_log.md
-    - 日志必须以新增文件方式创建，不得覆盖或追加已有日志。
-    - 日志必须包含：
-      - 新增或修改的测试文件
-      - 每项 Day1 验收要求对应的测试
-      - 实际执行的命令和完整结果摘要
-      - 通过、失败、跳过和错误数量
-      - 失败测试及原因分类
-      - 已确认的生产代码缺陷
-      - 未覆盖或无法验证的内容
-      - Day1 最终结论：通过、部分通过或未通过
-    - 最终回复中同时给出日志文件路径和结论摘要。
+- 将本次测试日志写入：
+  test_log/YYYY-MM-DD_week3_day2_worktree_test_log.md
+- 日志必须以新增文件方式创建，不得覆盖或追加已有日志。
+- 日志必须包含：
+  - 新增或修改的测试文件
+  - 每项 Day2 验收要求对应的测试
+  - 实际执行的命令和完整结果摘要
+  - pytest、ruff、mypy 的结果
+  - 通过、失败、跳过和错误数量
+  - 失败测试及原因分类
+  - 已确认的生产代码缺陷
+  - 文档与当前实现不一致的地方
+  - 未覆盖或无法验证的内容
+  - Day2 最终结论：通过、部分通过或未通过
+- 最终回复中同时给出日志文件路径和结论摘要。
 
 12. Worktree 提交与合并：
 
     目标 coding 分支：
-    {{CODING_BRANCH}}
+    {{week3}}
 
-    - 测试工作必须在独立 Git worktree 和独立测试分支中进行。
-    - 测试分支必须基于任务开始时目标 coding 分支的当前 HEAD 创建。
-    - 只允许提交：
-      - tests/git/
-      - 本次新增的 test_log 日志
-    - 不得提交生产代码、教学文档、Fixture 或无关文件。
-    - 测试代码自身确认正确后，在测试分支创建一个独立 commit。
-    - 即使测试暴露生产代码缺陷，也应保留能够稳定复现缺陷的有效测试，并在日志中明确说明这些测试当前失败。
-    - 提交前检查 staged 文件，确保不包含其他 Agent 或用户的修改。
-    - 提交完成后，将该测试 commit 合并到目标 coding 分支。
-    - 合并前必须确认目标 coding 分支名称正确，并检查目标分支是否出现了任务开始后新增的提交或冲突。
-    - 如果目标分支没有偏移且可以安全快进，优先使用 fast-forward 合并。
-    - 如果目标分支已经变化、工作区存在影响合并的未提交修改，或者发生冲突：
-      - 不得强制合并
-      - 不得 reset、覆盖或丢弃已有修改
-      - 保留测试分支和 worktree
-      - 在最终报告中提供测试 commit SHA、分支名称和阻塞原因
-    - 合并成功后，必须在目标 coding 分支重新执行：
-      .venv/bin/python -m pytest tests/git -q
-      .venv/bin/python -m pytest -q
-    - 只有目标 coding 分支上的复验完成后，才能报告合并完成。
-    - 不得执行 force push，不得自动推送远程分支。
+- 测试工作必须在独立 Git worktree 和独立测试分支中进行。
+- 测试分支必须基于任务开始时目标 coding 分支的当前 HEAD 创建。
+- 只允许提交：
+  - tests/git/
+  - 本次新增的 test_log 日志
+- 不得提交生产代码、教学文档、Fixture、配置文件或无关文件。
+- 测试代码自身确认正确后，在测试分支创建一个独立 commit。
+- 即使测试暴露生产代码缺陷，也应保留能够稳定复现缺陷的有效测试，并在日志中明确说明这些测试当前失败。
+- 提交前检查 staged 文件，确保不包含其他 Agent 或用户的修改。
+- 提交完成后，将该测试 commit 合并到目标 coding 分支。
+- 合并前必须确认目标 coding 分支名称正确，并检查目标分支是否出现了任务开始后新增的提交或冲突。
+- 如果目标分支没有偏移且可以安全快进，优先使用 fast-forward 合并。
+- 如果目标分支已经变化、工作区存在影响合并的未提交修改，或者发生冲突：
+  - 不得强制合并
+  - 不得 reset、覆盖或丢弃已有修改
+  - 保留测试分支和 worktree
+  - 在最终报告中提供测试 commit SHA、分支名称和阻塞原因
+- 合并成功后，必须在目标 coding 分支重新执行：
+  .venv/bin/python -m pytest tests/git -q
+  .venv/bin/python -m pytest -q
+- 只有目标 coding 分支上的复验完成后，才能报告合并完成。
+- 不得执行 force push，不得自动推送远程分支。
 }}
 
 ---

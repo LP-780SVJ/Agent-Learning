@@ -12,7 +12,7 @@ from codeteam.git.errors import (
     BranchAlreadyExistsError,
     WorktreePathConflictError,
 )
-
+from codeteam.git.models import WorktreeInfo
 
 DEFAULT_WORKTREE_DIR_NAME = ".codeteam/worktrees"
 TASK_BRANCH_PREFIX = "codeteam"
@@ -157,3 +157,62 @@ class WorktreeManager:
     def _worktree_path_for_task(self, task_id: str) -> Path:
         self._validate_task_id(task_id)
         return self.worktree_root / task_id
+
+    def create(
+        self,
+        task_id: str,
+        base_ref: str = "HEAD",
+    ) -> WorktreeInfo:
+        branch_name = self._branch_name_for_task(task_id)
+        worktree_path = self._worktree_path_for_task(task_id)
+        base_sha = self._resolve_commit(base_ref)
+
+        self._ensure_can_create_worktree(
+            branch_name,
+            worktree_path,
+        )
+
+        self.worktree_root.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        self._run_git(
+            [
+                "worktree",
+                "add",
+                "-b",
+                branch_name,
+                str(worktree_path),
+                base_ref,
+            ]
+        )
+
+        current_branch = self._run_git(
+            ["branch", "--show-current"],
+            cwd=worktree_path,
+        ).decode("utf-8", errors="replace").strip()
+
+        if current_branch != branch_name:
+            raise GitWorktreeCommandError(
+                f"Created worktree is on {current_branch!r}, expected {branch_name!r}."
+            )
+
+        head_sha = self._run_git(
+            ["rev-parse", "HEAD"],
+            cwd=worktree_path,
+        ).decode("utf-8", errors="replace").strip()
+
+        if head_sha != base_sha:
+            raise GitWorktreeCommandError(
+                f"Created worktree HEAD is {head_sha!r}, expected {base_sha!r}."
+            )
+
+        return WorktreeInfo(
+            task_id=task_id,
+            branch_name=branch_name,
+            path=worktree_path,
+            base_ref=base_ref,
+            base_sha=base_sha,
+            head_sha=head_sha,
+        )
