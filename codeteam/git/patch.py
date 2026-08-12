@@ -52,7 +52,7 @@ def extract_patch_paths(root: Path, patch: bytes) -> list[str]:
     """从 Patch 中提取所有路径，并验证它们的安全性。
     """
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: UP022
             ["git", "apply", "--numstat", "-z", "-"],
             cwd=root,
             input=patch,
@@ -99,14 +99,17 @@ def parse_rename_copy_header_paths(patch: bytes) -> list[str]:
             target_prefix = b"copy to "
             continue
 
-        if source_path is not None and target_prefix is not None:
-            if line.startswith(target_prefix):
-                target_path = decode_git_patch_path(line[len(target_prefix):])
-                paths.append(source_path)
-                paths.append(target_path)
-                source_path = None
-                target_prefix = None
-                continue
+        if (
+            source_path is not None
+            and target_prefix is not None
+            and line.startswith(target_prefix)
+        ):
+            target_path = decode_git_patch_path(line[len(target_prefix):])
+            paths.append(source_path)
+            paths.append(target_path)
+            source_path = None
+            target_prefix = None
+            continue
 
     return paths
 
@@ -340,7 +343,7 @@ class PatchValidator:
             )
 
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: UP022
                 ["git", "apply", "--check", "-"],
                 cwd=self.root,
                 input=patch_bytes,

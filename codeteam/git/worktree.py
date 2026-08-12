@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import re
 import subprocess
+from pathlib import Path
 
 from codeteam.git.errors import (
-    InvalidTaskIdError,
-    GitWorktreeCommandError,
     BaseRefNotFoundError,
     BranchAlreadyExistsError,
+    GitWorktreeCommandError,
+    InvalidTaskIdError,
     WorktreePathConflictError,
 )
 from codeteam.git.models import WorktreeInfo
@@ -43,7 +42,7 @@ class WorktreeManager:
         command_cwd = cwd or self.repo_root
 
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: UP022
                 ["git", *args],
                 cwd=command_cwd,
                 stdout=subprocess.PIPE,
@@ -85,31 +84,28 @@ class WorktreeManager:
         return sha
 
     def _branch_exists(self, branch_name: str) -> bool:
-        result = subprocess.run(
-            [
-                "git",
-                "show-ref",
-                "--verify",
-                f"refs/heads/{branch_name}",
-            ],
-            cwd=self.repo_root,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            shell=False,
-            timeout=DEFAULT_GIT_TIMEOUT_SECONDS,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    f"refs/heads/{branch_name}",
+                ],
+                cwd=self.repo_root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                shell=False,
+                timeout=DEFAULT_GIT_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise GitWorktreeCommandError(
+                f"Git command timed out while checking branch: {branch_name}"
+            ) from error
 
-        if result.returncode == 0:
-            return True
-
-        if result.returncode == 1:
-            return False
-
-        message = result.stderr.decode("utf-8", errors="replace")
-        raise GitWorktreeCommandError(
-            message or f"Git command failed while checking branch: {branch_name}"
-        )
+        return result.returncode == 0
 
     def _ensure_can_create_worktree(
         self,

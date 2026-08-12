@@ -24,7 +24,6 @@ from codeteam.git.models import (
 )
 from codeteam.git.patch import PatchValidator
 
-
 DEFAULT_GIT_TIMEOUT_SECONDS = 10.0
 
 
@@ -58,7 +57,7 @@ class GitWorkspace:
             raise ValueError("Git workspace root must be a directory.")
 
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: UP022
                 ["git", "rev-parse", "--show-toplevel"],
                 cwd=requested_root,
                 stdout=subprocess.PIPE,
@@ -85,7 +84,7 @@ class GitWorkspace:
     def _run_git(self, args: list[str]) -> bytes:
         """封装git命令"""
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: UP022
                 ["git", *args],
                 cwd=self.root,
                 stdout=subprocess.PIPE,
@@ -223,7 +222,7 @@ class GitWorkspace:
         patch_bytes = patch.encode("utf-8")
 
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: UP022
                 ["git", "apply", "-"],
                 cwd=self.root,
                 input=patch_bytes,
