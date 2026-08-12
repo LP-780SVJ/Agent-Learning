@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from types import ModuleType
 
 import pytest
 
@@ -105,7 +106,7 @@ def test_apply_patch_always_calls_check_patch(
 
 @pytest.mark.parametrize("module", [workspace_module, patch_module])
 def test_all_git_subprocess_calls_use_argv_without_dangerous_apply_flags(
-    module: object,
+    module: ModuleType,
 ) -> None:
     tree = ast.parse(inspect.getsource(module))
     subprocess_calls = [
@@ -122,8 +123,9 @@ def test_all_git_subprocess_calls_use_argv_without_dangerous_apply_flags(
     for call in subprocess_calls:
         assert call.args and isinstance(call.args[0], ast.List)
         keywords = {keyword.arg: keyword.value for keyword in call.keywords}
-        assert isinstance(keywords.get("shell"), ast.Constant)
-        assert keywords["shell"].value is False
+        shell_value = keywords.get("shell")
+        assert isinstance(shell_value, ast.Constant)
+        assert shell_value.value is False
         assert "timeout" in keywords
         assert "stdout" in keywords
         assert "stderr" in keywords

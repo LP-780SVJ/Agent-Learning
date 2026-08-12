@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-
 GIT_TIMEOUT_SECONDS = 10.0
 FileContent = str | bytes
 GitRepoFactory = Callable[[Mapping[str, FileContent]], Path]
@@ -23,8 +22,7 @@ def run_git(
         ["git", *args],
         cwd=root,
         input=input_bytes,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         shell=False,
         timeout=GIT_TIMEOUT_SECONDS,
         check=False,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 from codeteam.git.models import PatchStatus
@@ -16,7 +17,7 @@ from .conftest import (
 
 def _matching_repositories(
     git_repo_factory: GitRepoFactory,
-    files: dict[str, str | bytes],
+    files: Mapping[str, str | bytes],
 ) -> tuple[Path, Path]:
     return git_repo_factory(files), git_repo_factory(files)
 
