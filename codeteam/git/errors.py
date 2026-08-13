@@ -39,3 +39,23 @@ class WorktreePathConflictError(WorktreeError):
 
 class GitWorktreeCommandError(WorktreeError):
     """git worktree 子命令执行失败。"""
+
+
+class CheckpointError(GitWorkspaceError):
+    """Checkpoint 管理失败。"""
+
+
+class CheckpointNotFoundError(CheckpointError):
+    """指定 checkpoint 不存在。"""
+
+
+class CheckpointOwnershipError(CheckpointError):
+    """Checkpoint 不属于当前 task 或 workspace。"""
+
+
+class CheckpointStoreError(CheckpointError):
+    """Checkpoint 存储层失败。"""
+
+
+class RollbackVerificationError(CheckpointError):
+    """Rollback 后状态校验失败。"""

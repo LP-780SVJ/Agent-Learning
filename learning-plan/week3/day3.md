@@ -3282,3 +3282,476 @@ Interview
 [9]: https://github.com/cline/cline/issues/9631?utm_source=chatgpt.com "CHECKPOINT CORRUPTION BUG REPORT (feature) #9631"
 [10]: https://github.com/cline/cline/issues/6625?utm_source=chatgpt.com "git directory renamed to .git_disabled when canceling task #6625"
 [11]: https://docs.cline.bot/features/multiroot-workspace "Multi-Root Workspaces - Cline"
+
+
+**0. 只读检查结论**
+
+我已按你的要求只读检查当前仓库，没有修改代码。你给的旧路径 `/Users/root/workspace/Agent-Learning/...` 与当前实际仓库路径不同；本次以真实路径 `/Users/workplace/Agent-Learning` 为准。
+
+当前真实状态：`codeteam/git/` 已有 `workspace.py`、`patch.py`、`diff.py`、`worktree.py`、`models.py`、`errors.py`，但还没有 `checkpoint.py`，也还没有 `tests/git/test_checkpoint.py`。所以 Day3 是在现有 Git/Patch/Worktree 基础上新增 Recovery / Checkpoint 层。
+
+**1. Today in the System**
+
+今天解决的问题是：
+
+```text
+Agent 改坏一个 task worktree 后，Runtime 如何确定性恢复到之前的已知状态？
+```
+
+它在整体 Coding Agent 中的位置：
+
+```text
+User Task
+ ↓
+Context Engine
+ ↓
+Agent Loop
+ ↓
+WorktreeManager
+ ↓
+Task Worktree
+ ↓
+GitWorkspace / PatchValidator
+ ↓
+CheckpointManager
+ ↓
+Rollback
+ ↓
+Retry / Continue
+```
+
+没有 Checkpoint 时，Agent 只能靠“再生成一个反向 patch”来撤销错误，这很脆。Checkpoint 的价值是把恢复一致性从 LLM 的记忆能力里拿出来，变成 Runtime 的确定性能力。
+
+**2. Capability Mapping**
+
+Primary:
+
+```text
+Agent Runtime
+Workspace & Sandbox
+Reliability / Recovery
+```
+
+Secondary:
+
+```text
+Tool Runtime
+Observability
+Multi-Agent Orchestration 基础
+Evaluation
+```
+
+面试价值：你可以证明自己不只是会让 Agent 调工具，还知道长任务 Coding Agent 必须具备可恢复执行能力：`execute → observe → fail → rollback → retry`。
+
+**3. Theory**
+
+今天要理解这些概念：
+
+```text
+Checkpoint
+= Agent Runtime 内部状态快照，不等于用户 Git Commit。
+
+Rollback
+= 把 managed workspace state 恢复到某个 checkpoint。
+
+Snapshot
+= 某一时刻 workspace 文件状态的逻辑描述，不一定物理复制整个目录。
+
+Shadow Git
+= 与用户项目 Git History 分离的内部 Git 仓库，用来保存 Agent checkpoint history。
+
+Snapshot Scope
+= Checkpoint 到底负责哪些文件：tracked、untracked、ignored、生成物、缓存、.git、runtime state。
+```
+
+最关键的边界：
+
+```text
+Commit = 软件历史
+Checkpoint = Agent 执行历史
+Worktree = task 之间隔离
+Checkpoint = task 内部恢复
+Sandbox = 命令真实权限边界
+```
+
+**4. Industrial Design**
+
+官方事实：
+
+Cline 的 Checkpoints 使用与用户项目 Git History 分离的 shadow Git repository；每次文件修改或命令后保存项目文件快照，主 Git 历史不被污染，并且支持 restore files / restore task / restore both 三种恢复语义。来源：[Cline Checkpoints](https://docs.cline.bot/core-workflows/checkpoints)。
+
+Claude Code 配置中有 `fileCheckpointingEnabled`，用于在编辑前 snapshot 文件，让 `/rewind` 可以恢复。来源：[Claude Code settings](https://code.claude.com/docs/en/configuration)。
+
+OpenAI Codex 的 worktrees 文档说明，Codex 使用 Git worktrees 让多个 chat 在同一项目中并行而不互相干扰；worktree 解决的是并行隔离，不是 task 内部恢复。来源：[Codex Worktrees](https://developers.openai.com/codex/environments/git-worktrees)。
+
+Git stash 是替代方案：它能保存 working directory / index，并可用 `--include-untracked` 包含 untracked 文件；但 apply/pop 可能冲突，因此更像用户临时工作流，不是理想的 Agent Runtime checkpoint API。来源：[git-stash docs](https://git-scm.com/docs/git-stash)。
+
+工程推断：
+
+对 CodeTeam 第一版，最合适的是：
+
+```text
+Task Worktree
++
+外部 Runtime State Directory
++
+每个 task 一个 Shadow Git Repo
++
+结构化 Checkpoint Metadata
+```
+
+不建议把 shadow repo 放进 task worktree 内部，避免 checkpoint 自己 snapshot 自己。
+
+**5. 当前仓库检查**
+
+已有实现：
+
+```text
+codeteam/git/workspace.py
+- GitWorkspace(root)
+- changed_files(base_ref="HEAD")
+- diff(base_ref="HEAD")
+- check_patch(patch)
+- apply_patch(patch)
+
+codeteam/git/patch.py
+- PatchValidator
+- patch path validation
+- git apply --check
+- size / file count / binary rejection
+
+codeteam/git/worktree.py
+- WorktreeManager(repo_root, worktree_root=None)
+- create(task_id, base_ref="HEAD")
+
+codeteam/git/models.py
+- GitChange
+- GitDiff
+- PatchStatus
+- PatchResult
+- WorktreeInfo
+
+codeteam/git/errors.py
+- GitWorkspaceError
+- Patch errors
+- Worktree errors
+```
+
+缺失：
+
+```text
+codeteam/git/checkpoint.py
+Checkpoint / CheckpointManager models
+Checkpoint-specific errors
+tests/git/test_checkpoint.py
+checkpoint benchmark / failure case record
+```
+
+项目规则：`.codex/AGENTS.md` 要求 Git 变更测试必须用 `tmp_path` 新建临时 repo，不得在项目根目录、fixture repo 里 reset / clean / rollback。
+
+**6. 涉及文件**
+
+今天可能涉及但现在先不改：
+
+```text
+codeteam/git/checkpoint.py
+→ CheckpointManager，create / rollback / list / inspect
+
+codeteam/git/models.py
+→ 新增 Checkpoint、CheckpointStatus 或 RestoreResult 等结构化模型
+
+codeteam/git/errors.py
+→ 新增 CheckpointError、CheckpointNotFoundError、RollbackVerificationError
+
+codeteam/git/__init__.py
+→ 未来导出 CheckpointManager
+
+tests/git/test_checkpoint.py
+→ Day3 核心验收测试
+
+test_log/...
+→ 最终测试日志，等实现和测试完成后再写
+```
+
+**7. Architecture / Data Flow**
+
+建议的数据流：
+
+```text
+task_id
+ ↓
+Task Worktree path
+ ↓
+CheckpointManager(workspace_root, state_root, task_id)
+ ↓
+initialize shadow repo outside worktree
+ ↓
+select snapshot scope
+    tracked files
+    + untracked non-ignored files
+    - .git
+    - .codeteam runtime state
+    - ignored/cache/build dirs
+ ↓
+copy/sync managed files into shadow repo
+ ↓
+git add --all
+ ↓
+git commit
+ ↓
+record Checkpoint metadata
+ ↓
+Checkpoint
+```
+
+Rollback 数据流：
+
+```text
+checkpoint_id
+ ↓
+load metadata
+ ↓
+resolve shadow commit/tree
+ ↓
+replace managed workspace files from snapshot
+ ↓
+remove files that were created after checkpoint but are inside snapshot scope
+ ↓
+verify restored tree/content
+ ↓
+RollbackResult
+```
+
+**8. 今日步骤拆分**
+
+Step 1：定义模型和错误  
+目标：先让 Runtime 状态可表达。涉及 `models.py`、`errors.py`。完成标志：能描述 checkpoint metadata 和 rollback result。
+
+Step 2：定义 CheckpointManager 初始化与目录布局  
+目标：确定 shadow repo 和 metadata 放在哪里。完成标志：不会写入用户 `.git`，不会放进 task worktree 内部。
+
+Step 3：实现 create checkpoint  
+目标：把当前 managed workspace state 保存为 shadow commit。完成标志：tracked + untracked non-ignored 文件能被保存，metadata 可读。
+
+Step 4：实现 rollback  
+目标：恢复到指定 checkpoint。完成标志：修改、删除、新增文件都能恢复到 checkpoint 状态。
+
+Step 5：补测试  
+目标：证明正确性、安全边界和失败路径。完成标志：`tests/git/test_checkpoint.py` 覆盖正常/边界/失败。
+
+Step 6：整理工程证据  
+目标：形成 test log、design decision、benchmark/ablation/failure plan。
+
+**9. Test Strategy**
+
+正常路径：
+
+```text
+create checkpoint at task_start
+modify tracked file
+rollback
+assert content/status restored
+```
+
+新增文件：
+
+```text
+checkpoint0
+create untracked src/new.py
+checkpoint1
+rollback checkpoint0
+assert src/new.py removed
+```
+
+删除文件：
+
+```text
+checkpoint0
+delete tracked file
+rollback checkpoint0
+assert file restored
+```
+
+多 checkpoint 链：
+
+```text
+cp0 → edit A → cp1 → edit B → cp2 → rollback cp1
+```
+
+安全边界：
+
+```text
+shadow repo 不在 task worktree 内
+不修改用户 .git
+不 snapshot .git / .codeteam / ignored cache
+```
+
+失败路径：
+
+```text
+checkpoint_id 不存在
+shadow commit 缺失
+workspace 路径不存在
+rollback 后验证失败
+git subprocess 失败
+```
+
+**10. Design Decision Plan**
+
+至少需要一条正式 Decision：
+
+```text
+Decision:
+CodeTeam Checkpoint 使用 Shadow Git Repository，而不是用户 Git Commit / git stash / copytree。
+
+Alternatives:
+A. 用户仓库直接 commit
+B. git stash
+C. copytree 全量目录复制
+D. Shadow Git Repository
+
+Hypothesis:
+Shadow Git 在保持用户 Git History 干净的同时，比 copytree 更节省磁盘，并比 stash 更适合维护 task-level metadata timeline。
+
+Validation:
+correctness tests + create latency + restore latency + disk usage benchmark。
+```
+
+**11. Benchmark Plan**
+
+问题：
+
+```text
+Shadow Git checkpoint 是否比 copytree baseline 更适合作为 Agent Runtime checkpoint？
+```
+
+Baseline：
+
+```text
+shutil.copytree full snapshot
+```
+
+System Under Test：
+
+```text
+CheckpointManager + Shadow Git
+```
+
+指标：
+
+```text
+create latency
+rollback latency
+disk usage
+file count
+changed file count
+metadata size
+```
+
+工作负载：
+
+```text
+small repo: 10 files
+medium repo: tests/fixtures/medium_repo copy
+synthetic repo: 多文件、多层目录、少量变更 vs 大量变更
+```
+
+注意：今天不虚构 benchmark 结果，只先定义实验。
+
+**12. Ablation Plan**
+
+Hypothesis：
+
+```text
+Checkpoint 能显著降低失败恢复成本，并提升 workspace state fidelity。
+```
+
+Full System：
+
+```text
+apply changes → test fail → rollback checkpoint
+```
+
+Ablated System：
+
+```text
+apply changes → test fail → 让模型生成 reverse patch / 或手动 git restore tracked only
+```
+
+比较指标：
+
+```text
+恢复成功率
+残留 untracked 文件数量
+恢复耗时
+是否污染用户 Git history
+是否需要人工介入
+```
+
+**13. Failure Cases to Watch**
+
+重点盯这些：
+
+```text
+Snapshot Fidelity Failure
+rollback 后内容看似恢复，但 untracked 文件残留。
+
+History Pollution
+checkpoint commit 进入用户真实 Git history。
+
+Recursive Snapshot
+shadow repo 放进 worktree，导致 snapshot 包含 runtime state。
+
+Ignored File Ambiguity
+ignored 文件是否恢复没有明确契约。
+
+Lock Failure
+shadow repo index.lock 残留导致 checkpoint 失败。
+
+Partial Rollback
+恢复一半失败，workspace 处于混合状态。
+
+Path Escape
+metadata 或 restore 路径写到 workspace 外。
+
+Drift
+checkpoint 创建时 workspace HEAD 与 rollback 时语义不一致。
+```
+
+**14. Interview Focus**
+
+你今天结束后要能回答：
+
+```text
+为什么 Worktree 不能替代 Checkpoint？
+为什么 Checkpoint 不应该直接 git commit？
+为什么 git stash 不够适合作为 Agent Runtime API？
+Shadow Git 的优点和风险是什么？
+Checkpoint 应不应该包含 untracked 文件？
+ignored 文件不恢复算不算 bug？
+rollback 如何验证真的成功？
+如果 shadow repo 损坏怎么办？
+如何 benchmark checkpoint 方案？
+如何证明 checkpoint 对 Agent 有价值？
+```
+
+**15. 今日最终完成标准**
+
+今天完整完成时，应该达到：
+
+```text
+1. 有 CheckpointManager 的最小可用实现。
+2. 能 create checkpoint。
+3. 能 rollback 到指定 checkpoint。
+4. 不污染用户 Git history。
+5. 不修改用户 .git。
+6. Shadow repo 位于 runtime state directory，不在 task worktree 内。
+7. tracked + untracked non-ignored 文件恢复语义明确。
+8. ignored/cache/runtime 文件边界明确。
+9. 有 pytest 覆盖正常路径、失败路径、安全边界、状态一致性。
+10. 有 Design Decision 草案。
+11. 有 Benchmark / Ablation 计划。
+12. 有 Failure Case 记录或待记录清单。
+```
+
+今天这个模块最终证明的是：你能把 Coding Agent 从“能执行修改”推进到“能安全失败并恢复”，这就是 Agent Runtime / Harness 的核心能力之一。

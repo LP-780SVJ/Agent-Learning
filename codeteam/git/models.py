@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
@@ -97,6 +98,7 @@ class PatchResult(BaseModel):
     applied: bool = False
     failure_reason: str | None = None
 
+
 class WorktreeInfo(BaseModel):
     """一个任务 Worktree 的结构化信息。
     字段说明：
@@ -114,3 +116,120 @@ class WorktreeInfo(BaseModel):
     base_ref: str
     base_sha: str
     head_sha: str
+
+
+class CheckpointReason(str, Enum):
+    """Checkpoint 创建的原因枚举。
+
+    字段说明：
+    - TASK_START: 任务启动时创建的 checkpoint
+    - BEFORE_TOOL: 执行工具前创建的 checkpoint
+    - AFTER_TOOL: 执行工具后创建的 checkpoint
+    - BEFORE_ROLLBACK: 回滚前创建的 checkpoint
+    - AFTER_ROLLBACK: 回滚后创建的 checkpoint
+    - MANUAL: 用户手动创建的 checkpoint
+    """
+    TASK_START = "task_start"
+    BEFORE_TOOL = "before_tool"
+    AFTER_TOOL = "after_tool"
+    BEFORE_ROLLBACK = "before_rollback"
+    AFTER_ROLLBACK = "after_rollback"
+    MANUAL = "manual"
+
+
+class Checkpoint(BaseModel):
+    """Agent Runtime 的 workspace snapshot metadata。
+    字段说明：
+    - checkpoint_id: Checkpoint 的唯一 ID
+    - task_id: Checkpoint 所属的任务 ID
+    - sequence: Checkpoint 在任务中的顺序号，从 0 开始
+    - reason: Checkpoint 创建的原因
+    - created_at: Checkpoint 创建的时间戳
+    - shadow_commit_sha: Checkpoint 对应的 shadow commit sha
+    - shadow_tree_sha: Checkpoint 对应的 shadow tree sha
+    - workspace_head_sha: Checkpoint 创建时 workspace 的 HEAD commit sha
+    - parent_checkpoint_id: Checkpoint 的父 checkpoint ID，如果没有则为 None
+    - file_count: Checkpoint 中的文件数量
+    - restored_from: 如果这个 checkpoint 是从另一个 checkpoint 恢复的，则为那个 checkpoint 的 ID，否则为 None
+    """
+
+    checkpoint_id: str
+    task_id: str
+    sequence: int = Field(ge=0)
+    reason: CheckpointReason
+    created_at: datetime
+
+    shadow_commit_sha: str
+    shadow_tree_sha: str
+    workspace_head_sha: str
+
+    parent_checkpoint_id: str | None = None
+    file_count: int = Field(ge=0)
+    restored_from: str | None = None
+
+
+class CheckpointComparison(BaseModel):
+    """Checkpoint snapshot 与当前 workspace 的差异。
+    字段说明：
+    - task_id: Checkpoint 所属的任务 ID
+    - checkpoint_id: Checkpoint 的唯一 ID
+    - checkpoint_tree_sha: Checkpoint 对应的 tree sha
+    - current_tree_sha: 当前 workspace 的 tree sha，如果 workspace 已经被修改则为 None
+    - modified_paths: Checkpoint 与当前 workspace 的修改文件路径列表
+    - added_paths: Checkpoint 与当前 workspace 的新增文件路径列表
+    - deleted_paths: Checkpoint 与当前 workspace 的删除文件路径列表
+    """
+
+    task_id: str
+    checkpoint_id: str
+    checkpoint_tree_sha: str
+
+    current_tree_sha: str | None = None
+
+    modified_paths: list[str] = Field(default_factory=list)
+    added_paths: list[str] = Field(default_factory=list)
+    deleted_paths: list[str] = Field(default_factory=list)
+
+    @property
+    def has_changes(self) -> bool:
+        return bool(
+            self.modified_paths
+            or self.added_paths
+            or self.deleted_paths
+        )
+
+
+class RollbackStatus(str, Enum):
+    SUCCESS = "success"
+    REJECTED = "rejected"
+    FAILED_RECOVERED = "failed_recovered"
+    FAILED_UNRECOVERED = "failed_unrecovered"
+
+
+class RollbackResult(BaseModel):
+    """一次 rollback 操作的结构化结果。
+    字段说明：
+    - status: rollback 的最终状态
+    - task_id: rollback 所属的任务 ID
+    - target_checkpoint_id: rollback 的目标 checkpoint ID
+    - safety_checkpoint_id: rollback 前创建的安全 checkpoint ID，如果 rollback 失败可以回滚到这个 checkpoint
+    - before_tree_sha: rollback 前 workspace 的 tree sha
+    - after_tree_sha: rollback 后 workspace 的 tree sha，如果 rollback 失败则为 None
+    - restored_paths: rollback 后被恢复的文件路径列表
+    - removed_paths: rollback 后被删除的文件路径列表
+    - error: rollback 失败的错误信息，如果 rollback 成功则为 None
+    """
+
+    status: RollbackStatus
+    task_id: str
+    target_checkpoint_id: str
+
+    safety_checkpoint_id: str | None = None
+
+    before_tree_sha: str
+    after_tree_sha: str | None = None
+
+    restored_paths: list[str] = Field(default_factory=list)
+    removed_paths: list[str] = Field(default_factory=list)
+
+    error: str | None = None
