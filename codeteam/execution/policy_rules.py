@@ -82,6 +82,22 @@ def _git_clean_has_force_and_directory_flags(arguments: tuple[str, ...]) -> bool
     return {"f", "d"}.issubset(short_flags)
 
 
+def _git_branch_has_delete_flags(arguments: tuple[str, ...]) -> bool:
+    short_flags: set[str] = set()
+
+    for argument in arguments:
+        if argument in {"--delete", "--force"}:
+            return True
+
+        if argument.startswith("--"):
+            continue
+
+        if argument.startswith("-"):
+            short_flags.update(argument[1:])
+
+    return "d" in short_flags or "D" in short_flags
+
+
 class PrivilegeEscalationRule:
     name = "privilege_escalation"
 
@@ -135,6 +151,14 @@ class GitDestructiveRule:
                 decision=PolicyDecision.DENY,
                 risks=(RiskCategory.DESTRUCTIVE,),
                 reason="git clean with force flags is destructive.",
+            )
+
+        if len(argv) >= 3 and argv[1] == "branch" and _git_branch_has_delete_flags(request.argv[2:]):
+            return RuleResult(
+                rule_name=self.name,
+                decision=PolicyDecision.DENY,
+                risks=(RiskCategory.DESTRUCTIVE,),
+                reason="git branch delete is destructive.",
             )
 
         return None
@@ -315,7 +339,7 @@ class CredentialPathRule:
         self,
         request: CommandRequest,
     ) -> RuleResult | None:
-        for argument in _path_like_arguments(request):
+        for argument in _credential_path_arguments(request):
             lowered_parts = {
                 part.lower()
                 for part in Path(argument).expanduser().parts
@@ -330,6 +354,21 @@ class CredentialPathRule:
                 )
 
         return None
+
+
+def _credential_path_arguments(request: CommandRequest) -> tuple[str, ...]:
+    credential_arguments = list(_path_like_arguments(request))
+    seen = set(credential_arguments)
+
+    for argument in request.argv[1:]:
+        if argument.startswith("-"):
+            continue
+
+        if argument.lower() in CredentialPathRule.credential_markers and argument not in seen:
+            credential_arguments.append(argument)
+            seen.add(argument)
+
+    return tuple(credential_arguments)
 
 
 class NetworkCommandRule:
@@ -471,6 +510,7 @@ class DockerPrivilegeRule:
             if _is_sensitive_docker_host_path(
                 resolved_host_path,
                 self.dangerous_host_paths,
+                request.workspace_root,
             ):
                 return RuleResult(
                     rule_name=self.name,
@@ -519,7 +559,13 @@ def _docker_mount_host_paths(arguments: tuple[str, ...]) -> tuple[str, ...]:
 def _is_sensitive_docker_host_path(
     host_path: Path,
     sensitive_paths: frozenset[str],
+    workspace_root: Path,
 ) -> bool:
+    resolved_workspace_root = workspace_root.resolve(strict=False)
+
+    if _is_relative_to(host_path, resolved_workspace_root):
+        return False
+
     for sensitive_path_text in sensitive_paths:
         sensitive_path = Path(sensitive_path_text).resolve(strict=False)
 
