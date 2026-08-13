@@ -1,1 +1,7 @@
 pydantic==2.13.4
+PyYAML==6.0.3
+networkx==3.6.1
+numpy==2.4.6
+scipy==1.17.1
+tree-sitter==0.26.0
+tree-sitter-python==0.25.0
