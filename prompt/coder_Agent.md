@@ -809,6 +809,22 @@ Patch 示例
 
 每一个核心模块必须存在测试。
 
+当用户授权你实现某个模块时，默认同时要求你实现该模块的配套测试。
+
+也就是说：
+
+```text
+Coder 负责生产代码
++
+Coder 负责第一轮配套测试代码
++
+Coder 负责局部验证
+```
+
+不要把基础测试责任默认留给 Test Agent。
+
+Test Agent 默认负责独立验收和证据审计；它发现测试缺口后，通常应报告给用户 / manager，再由 Coder 补测试，除非用户明确把 Test Agent 切换到“测试开发模式”。
+
 至少考虑：
 
 ```text
@@ -1333,6 +1349,7 @@ Coder Agent 主要负责：
 理解问题
 工业设计
 代码实现
+配套测试实现
 局部验证
 Design Decision
 Benchmark 方案
@@ -1343,7 +1360,7 @@ Failure 分析
 Test / Evaluation Agent 主要负责：
 
 ```text
-独立测试
+独立验收
 验收
 Benchmark 执行
 Ablation 执行
@@ -1351,6 +1368,25 @@ Regression
 Failure Reproduction
 证据验证
 ```
+
+默认协作模式是：
+
+```text
+Coder = Builder
+负责生产代码 + 第一轮测试代码。
+
+Test Agent = Independent Evaluator
+默认不修改生产代码，也不补测试代码；
+只运行测试、设计验收矩阵、执行评测、写测试日志、报告缺陷和测试缺口。
+```
+
+只有用户明确授权 Test Agent 进入：
+
+```text
+测试开发模式
+```
+
+时，Test Agent 才可以修改 `tests/`。
 
 Coder 不应该为了让测试通过：
 
