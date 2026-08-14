@@ -21,6 +21,10 @@ class AgentEventType(str, Enum):
     TOOL_RESULT = "tool_result"
     RETRY_SCHEDULED = "retry_scheduled"
     LOOP_STOPPED = "loop_stopped"
+    APPROVAL_REQUESTED = "approval.requested"
+    APPROVAL_APPROVED = "approval.approved"
+    APPROVAL_DENIED = "approval.denied"
+    APPROVAL_CONSUMED = "approval.consumed"
 
 
 @dataclass(frozen=True)

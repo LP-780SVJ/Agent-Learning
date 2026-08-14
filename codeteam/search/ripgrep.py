@@ -9,22 +9,20 @@ from __future__ import annotations
 
 import subprocess
 import threading
-
-
 from pathlib import Path
-from codeteam.repository.paths import normalize_repo_path
 
-from codeteam.search.models import (
-    SearchQuery,
-    SearchMatch,
-    SearchExecution,
-    SearchMode,
-    CaseMode,
-)
+from codeteam.repository.paths import normalize_repo_path
 from codeteam.search.json_decoder import (
-    parse_ripgrep_line,
     extract_path,
+    parse_ripgrep_line,
     parse_submatches,
+)
+from codeteam.search.models import (
+    CaseMode,
+    SearchExecution,
+    SearchMatch,
+    SearchMode,
+    SearchQuery,
 )
 
 
@@ -130,8 +128,7 @@ class RipgrepClient:
         stderr_lines: list[str] = []
 
         def _read_stderr() -> None:
-            for err_line in proc.stderr:
-                stderr_lines.append(err_line)
+            stderr_lines.extend(proc.stderr)
 
         stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
         stderr_thread.start()
@@ -147,11 +144,6 @@ class RipgrepClient:
 
         # 逐行读取 ripgrep 的 JSONL 输出
         for line in proc.stdout:
-
-            if proc.poll() is not None:
-                # 子进程已退出，可能是被 kill 截断
-                break
-
             msg_type, data = parse_ripgrep_line(line)
             if msg_type is None:
                 continue
@@ -160,7 +152,8 @@ class RipgrepClient:
                 # ===== 全局截断检查 =====
                 if len(matches) >= query.max_results:
                     truncated = True
-                    proc.kill()
+                    if proc.poll() is None:
+                        proc.kill()
                     break
 
                 # 提取匹配信息
