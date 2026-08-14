@@ -11,6 +11,7 @@ from codeteam.execution.models import (
     ApprovalRequest,
     ApprovalScope,
     CommandRequest,
+    PolicyDecision,
     PolicyEvaluation,
     RiskCategory,
 )
@@ -45,6 +46,12 @@ class ApprovalManager:
         *,
         requested_scope: ApprovalScope = ApprovalScope.ONCE,
     ) -> ApprovalRequest:
+        if evaluation.decision is not PolicyDecision.REQUIRE_APPROVAL:
+            raise ValueError(
+                "ApprovalRequest can only be created for "
+                "PolicyDecision.REQUIRE_APPROVAL."
+            )
+
         if command.task_id is None:
             raise ValueError("Approval requires command.task_id.")
 

@@ -63,6 +63,22 @@ def test_require_approval_creates_request_and_audit_event(tmp_path) -> None:
     assert "SECRET" not in str(event.data)
 
 
+def test_deny_evaluation_cannot_create_approval_request(tmp_path) -> None:
+    manager = ApprovalManager()
+    command = _request(tmp_path)
+    evaluation = PolicyEvaluation(
+        decision=PolicyDecision.DENY,
+        risks=(RiskCategory.DESTRUCTIVE,),
+        reasons=("Destructive command is denied.",),
+        matched_rules=("destructive",),
+    )
+
+    with pytest.raises(ValueError, match="REQUIRE_APPROVAL"):
+        manager.create_request(command, evaluation)
+
+    assert manager.events == ()
+
+
 def test_once_scope_consumes_only_once(tmp_path) -> None:
     manager = ApprovalManager()
     command = _request(tmp_path)
