@@ -16,6 +16,15 @@ from codeteam.execution.models import (
 )
 from codeteam.execution.output_limiter import LimitedOutput, OutputLimiter
 from codeteam.execution.runner import CommandRunner
+from codeteam.execution.safe_execution_service import (
+    SafeCommandExecutionRequest,
+    SafeExecutionAuditRecord,
+    SafeExecutionLane,
+    SafeExecutionResult,
+    SafeExecutionService,
+    SafeExecutionStatus,
+    SafePatchExecutionRequest,
+)
 from codeteam.execution.safe_executor import SafeCommandExecutor
 
 __all__ = [
@@ -36,5 +45,12 @@ __all__ = [
     "PolicyEvaluation",
     "RiskCategory",
     "RuleResult",
+    "SafeCommandExecutionRequest",
     "SafeCommandExecutor",
+    "SafeExecutionAuditRecord",
+    "SafeExecutionLane",
+    "SafeExecutionResult",
+    "SafeExecutionService",
+    "SafeExecutionStatus",
+    "SafePatchExecutionRequest",
 ]

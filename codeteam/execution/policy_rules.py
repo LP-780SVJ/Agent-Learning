@@ -98,6 +98,25 @@ def _git_branch_has_delete_flags(arguments: tuple[str, ...]) -> bool:
     return "d" in short_flags or "D" in short_flags
 
 
+def _git_push_has_force_flags(arguments: tuple[str, ...]) -> bool:
+    for argument in arguments:
+        lowered = argument.lower()
+
+        if lowered in {"--force", "--force-with-lease", "--force-if-includes"}:
+            return True
+
+        if lowered.startswith("--force-with-lease="):
+            return True
+
+        if lowered.startswith("--"):
+            continue
+
+        if lowered.startswith("-") and "f" in lowered[1:]:
+            return True
+
+    return False
+
+
 class PrivilegeEscalationRule:
     name = "privilege_escalation"
 
@@ -442,6 +461,14 @@ class RemoteWriteRule:
         argv = tuple(argument.lower() for argument in request.argv)
 
         if command == "git" and len(argv) >= 2 and argv[1] == "push":
+            if _git_push_has_force_flags(request.argv[2:]):
+                return RuleResult(
+                    rule_name=self.name,
+                    decision=PolicyDecision.DENY,
+                    risks=(RiskCategory.REMOTE_WRITE, RiskCategory.NETWORK, RiskCategory.DESTRUCTIVE),
+                    reason="git force push is a destructive remote write.",
+                )
+
             return RuleResult(
                 rule_name=self.name,
                 decision=PolicyDecision.REQUIRE_APPROVAL,
