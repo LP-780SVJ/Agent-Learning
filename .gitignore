@@ -28,6 +28,10 @@ dist/
 .env
 .env.*
 
+# Local secrets — never commit
+secrets.local.env
+*.local.env
+
 # OS and editor files
 .DS_Store
 .idea/

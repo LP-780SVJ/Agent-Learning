@@ -26,6 +26,17 @@ class AgentEventType(str, Enum):
     APPROVAL_DENIED = "approval.denied"
     APPROVAL_CONSUMED = "approval.consumed"
 
+    # Task 生命周期（Week 4）
+    TASK_CREATED = "task.created"
+    TASK_STATUS_CHANGED = "task.status_changed"
+    REPOSITORY_INSPECTION_STARTED = "repository.inspection_started"
+    REPOSITORY_INSPECTION_COMPLETED = "repository.inspection_completed"
+    PLAN_STARTED = "plan.started"
+    PLAN_CREATED = "plan.created"
+    PLAN_VALIDATION_FAILED = "plan.validation_failed"
+    TASK_READY = "task.ready"
+    TASK_FAILED = "task.failed"
+
 
 @dataclass(frozen=True)
 class AgentEvent:
