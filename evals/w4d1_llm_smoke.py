@@ -19,17 +19,23 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import urllib.request
 from pathlib import Path
 
-from codeteam.schemas.messages import Message
-from codeteam.llm.openai_compatible import OpenAICompatibleClient
-from codeteam.application.build_context import ContextApplicationService
+# 确保项目根目录在 sys.path（直接按 docstring 命令运行脚本时，
+# 脚本所在目录不在 sys.path，import codeteam 会失败）
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from codeteam.agent.inspection import RepositoryInspector
 from codeteam.agent.orchestrator import SingleAgentOrchestrator
+from codeteam.application.build_context import ContextApplicationService
+from codeteam.llm.openai_compatible import OpenAICompatibleClient
 from codeteam.planning.planner import LLMPlanner
+from codeteam.schemas.messages import Message
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
 SECRETS_PATH = REPO_ROOT / "secrets.local.env"
 FIXTURE_REPO = REPO_ROOT / "tests" / "fixtures" / "test_repo"
 

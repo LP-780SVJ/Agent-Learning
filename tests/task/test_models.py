@@ -346,3 +346,31 @@ class TestPlanFactories:
         )
         with pytest.raises(ValueError):
             replan(existing=v1, new_steps=())
+
+
+# ===================================================================
+# F1 回归：PlanStep 类型守卫
+# ===================================================================
+
+class TestPlanStepTypeGuard:
+    """F1 回归: PlanStep.transition_to 拒绝非枚举输入。"""
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["running", "completed", None, 1],
+        ids=["str-running", "str-completed", "none", "int"],
+    )
+    def test_non_enum_rejected_and_status_unchanged(self, bad) -> None:
+        """验收(F1): 非法类型全部拒绝，status 不变。"""
+        step = _step("P1")
+
+        with pytest.raises(InvalidStepTransitionError):
+            step.transition_to(bad)
+
+        assert step.status == PlanStepStatus.PENDING
+
+    def test_legal_enum_transition_still_works(self) -> None:
+        """验收(F1 不破坏合法行为): PENDING→RUNNING 仍合法。"""
+        step = _step("P1")
+        step.transition_to(PlanStepStatus.RUNNING)
+        assert step.status == PlanStepStatus.RUNNING

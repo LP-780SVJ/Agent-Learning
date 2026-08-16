@@ -126,9 +126,19 @@ class TaskState:
                         只用于审计记录，不影响合法性判断。
 
         Raises:
-            InvalidTransitionError: new_status 不在当前状态的合法出口中，
-                                    或当前状态是 Terminal。
+            InvalidTransitionError: new_status 不在当前状态的合法出口中、
+                                    当前状态是 Terminal、或 new_status
+                                    不是 TaskStatus 枚举成员（如裸字符串）。
         """
+        # 类型守卫：TaskStatus 是 str-Enum，'inspecting' 与
+        # TaskStatus.INSPECTING 相等（== 为 True），会绕过下方的
+        # 成员检查并把裸字符串存进 status。这里必须显式拦截非枚举输入。
+        if not isinstance(new_status, TaskStatus):
+            raise InvalidTransitionError(
+                f"目标状态必须是 TaskStatus 枚举成员，"
+                f"收到 {type(new_status).__name__}: {new_status!r}"
+            )
+
         legal = TASK_TRANSITIONS[self.status]
 
         if new_status not in legal:

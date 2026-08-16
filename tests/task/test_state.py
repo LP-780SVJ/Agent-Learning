@@ -238,3 +238,38 @@ class TestStateProperties:
         state = TaskState(task_id="t-i")
         assert state.status == TaskStatus.CREATED
         assert state.is_terminal is False
+
+
+# ===================================================================
+# F1 回归：类型守卫
+# ===================================================================
+
+class TestTransitionTypeGuard:
+    """F1 回归: transition_to 拒绝非枚举输入（裸字符串/None/int）。
+
+    根因：TaskStatus 是 str-Enum，'inspecting' == TaskStatus.INSPECTING
+    为 True，裸字符串可绕过成员检查并被存入 status。
+    """
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["inspecting", "ready", None, 1, 1.5, object()],
+        ids=["str-inspecting", "str-ready", "none", "int", "float", "object"],
+    )
+    def test_non_enum_rejected_and_state_unchanged(self, bad) -> None:
+        """验收(F1): 非法类型全部拒绝，status 与 history 不变。"""
+        state = TaskState(task_id="t-f1")
+        before_history = len(state.history)
+
+        with pytest.raises(InvalidTransitionError):
+            state.transition_to(bad)
+
+        assert state.status == TaskStatus.CREATED
+        assert len(state.history) == before_history
+
+    def test_legal_enum_transition_still_works(self) -> None:
+        """验收(F1 不破坏合法行为): 合法枚举转移不受类型守卫影响。"""
+        state = TaskState(task_id="t-f1-ok")
+        state.transition_to(TaskStatus.INSPECTING)
+        assert state.status == TaskStatus.INSPECTING
+        assert state.history[-1].to_status == TaskStatus.INSPECTING

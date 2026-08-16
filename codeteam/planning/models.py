@@ -5,7 +5,6 @@ Step 3 会在本文件继续添加 PlanStep / Plan。
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -45,35 +44,6 @@ STEP_TRANSITIONS: dict[PlanStepStatus, tuple[PlanStepStatus, ...]] = {
 
 class InvalidStepTransitionError(Exception):
     """PlanStep 状态转移非法时抛出。"""
-
-
-@dataclass
-class PlanStepState:
-    """一个 PlanStep 的当前执行状态。"""
-
-    step_id: str
-    status: PlanStepStatus = PlanStepStatus.PENDING
-    history: list[tuple[PlanStepStatus, PlanStepStatus]] = field(
-        default_factory=list
-    )
-
-    @property
-    def is_terminal(self) -> bool:
-        return not STEP_TRANSITIONS[self.status]
-
-    def transition_to(self, new_status: PlanStepStatus) -> None:
-        legal = STEP_TRANSITIONS[self.status]
-
-        if new_status not in legal:
-            raise InvalidStepTransitionError(
-                f"非法 Step 转移: {self.status.value} "
-                f"→ {new_status.value}。"
-                f"允许的目标: {[s.value for s in legal]}"
-            )
-
-        self.history.append((self.status, new_status))
-        self.status = new_status
-
 
 
 class PlanStep(BaseModel):
@@ -123,8 +93,17 @@ class PlanStep(BaseModel):
         """推进本步骤状态。唯一合法的状态修改入口。
 
         Raises:
-            InvalidStepTransitionError: 非法转移（含 PENDING→COMPLETED 直跳）。
+            InvalidStepTransitionError: 非法转移（含 PENDING→COMPLETED 直跳），
+                或 new_status 不是 PlanStepStatus 枚举成员（如裸字符串）。
         """
+        # 类型守卫：PlanStepStatus 是 str-Enum，裸字符串会绕过
+        # 成员检查（'pending' == PlanStepStatus.PENDING），必须显式拦截。
+        if not isinstance(new_status, PlanStepStatus):
+            raise InvalidStepTransitionError(
+                f"目标状态必须是 PlanStepStatus 枚举成员，"
+                f"收到 {type(new_status).__name__}: {new_status!r}"
+            )
+
         legal = STEP_TRANSITIONS[self.status]
         if new_status not in legal:
             raise InvalidStepTransitionError(

@@ -258,7 +258,13 @@ class SingleAgentOrchestrator:
         try:
             state.transition_to(TaskStatus.FAILED, reason=reason)
         except InvalidTransitionError:
+            # 已在 Terminal（重复失败）——没有发生转移，不发 status_changed
             pass
+        else:
+            # 转移成功 → 与成功路径一致，补一条 →FAILED 的
+            # status_changed 事件（day1.md 九十三节：每次状态变化
+            # 都要记录 from/to/reason 供时序审计）
+            events.append(self._status_event(state, reason))
 
         events.append(
             make_event(

@@ -350,3 +350,73 @@ class TestZeroSideEffect:
 
         assert result.status == TaskStatus.FAILED
         assert before == after
+
+
+# ===================================================================
+# F2 回归：失败路径补发 status_changed 事件
+# ===================================================================
+
+class TestFailureStatusChangedEvent:
+    """F2 回归: _fail 必须补发 →FAILED 的 status_changed 事件。
+
+    对应 day1.md 九十三节：每次状态变化都要记录 from/to/reason。
+    """
+
+    def _run_failure(self, tmp_path: Path, planner):
+        orchestrator = SingleAgentOrchestrator(
+            inspector=_FakeInspector(context=_ctx()),
+            planner=planner,
+            repository_root=tmp_path,
+        )
+        return orchestrator.run(request="x", task_id="t-f2")
+
+    def test_planner_exception_emits_status_changed_to_failed(
+        self, tmp_path: Path
+    ) -> None:
+        """验收(F2): Planner 异常路径事件末尾为
+        status_changed(to=failed) + task.failed。"""
+        result = self._run_failure(
+            tmp_path, FailingPlanner(error=RuntimeError("boom"))
+        )
+
+        assert result.status == TaskStatus.FAILED
+        assert len(result.events) >= 2
+        assert result.events[-2].event_type == AgentEventType.TASK_STATUS_CHANGED
+        assert result.events[-1].event_type == AgentEventType.TASK_FAILED
+
+        change = result.events[-2]
+        assert change.data["to_status"] == "failed"
+        assert change.data["from_status"] == "planning"
+        assert "reason" in change.data
+
+    def test_invalid_plan_emits_status_changed_to_failed(
+        self, tmp_path: Path
+    ) -> None:
+        """验收(F2): 非法 Plan 路径同样补发 status_changed。"""
+        empty_plan = Plan(plan_id="p", task_id="t", steps=())
+        result = self._run_failure(tmp_path, MockPlanner(plan=empty_plan))
+
+        assert result.status == TaskStatus.FAILED
+        assert result.events[-2].event_type == AgentEventType.TASK_STATUS_CHANGED
+        assert result.events[-2].data["to_status"] == "failed"
+        assert result.events[-2].data["from_status"] == "planning"
+        assert result.events[-1].event_type == AgentEventType.TASK_FAILED
+
+    def test_empty_request_status_changed_from_created(self, tmp_path: Path) -> None:
+        """验收(F2): 空输入早失败时 status_changed 的 from_status=created
+        （失败发生在 CREATED 阶段）。"""
+        result = self._run_failure(tmp_path, MockPlanner(plan=_plan()))
+        # 注：_run_failure 用固定 request="x"（非空）。
+        # 空输入场景单独构造，验证 CREATED→FAILED。
+        orchestrator = SingleAgentOrchestrator(
+            inspector=_FakeInspector(context=_ctx()),
+            planner=MockPlanner(plan=_plan()),
+            repository_root=tmp_path,
+        )
+        result = orchestrator.run(request="", task_id="t-f2-empty")
+
+        assert result.status == TaskStatus.FAILED
+        assert result.events[-2].event_type == AgentEventType.TASK_STATUS_CHANGED
+        assert result.events[-2].data["from_status"] == "created"
+        assert result.events[-2].data["to_status"] == "failed"
+        assert result.events[-1].event_type == AgentEventType.TASK_FAILED
