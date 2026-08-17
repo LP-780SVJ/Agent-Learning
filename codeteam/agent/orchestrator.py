@@ -25,10 +25,20 @@ from codeteam.events import (
     AgentEventType,
     make_event,
 )
-from codeteam.planning.models import Plan, validate_plan
+from codeteam.git.workspace import GitWorkspace
+from codeteam.planning.models import (
+    Plan,
+    PlanStep,
+    PlanStepStatus,
+    validate_plan,
+)
 from codeteam.planning.planner import Planner, RepositoryContext
+from codeteam.repair.loop import RepairAgent, RepairLoop
+from codeteam.repair.models import RepairLoopRunResult, RepairRunOutcome
 from codeteam.task.models import TaskSpec, create_task_spec
 from codeteam.task.state import InvalidTransitionError, TaskState, TaskStatus
+from codeteam.verification.models import VerificationRequest
+from codeteam.verification.service import VerificationService
 
 
 class OrchestrationResult(BaseModel):
@@ -53,14 +63,37 @@ class OrchestrationResult(BaseModel):
     error: str | None = None
     """失败原因；成功时为 None。"""
 
+    task_state: TaskState | None = None
+    """本次运行使用的 TaskState（Day 2 execute_plan_step 需要跨方法持有）。"""
+
+
+class StepExecutionResult(BaseModel):
+    """一次 PlanStep 执行的完整结果（Day 2）。"""
+
+    task_id: str
+    plan_step_id: str
+
+    task_status: TaskStatus
+    step_status: PlanStepStatus
+
+    loop_result: RepairLoopRunResult | None = None
+    events: list[AgentEvent] = Field(default_factory=list)
+
 
 class SingleAgentOrchestrator:
-    """单 Agent 任务编排器（Day 1 版）。
+    """单 Agent 任务编排器。
+
+    Day 1：run() 走到 READY。
+    Day 2：execute_plan_step() 执行「候选 → 验证 → 修复」循环
+    并推进 PlanStep / Task 状态。
 
     用法：
         orchestrator = SingleAgentOrchestrator(
             inspector=RepositoryInspector(service),
             planner=MockPlanner(plan=...),
+            repository_root=root,
+            verification_service=VerificationService(),   # Day 2 执行期依赖
+            workspace=GitWorkspace(root),                 # Day 2 执行期依赖
         )
         result = orchestrator.run(
             request="修复登录超时问题",
@@ -74,11 +107,20 @@ class SingleAgentOrchestrator:
         inspector: RepositoryInspector,
         planner: Planner,
         repository_root: Path,
+        verification_service: VerificationService | None = None,
+        workspace: GitWorkspace | None = None,
     ) -> None:
-        """全部依赖注入——测试可替换，生产可换真实实现。"""
+        """全部依赖注入——测试可替换，生产可换真实实现。
+
+        verification_service / workspace 是 Day 2 的执行期依赖：
+        run()（Day 1 到 READY）不需要；execute_plan_step() 必须注入，
+        缺失时 execute_plan_step 抛带明确消息的 RuntimeError。
+        """
         self._inspector = inspector
         self._planner = planner
         self._repository_root = repository_root
+        self._verification_service = verification_service
+        self._workspace = workspace
 
     # ── 主入口 ────────────────────────────────────────────
 
@@ -225,6 +267,7 @@ class SingleAgentOrchestrator:
             repo_context=repo_context,
             plan=plan,
             events=events,
+            task_state=state,
         )
 
     # ── 工具 ──────────────────────────────────────────────
@@ -279,4 +322,135 @@ class SingleAgentOrchestrator:
             status=TaskStatus.FAILED,
             events=events,
             error=reason,
+            task_state=state,
         )
+    
+    def execute_plan_step(
+            self,
+            *,
+            task: TaskSpec,
+            plan_step: PlanStep,
+            task_state: TaskState,
+            initial_patch: str,
+            repair_agent: RepairAgent,
+            target_request: VerificationRequest,
+            related_regression_request: VerificationRequest | None = None,
+            max_repair_attempts: int = 3,
+            workspace_root: Path,
+        ) -> StepExecutionResult:
+            """执行一个 PlanStep 的「候选 → 验证 → 修复」循环并推进状态。
+
+            状态规则（day2.md 七十九节）：
+            - SUCCESS → step COMPLETED、task → VERIFYING → COMPLETED
+            - REPAIR_EXHAUSTED → step FAILED、task FAILED（唯一 step FAILED 路径）
+            - EXECUTION_ERROR / INTERRUPTED → step 保持 RUNNING、
+            task 保持 IMPLEMENTING（恢复策略是 Day 3 的事）
+            """
+            # 执行期依赖守卫：run()（Day 1 路径）不需要这两个注入，
+            # 但 execute_plan_step 离不开——缺失时大声失败而非静默出错
+            if (
+                self._verification_service is None
+                or self._workspace is None
+            ):
+                raise RuntimeError(
+                    "execute_plan_step 需要 verification_service 与 workspace，"
+                    "请在构造 SingleAgentOrchestrator 时注入"
+                )
+
+            events: list[AgentEvent] = []
+
+            # ① 前置状态推进：task READY → IMPLEMENTING
+            try:
+                task_state.transition_to(
+                    TaskStatus.IMPLEMENTING, reason="step_execution_started"
+                )
+            except InvalidTransitionError:
+                return StepExecutionResult(
+                    task_id=task.task_id,
+                    plan_step_id=plan_step.step_id,
+                    task_status=task_state.status,
+                    step_status=plan_step.status,
+                    events=events,
+                )
+            events.append(self._status_event(task_state, "step_execution_started"))
+
+            # ② step PENDING → RUNNING
+            plan_step.transition_to(PlanStepStatus.RUNNING)
+
+            # ③ 运行修复循环
+            loop = RepairLoop(
+                verification_service=self._verification_service,
+                workspace=self._workspace,
+            )
+            events.append(make_event(
+                AgentEventType.REPAIR_STARTED,
+                f"修复循环开始: {task.task_id}/{plan_step.step_id}",
+                data={"task_id": task.task_id, "plan_step_id": plan_step.step_id},
+            ))
+
+            loop_result = loop.run(
+                task=task,
+                plan_step_title=plan_step.title,
+                initial_patch=initial_patch,
+                target_request=target_request,
+                workspace_root=workspace_root,
+                repair_agent=repair_agent,
+                max_repair_attempts=max_repair_attempts,
+                related_regression_request=related_regression_request,
+            )
+
+            # ④ 从结果回放 attempt 事件
+            for attempt in loop_result.attempts:
+                if attempt.patch_hash:
+                    events.append(make_event(
+                        AgentEventType.REPAIR_PATCH_PROPOSED,
+                        f"修复 Patch 提出: attempt #{attempt.attempt_no}",
+                        data={"attempt_no": attempt.attempt_no,
+                            "patch_hash": attempt.patch_hash},
+                    ))
+                if attempt.changed_files:
+                    events.append(make_event(
+                        AgentEventType.REPAIR_PATCH_APPLIED,
+                        f"修复 Patch 应用: {', '.join(attempt.changed_files)}",
+                        data={"attempt_no": attempt.attempt_no,
+                            "changed_files": list(attempt.changed_files)},
+                    ))
+
+            # ⑤ outcome → 状态推进
+            if loop_result.outcome is RepairRunOutcome.SUCCESS:
+                task_state.transition_to(TaskStatus.VERIFYING, reason="target_passed")
+                events.append(self._status_event(task_state, "target_passed"))
+                task_state.transition_to(TaskStatus.COMPLETED, reason="regression_passed")
+                events.append(self._status_event(task_state, "regression_passed"))
+                plan_step.transition_to(PlanStepStatus.COMPLETED)
+                events.append(make_event(
+                    AgentEventType.REPAIR_COMPLETED,
+                    f"修复完成: {plan_step.step_id}",
+                    data={"task_id": task.task_id, "plan_step_id": plan_step.step_id,
+                        "repair_count": loop_result.repair_count},
+                ))
+            elif loop_result.outcome is RepairRunOutcome.REPAIR_EXHAUSTED:
+                plan_step.transition_to(PlanStepStatus.FAILED)
+                self._fail(task_state, events, reason="repair_exhausted")
+                events.append(make_event(
+                    AgentEventType.REPAIR_EXHAUSTED,
+                    f"修复预算耗尽: {plan_step.step_id}",
+                    data={"task_id": task.task_id, "plan_step_id": plan_step.step_id,
+                        "repair_count": loop_result.repair_count},
+                ))
+            else:
+                events.append(make_event(
+                    AgentEventType.REPAIR_FAILED,
+                    f"修复循环异常结束: {loop_result.outcome.value}",
+                    data={"task_id": task.task_id, "plan_step_id": plan_step.step_id,
+                        "outcome": loop_result.outcome.value},
+                ))
+
+            return StepExecutionResult(
+                task_id=task.task_id,
+                plan_step_id=plan_step.step_id,
+                task_status=task_state.status,
+                step_status=plan_step.status,
+                loop_result=loop_result,
+                events=events,
+            )

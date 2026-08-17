@@ -37,6 +37,18 @@ class AgentEventType(str, Enum):
     TASK_READY = "task.ready"
     TASK_FAILED = "task.failed"
 
+    # Verification / Repair 循环（Week 4 Day 2）
+    VERIFICATION_STARTED = "verification.started"
+    VERIFICATION_COMPLETED = "verification.completed"
+    VERIFICATION_FAILED = "verification.failed"
+    VERIFICATION_TIMED_OUT = "verification.timed_out"
+    REPAIR_STARTED = "repair.started"
+    REPAIR_PATCH_PROPOSED = "repair.patch_proposed"
+    REPAIR_PATCH_APPLIED = "repair.patch_applied"
+    REPAIR_COMPLETED = "repair.completed"
+    REPAIR_EXHAUSTED = "repair.exhausted"
+    REPAIR_FAILED = "repair.failed"
+
 
 @dataclass(frozen=True)
 class AgentEvent:

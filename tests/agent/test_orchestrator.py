@@ -15,19 +15,27 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 from pathlib import Path
+
+import pytest
 
 from codeteam.agent.inspection import RepositoryInspector
 from codeteam.agent.orchestrator import SingleAgentOrchestrator
 from codeteam.application.build_context import ContextApplicationService
 from codeteam.events import AgentEventType
-from codeteam.planning.models import Plan, PlanStep, create_plan
+from codeteam.git.workspace import GitWorkspace
+from codeteam.planning.models import Plan, PlanStep, PlanStepStatus, create_plan
 from codeteam.planning.planner import (
     FailingPlanner,
     MockPlanner,
     RepositoryContext,
 )
-from codeteam.task.state import TaskStatus
+from codeteam.repair.loop import MockRepairAgent
+from codeteam.task.models import TaskSpec, create_task_spec
+from codeteam.task.state import TaskState, TaskStatus
+from codeteam.verification.models import VerificationKind, VerificationRequest
+from codeteam.verification.service import VerificationService
 
 # ---------------------------------------------------------------------------
 # 辅助
@@ -420,3 +428,337 @@ class TestFailureStatusChangedEvent:
         assert result.events[-2].data["from_status"] == "created"
         assert result.events[-2].data["to_status"] == "failed"
         assert result.events[-1].event_type == AgentEventType.TASK_FAILED
+
+
+# ===================================================================
+# Day 2：execute_plan_step 集成（day2.md 七十八~七十九节）
+# ===================================================================
+
+def _task_spec(task_id: str = "t-step") -> TaskSpec:
+    return create_task_spec(task_id=task_id, original_request="fix x")
+
+
+def _ready_state(task_id: str = "t-step") -> TaskState:
+    """构造处于 READY 状态的 TaskState（走合法转移链）。"""
+    state = TaskState(task_id=task_id)
+    state.transition_to(TaskStatus.INSPECTING)
+    state.transition_to(TaskStatus.PLANNING)
+    state.transition_to(TaskStatus.READY)
+    return state
+
+
+def _step() -> PlanStep:
+    return PlanStep(step_id="P1", title="Fix x", description="fix")
+
+
+def _target_request(task_id: str, cwd: Path) -> VerificationRequest:
+    return VerificationRequest(
+        verification_id="vt",
+        task_id=task_id,
+        plan_step_id="P1",
+        kind=VerificationKind.TARGETED_TEST,
+        argv=(sys.executable, "-m", "pytest", "test_m.py", "-q"),
+        cwd=str(cwd),
+        purpose="verify fix",
+    )
+
+
+class _ScriptedService:
+    """脚本化验证服务（duck typing：verify(request, *, workspace_root)）。"""
+
+    def __init__(self, results: list) -> None:
+        self._results = list(results)
+        self._index = 0
+
+    def verify(self, request, *, workspace_root):
+        if self._index >= len(self._results):
+            raise AssertionError("结果耗尽")
+        result = self._results[self._index]
+        self._index += 1
+        return result
+
+
+class TestExecutePlanStep:
+    """execute_plan_step 状态推进与事件（day2.md 七十八~七十九节）。"""
+
+    def test_missing_dependencies_raises(self, tmp_path: Path) -> None:
+        """验收(依赖守卫): 未注入 verification_service/workspace →
+        RuntimeError 带明确消息。"""
+        orchestrator = SingleAgentOrchestrator(
+            inspector=_FakeInspector(context=_ctx()),
+            planner=MockPlanner(plan=_plan()),
+            repository_root=tmp_path,
+            # 不注入 verification_service / workspace
+        )
+
+        with pytest.raises(RuntimeError, match="verification_service"):
+            orchestrator.execute_plan_step(
+                task=_task_spec(),
+                plan_step=_step(),
+                task_state=_ready_state(),
+                initial_patch="x",
+                repair_agent=MockRepairAgent(patches=[]),
+                target_request=_target_request("t-step", tmp_path),
+                workspace_root=tmp_path,
+            )
+
+    def test_success_progression(self, tmp_path: Path) -> None:
+        """验收(七十八节): SUCCESS → step COMPLETED、task COMPLETED、
+        转移链 READY→IMPLEMENTING→VERIFYING→COMPLETED、
+        事件含 repair.started / repair.completed（repair_count）。"""
+        import subprocess
+
+        # 真实临时仓库：add 错误 + 失败测试，修复 Patch 让它通过
+        def git(*args: str) -> None:
+            subprocess.run(
+                ["git", *args], cwd=tmp_path, check=True, capture_output=True
+            )
+
+        git("init")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (tmp_path / "m.py").write_text("def add(a, b):\n    return a - b\n")
+        (tmp_path / "test_m.py").write_text(
+            "from m import add\n\n"
+            "def test_add():\n"
+            "    assert add(2, 3) == 5\n"
+        )
+        git("add", "-A")
+        git("commit", "-m", "b")
+
+        task_id = "t-step"
+        orchestrator = SingleAgentOrchestrator(
+            inspector=_FakeInspector(context=_ctx()),
+            planner=MockPlanner(plan=_plan()),
+            repository_root=tmp_path,
+            verification_service=VerificationService(),
+            workspace=GitWorkspace(tmp_path),
+        )
+        task_state = _ready_state(task_id)
+        plan_step = _step()
+
+        good_patch = (
+            "diff --git a/m.py b/m.py\n"
+            "--- a/m.py\n"
+            "+++ b/m.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            " def add(a, b):\n"
+            "-    return a - b\n"
+            "+    return a + b\n"
+        )
+
+        result = orchestrator.execute_plan_step(
+            task=_task_spec(task_id),
+            plan_step=plan_step,
+            task_state=task_state,
+            initial_patch=good_patch,
+            repair_agent=MockRepairAgent(patches=[]),
+            target_request=_target_request(task_id, tmp_path),
+            workspace_root=tmp_path,
+        )
+
+        assert result.task_status == TaskStatus.COMPLETED
+        assert result.step_status == PlanStepStatus.COMPLETED
+        # 转移链：READY→IMPLEMENTING→VERIFYING→COMPLETED
+        to_statuses = [h.to_status for h in task_state.history]
+        assert to_statuses[-3:] == [
+            TaskStatus.IMPLEMENTING,
+            TaskStatus.VERIFYING,
+            TaskStatus.COMPLETED,
+        ]
+        types = [e.event_type for e in result.events]
+        assert AgentEventType.REPAIR_STARTED in types
+        completed_events = [
+            e
+            for e in result.events
+            if e.event_type == AgentEventType.REPAIR_COMPLETED
+        ]
+        assert completed_events
+        assert completed_events[0].data["repair_count"] == 0
+
+    def test_exhausted_progression(self, tmp_path: Path) -> None:
+        """验收(七十九节): REPAIR_EXHAUSTED → step FAILED、task FAILED、
+        事件含 repair.exhausted 与 →failed 的 status_changed。"""
+        import subprocess as sp
+
+        from codeteam.verification.models import VerificationResult, VerificationStatus
+
+        def git(*args: str) -> None:
+            sp.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+        git("init")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (tmp_path / "m.py").write_text("x = 1\n")
+        git("add", "-A")
+        git("commit", "-m", "b")
+
+        fail = VerificationResult(
+            verification_id="vt",
+            status=VerificationStatus.FAILED,
+            exit_code=1,
+            stderr="FAILED tests/test_x.py::test_a - AssertionError: boom",
+            failure_signature="tests/test_x.py::test_a+AssertionError",
+        )
+        # initial + 2 repairs 全部失败
+        svc = _ScriptedService([fail, fail, fail])
+
+        orchestrator = SingleAgentOrchestrator(
+            inspector=_FakeInspector(context=_ctx()),
+            planner=MockPlanner(plan=_plan()),
+            repository_root=tmp_path,
+            verification_service=svc,
+            workspace=GitWorkspace(tmp_path),
+        )
+        task_state = _ready_state()
+        plan_step = _step()
+
+        result = orchestrator.execute_plan_step(
+            task=_task_spec(),
+            plan_step=plan_step,
+            task_state=task_state,
+            initial_patch=(
+                "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n"
+                "@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+            ),
+            repair_agent=MockRepairAgent(
+                patches=[
+                    ("diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n"
+                     "@@ -1 +1 @@\n-x = 2\n+x = 3\n"),
+                    ("diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n"
+                     "@@ -1 +1 @@\n-x = 3\n+x = 4\n"),
+                ]
+            ),
+            target_request=_target_request("t-step", tmp_path),
+            workspace_root=tmp_path,
+            max_repair_attempts=2,
+        )
+
+        assert result.task_status == TaskStatus.FAILED
+        assert result.step_status == PlanStepStatus.FAILED
+        types = [e.event_type for e in result.events]
+        assert AgentEventType.REPAIR_EXHAUSTED in types
+        # →failed 的 status_changed 存在
+        failed_changes = [
+            e
+            for e in result.events
+            if e.event_type == AgentEventType.TASK_STATUS_CHANGED
+            and e.data.get("to_status") == "failed"
+        ]
+        assert failed_changes
+
+    def test_execution_error_keeps_intermediate_state(
+        self, tmp_path: Path
+    ) -> None:
+        """验收(七十九节): EXECUTION_ERROR → step 保持 RUNNING、
+        task 保持 IMPLEMENTING（只有 budget exhausted 才标 FAILED）。"""
+        import subprocess as sp
+
+        from codeteam.verification.models import VerificationResult, VerificationStatus
+
+        def git(*args: str) -> None:
+            sp.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+        git("init")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (tmp_path / "m.py").write_text("x = 1\n")
+        git("add", "-A")
+        git("commit", "-m", "b")
+
+        start_failed = VerificationResult(
+            verification_id="vt", status=VerificationStatus.START_FAILED
+        )
+
+        orchestrator = SingleAgentOrchestrator(
+            inspector=_FakeInspector(context=_ctx()),
+            planner=MockPlanner(plan=_plan()),
+            repository_root=tmp_path,
+            verification_service=_ScriptedService([start_failed]),
+            workspace=GitWorkspace(tmp_path),
+        )
+        task_state = _ready_state()
+        plan_step = _step()
+
+        result = orchestrator.execute_plan_step(
+            task=_task_spec(),
+            plan_step=plan_step,
+            task_state=task_state,
+            initial_patch=(
+                "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n"
+                "@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+            ),
+            repair_agent=MockRepairAgent(patches=[]),
+            target_request=_target_request("t-step", tmp_path),
+            workspace_root=tmp_path,
+        )
+
+        assert result.task_status == TaskStatus.IMPLEMENTING
+        assert result.step_status == PlanStepStatus.RUNNING
+        types = [e.event_type for e in result.events]
+        assert AgentEventType.REPAIR_FAILED in types
+
+    def test_attempt_events_replayed(self, tmp_path: Path) -> None:
+        """验收(事件回放): attempt 有 patch_hash → repair.patch_proposed；
+        有 changed_files → repair.patch_applied。"""
+        import subprocess as sp
+
+        from codeteam.verification.models import VerificationResult, VerificationStatus
+
+        def git(*args: str) -> None:
+            sp.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+        git("init")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (tmp_path / "m.py").write_text("x = 1\n")
+        git("add", "-A")
+        git("commit", "-m", "b")
+
+        fail = VerificationResult(
+            verification_id="vt",
+            status=VerificationStatus.FAILED,
+            exit_code=1,
+            stderr="FAILED t::a - AssertionError: boom",
+            failure_signature="t::a+AssertionError",
+        )
+
+        orchestrator = SingleAgentOrchestrator(
+            inspector=_FakeInspector(context=_ctx()),
+            planner=MockPlanner(plan=_plan()),
+            repository_root=tmp_path,
+            verification_service=_ScriptedService([fail, fail]),
+            workspace=GitWorkspace(tmp_path),
+        )
+        task_state = _ready_state()
+        plan_step = _step()
+
+        result = orchestrator.execute_plan_step(
+            task=_task_spec(),
+            plan_step=plan_step,
+            task_state=task_state,
+            initial_patch=(
+                "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n"
+                "@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+            ),
+            repair_agent=MockRepairAgent(
+                patches=[
+                    ("diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n"
+                     "@@ -1 +1 @@\n-x = 2\n+x = 3\n"),
+                ]
+            ),
+            target_request=_target_request("t-step", tmp_path),
+            workspace_root=tmp_path,
+            max_repair_attempts=1,
+        )
+
+        types = [e.event_type for e in result.events]
+        assert AgentEventType.REPAIR_PATCH_PROPOSED in types
+        assert AgentEventType.REPAIR_PATCH_APPLIED in types
+        applied = [
+            e
+            for e in result.events
+            if e.event_type == AgentEventType.REPAIR_PATCH_APPLIED
+        ]
+        assert applied[0].data["attempt_no"] == 1
+        assert "m.py" in applied[0].data["changed_files"]

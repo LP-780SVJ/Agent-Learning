@@ -5273,3 +5273,268 @@ Stop？
 > **Day 2 建立 Feedback Loop；Day 3 建立 Failure Intelligence。**
 
 只要今天能够把“**Patch once**”真正升级成“**Produce → Verify → Observe → Repair → Verify**”，你的 Single-Agent Runtime 就第一次具备了真正意义上的**自我纠错能力**。
+
+---
+
+# 教练教程：Day 2 教学地图
+
+> 以下内容由 Coder Agent 教练根据 `prompt/coder_Agent.md` 第六节规范生成（Benchmark/Ablation 按用户决定改为周度集中评测，两节合并为「周度评测预留」），基于只读核实的仓库实际状态。
+
+---
+
+## 1. 今天在整个 Coding Agent 中做什么
+
+Day 1 的管线停在 **READY**（有 Plan、无执行）。今天把终点推进为**闭环执行能力**：
+
+```
+READY → PlanStep(RUNNING) → Patch → Verification
+       → FAIL → RepairAttempt → 新 Patch → Verification
+       → PASS → Regression → PlanStep(COMPLETED)
+```
+
+**核心转换**：从「生成 Patch 就结束」升级为「Patch 是候选解，外部验证反馈决定它是否值得保留」。
+
+没有它的后果：Runtime 对"Patch 对不对、Bug 修没修、有没有引入新 Bug、失败后怎么办"一无所知——那只是 Code Generation，不是 Coding Agent。
+
+## 2. Capability Mapping
+
+```
+Primary:   Agent Runtime
+           ├── Feedback Loop（Observation → Action）
+           ├── Retry-Repair Lifecycle
+           └── Stopping Condition（约束模型自主循环）
+
+Secondary: Tool Runtime —— Verification 分层走 Week 3 安全链
+           Evaluation —— Test Oracle / 行为验证 / Task success evidence
+```
+
+**今天证明的核心**（day2.md 第七节）：*「现代 Coding Agent 的核心不是模型第一次写没写对，而是 Harness 能否把失败可靠地转成下一轮有用反馈。」* 面试时这句话就是今天的全部价值主张。
+
+## 3. Theory
+
+### 3.1 五个必须讲透的核心区别（day2.md 一百二十节）
+
+| # | 区别 | 一句话 |
+|---|---|---|
+| 1 | **Test Failure ≠ Agent Failure** | pytest exit 1 不是 TaskStatus.FAILED，是"还有 Repair Budget 可用的 Observation" |
+| 2 | **CommandResult ≠ VerificationResult** | Runner 说 SUCCESSFULLY_EXECUTED（进程正常管理）；Verification 说 FAILED（exit code 不符合预期） |
+| 3 | **Target PASS ≠ Task Success** | 局部行为对了 ≠ 附近行为没被破坏，还需要 Regression Evidence |
+| 4 | **Repair ≠ Replan** | 计划方向对、实现细节错 → Repair；计划基本假设错（以为 timeout 在 auth.py 实际在 proxy）→ Replan |
+| 5 | **Test ≠ Perfect Oracle** | Oracle 可能错误/过时/与需求冲突；错误 Oracle 比没有 Oracle 更危险 |
+
+### 3.2 三层结果模型
+
+```
+Level 1  CommandResult       命令有没有正常运行？（Runner 视角）
+Level 2  VerificationResult  代码有没有通过验证？（Oracle 视角）
+Level 3  TaskResult          整个任务有没有成功？（Runtime 视角）
+
+pytest exit 1:
+  Runner:       SUCCESSFULLY_EXECUTED（进程正常启动管理）
+  Verification: FAILED（exit code != 0）
+  Task:         仍 IMPLEMENTING/VERIFYING（还有 Repair Budget）
+```
+
+### 3.3 关键理论
+
+- **Reproduction / Baseline**：FAIL→PASS 的修复证据远强于 Unknown→PASS。修改前用确定输入复现问题
+- **Test Oracle**：判断"正确还是错误"的外部判定规则（pytest exit 0 / golden file / HTTP 响应）；模型自评不是 Oracle
+- **Targeted Test**：低延迟、聚焦的反馈通道（1 秒 vs 4 分钟全量）
+- **Verification Escalation**：Target（快/窄）→ Related（中/相关）→ Full（慢/宽），代码越接近完成验证范围越大
+- **Failure Signature**：test name + exception type 级别的稳定指纹——识别"Patch #1/2/3 全是同一失败 = 没有进展"
+- **RepairAttempt**：Runtime Entity（failure/diagnosis/patch/checkpoint/verification 全关联），不是"LLM 又生成一次 Patch"
+
+## 4. Industrial Design
+
+| 系统 | 方案 | 与 CodeTeam 的关系 |
+|---|---|---|
+| **OpenAI Codex** | 长任务循环：Plan → Edit → Run tests/build/lint → Observe → Repair → Repeat；每个 milestone 必须 validation，失败先修复不扩范围 | 今天 RepairLoop 的 S1-S4 Stopping Condition 直接对应"失败先修复" |
+| **OpenAI iterative repair cookbook** | Review → Repair → Validate 三阶段；Validation 剩余问题成为下一轮 Repair 输入 | RepairContext → Agent → Patch → Verify 的闭环结构 |
+| **Claude Code** | Bug fix 工作流：error + reproduction command/steps → 修复；测试工作流：生成测试 → 运行 → 修失败 | Reproduction/Baseline 理论（day2.md 第九节） |
+| **GitHub Copilot cloud** | 修复 Merge Conflict 后继续验证 build/tests/linter 全过才请求 Review | Local fix ≠ Task success——Regression 收尾的思想 |
+| **Aider** | `--test-cmd` + `--auto-test`：AI 修改后自动跑测试，非零退出码的 stdout/stderr 作为反馈继续修 | 今天是在把这个思想工程化/结构化/可评测化 |
+
+## 5. 当前仓库检查（已核实）
+
+| 资产 | 状态 | 接口要点 |
+|---|---|---|
+| `execution/models.py` | ✅ Week 3 | `CommandRequest(argv: tuple[str,...], cwd, workspace_root, task_id, timeout_seconds)` |
+| `execution/safe_executor.py` | ✅ | `SafeCommandExecutor(*, policy, approval_manager, runner)` 全可选默认；`execute(request, *, approval_grant=None) -> CommandResult` |
+| `CommandResult` | ✅ | `status: CommandStatus`（SUCCESS/NONZERO_EXIT/TIMED_OUT/START_FAILED/POLICY_DENIED/APPROVAL_DENIED/APPROVAL_REQUIRED）+ exit_code/stdout/stderr/truncated/duration_ms |
+| `git/patch.py` + `git/workspace.py` | ✅ Week 3 | PatchValidator（validate → PatchResult）、GitWorkspace（check_patch/apply_patch/diff） |
+| `git/checkpoint.py` | ✅ Week 3 | CheckpointManager（RepairAttempt 要关联 checkpoint_id） |
+| `codeteam/verification/`、`codeteam/repair/` | ❌ 不存在 | 今天新建 |
+| Day 1 状态机 | ✅ | `TaskStatus.IMPLEMENTING/VERIFYING` 转移表已允许；`PlanStepStatus` 的 RUNNING/COMPLETED/FAILED 已就绪 |
+
+**CommandStatus → VerificationStatus 的天然映射**（Step 2 核心）：
+
+```
+SUCCESS + exit in expected → PASSED
+NONZERO_EXIT / exit not expected → FAILED
+TIMED_OUT → TIMED_OUT
+START_FAILED → START_FAILED
+POLICY_DENIED / APPROVAL_DENIED / APPROVAL_REQUIRED → BLOCKED
+```
+
+## 6. 涉及文件
+
+```
+codeteam/verification/           ← [新建]
+├── __init__.py
+├── models.py                    ← VerificationKind/Status/Request/Result + failure_signature 提取
+└── service.py                   ← VerificationService（Request→CommandRequest→SafeCommandExecutor→Result）
+
+codeteam/repair/                 ← [新建]
+├── __init__.py
+├── models.py                    ← RepairAttempt / RepairOutcome / RepairContext
+└── loop.py                      ← RepairLoop（max_repair_attempts + S1-S4）
+
+codeteam/agent/orchestrator.py   ← [扩展] READY 之后接执行：IMPLEMENTING → RepairLoop → VERIFYING → COMPLETED
+codeteam/events.py               ← [扩展] verification.* / repair.* 事件（day2.md 七十六节）
+
+tests/verification/              ← [新建] test_models.py / test_service.py
+tests/repair/                    ← [新建] test_models.py / test_loop.py
+```
+
+**禁止修改**：`codeteam/execution/`、`codeteam/git/`（只读复用）、Day 1 已验收行为（805 基线不得破坏）。
+
+## 7. Architecture / Data Flow
+
+```
+PlanStep P3: RUNNING
+        │
+        ▼
+RepairLoop.run()
+        │
+        ├─ ① VerificationService.verify(TargetedRequest)     ← 走 SafeCommandExecutor
+        │      └─ VerificationRequest → CommandRequest → CommandResult → VerificationResult
+        │
+        ├─ ② PASS？
+        │      ├─ 是 → Related Regression verify
+        │      │        ├─ PASS → PlanStep COMPLETED（S1: success）
+        │      │        └─ FAIL → 进 Repair（针对 Regression Failure，不重修 Target）
+        │      └─ 否 → 判定 status：
+        │             ├─ FAILED → 提取 failure_signature → RepairContext
+        │             ├─ TIMED_OUT / START_FAILED → 不默认修代码（S3 观察/记录）
+        │             └─ BLOCKED → 不调 RepairAgent（S4 语义）
+        │
+        ├─ ③ attempt < max_repair_attempts？
+        │      ├─ 否 → PlanStep FAILED + RepairOutcome=REPAIR_EXHAUSTED（S2）
+        │      └─ 是 → RepairContext(failure tail + diagnosis) → RepairAgent
+        │             → 新 Patch → PatchValidator → GitWorkspace.apply_patch
+        │             → RepairAttempt 记录（checkpoint 关联）→ 回到 ①
+        │
+        └─ 事件全程记录：verification.started/completed/failed/timed_out、
+           repair.started/patch_proposed/patch_applied/completed/exhausted
+
+关键不变量：
+- Test FAIL 不把 PlanStep 标 FAILED —— 只有 budget exhausted 才标（day2.md 七十九节）
+- Verification 绝不绕过 Week 3 安全链（day2.md 二十七节）
+- VerificationRequest ≠ CommandRequest（六十九节：语义分层，转换而非合并）
+- Target FAIL 时 Regression 不执行（避免浪费，T14）
+```
+
+## 8. 今日步骤拆分（6 步，去除原 Step 7）
+
+| Step | 目标 | 为什么先做 | 涉及文件 | 前置知识 | 完成标志 |
+|---|---|---|---|---|---|
+| **1** | Verification 数据模型：VerificationKind/Status/Request/Result + failure_signature 提取（不接 LLM） | 全部后续代码的公共语言；纯数据最容易保证正确 | `verification/models.py` | str Enum、BaseModel、tuple 标注 | 6 种 Status 齐全；signature 提取可测 |
+| **2** | VerificationService：Request → CommandRequest → SafeCommandExecutor → Result | 先读清 Week 3 真实接口再设计；安全链是硬约束 | `verification/service.py` | CommandRequest/CommandResult 字段、依赖注入 | 全部 7 种 CommandStatus 正确映射为 VerificationStatus |
+| **3** | 先跑通 Target Test（Patch → Target 的 PASS/FAIL 语义） | 最小闭环先验证语义正确，再接 Repair | `repair/loop.py`（雏形） | VerificationService | Target PASS→成功 / FAIL→失败语义正确 |
+| **4** | RepairAttempt 记录结构（failure/diagnosis/patch/checkpoint 关联） | Repair 的可审计性是后续 Evaluation 的地基 | `repair/models.py` | BaseModel 嵌套、attempt_no 语义 | 一次 attempt 全字段可构造 |
+| **5** | RepairLoop（FAIL → RepairContext → 新 Patch → 再 Verify；max_repair_attempts + S1-S4） | 今天的核心：把失败可靠转成下一轮反馈 | `repair/loop.py` | 依赖注入（RepairAgent Protocol + Mock）、循环边界 | 4 个 Stopping Condition 全部可测 |
+| **6** | Regression Cascade（Target PASS → Related Regression，预留 Full）+ 集成进 Orchestrator/PlanStep 状态推进 | 局部正确 ≠ 全局正确；Day 1 状态机今天真正启用 | `repair/loop.py`、`agent/orchestrator.py`、`events.py` | TaskStatus 转移表、事件系统 | Target PASS+Regression FAIL 不 COMPLETED；只有 budget exhausted 才标 PlanStep FAILED |
+
+## 9. Test Strategy
+
+### Required Tests（7 项，day2.md 一百二十一节）
+
+| 测试 | 断言核心 | 对应验收 |
+|---|---|---|
+| 首次成功 | repair_attempts == 0，不强行"再优化一次" | S1 成功后立即停 |
+| 一次失败二次成功 | repair_attempts == 1；第一次 failure 确实进入第二次 RepairContext | FAIL→Repair→PASS 闭环 |
+| 连续失败到上限 | max=3 时第 4 次**不再调模型**；outcome == REPAIR_EXHAUSTED | S2 预算耗尽 |
+| Target PASS + Regression FAIL | Task 不 COMPLETED；Repair 针对 Regression 而非重修 Target | 局部≠全局 |
+| 命令不存在 | VerificationStatus == START_FAILED；**RepairAgent 不被调用** | 环境错误 ≠ 代码错误 |
+| Test Timeout | TIMED_OUT（不是 FAILED）；不默认改代码 | CommandStatus 映射 |
+| Output Truncated | 不崩溃；仍按 exit code 判定；truncated 只是 metadata | exit 0 + truncated → 仍 PASSED |
+
+### Recommended Extra Tests（8 项）
+
+BLOCKED 不调 RepairAgent / 同 signature 重复计数 / no-op patch 防死循环 / patch 无法 apply 是 PATCH FAILURE 不是 TEST FAILURE / Target FAIL 时 RegressionRunner 零调用 / attempt limit 强不变量 / attempt 与 checkpoint 正确关联 / Regression PASS 但 Target FAIL 仍 FAIL。
+
+**原则**：真实临时环境优先（tmp_path 小仓库 + 真实 pytest 命令），只 Mock 外部模型（Fake/Mock RepairAgent，day2.md 一百一十六节）。每条测试注明对应哪条验收。
+
+## 10. Design Decision Plan
+
+**DD-W4-D2-01：Tiered Verification Strategy**
+
+```
+Problem:   每个候选 Patch 应该怎样验证？
+Alternatives:
+  A. 每次 Patch 后跑完整测试套件（最宽验证，但慢/贵/噪声多）
+  B. Targeted → Related Regression → Full where required（快反馈/聚焦/降迭代成本，
+     但 Target 选错可能漏回归）
+Decision:   B
+Reasons:    Feedback Latency / Diagnostic Precision / Resource Efficiency / 最终仍逐级扩到回归
+Risks:      Target Selection 错、Related 选错
+Mitigations: 最终 Broad Regression + 未来 changed-files/ImportGraph 测试选择 + held-out eval
+Evidence status: PROPOSED —— 这是工程假设，待周度 Ablation 验证，不得标 SUPPORTED
+```
+
+记录位置：`docs/design_decisions/DD-W4-D2-01.md`（沿用 Day 1 目录）。
+
+## 11. 周度评测预留（替代 Benchmark/Ablation Plan）
+
+今天**不写 benchmark 脚本、不跑 benchmark**。但实现必须为周度集中评测留好数据出口：
+
+| 预留字段/事件 | 落到哪里 | 周度指标 |
+|---|---|---|
+| RepairAttempt.attempt_no / outcome | repair.models | Mean Repair Attempts（成功任务 + 全体分开） |
+| VerificationResult.duration_ms | verification.completed 事件 data | Target P50/P95、Total Verification Latency |
+| RepairLoop 返回的 attempts tuple | RepairLoopResult | First-pass Success Rate |
+| repair.patch_proposed / applied 事件 | events | Tool Calls 计数 |
+| failure_signature 序列 | RepairAttempt | Repair Oscillation / 同签名重复率 |
+| Target PASS + Regression FAIL 计数 | RepairOutcome | Regression Failure Rate After Target Pass |
+
+原则：**Raw data 全部落对象/事件，评测脚本以后只读不重复测量**（与 Day 1 的 planner_ms 模式一致）。
+
+## 12. Failure Cases to Watch
+
+| # | 场景 | Day 2 处理 |
+|---|---|---|
+| FC-1 | 测试本身错误（Oracle 冲突） | 不静默改生产代码；留 INCONCLUSIVE/NEEDS_REVIEW 钩子，Day 3 分类 |
+| FC-2 | Flaky Test | 固定次数重跑记录 pass/run ratio；**禁止 rerun-until-pass** |
+| FC-3 | Test Hacking（硬编码过测试） | 靠 Regression + Diff Review 兜底；Day 2 只记录 |
+| FC-4 | Repair Oscillation | 同 failure_signature + 同 changed_files 连续 3 次 → STOP/REPLAN 钩子 |
+| FC-5 | 输出过大截断丢关键错误 | bounded head+tail；Known Limitation 如实记录 |
+| FC-6 | 环境错误误诊为代码错误 | START_FAILED/TIMED_OUT 与 FAILED 分离，不触发 Repair |
+| FC-7 | Target Test 选错 | Target 选择本身是待 Evaluation 的模块；周度评测观察 |
+
+## 13. Interview Focus
+
+**关键追问——"这不就是失败了把错误再喂给 LLM 吗？"** 标准回答（day2.md 一百二十三节）：
+
+> 我没有把 Repair Loop 实现成简单的"非零退出码 → 把整段 stderr 重新塞给模型"。执行命令首先被转换成结构化 VerificationRequest，经过安全执行链产生 CommandResult，再由 Verification 层解释为 PASSED/FAILED/TIMED_OUT/START_FAILED/BLOCKED 等语义。对真实行为失败，提取 Failure Signature 和有界 Repair Context，建立可审计的 RepairAttempt（关联 Patch/Checkpoint/Changed Files/Verification Evidence），再生成下一次候选修改。验证采用 Targeted → Related → Full 分层策略，由 Repair Budget、重复 Failure、无进展和安全失败等 Stopping Conditions 防止无限循环。最终 Task Success 由外部 Oracle 和 Regression Evidence 决定，而不是模型自己宣称完成。
+
+**其余 28 问**（day2.md 一百二十二节）分五组：Verification（6）/ Tests（5）/ Repair（6）/ Reliability（6）/ Evaluation（5）。特别准备：**为什么不能 rerun until pass**（10% 通过率重跑总有一次 PASS，但那是假证据）、**Single-shot vs Repair Loop 公平对比的预算陷阱**（周度 Ablation 要控制模型调用预算）。
+
+## 14. 今日最终完成标准
+
+```
+[ ] VerificationKind 7 种 / VerificationStatus 6 种 / Request / Result 模型完成
+[ ] failure_signature 提取完成（test name + exception type，第一版）
+[ ] VerificationService 走 SafeCommandExecutor，7 种 CommandStatus 映射正确
+[ ] VerificationRequest ≠ CommandRequest（转换而非合并，不绕过安全链）
+[ ] RepairAttempt 是 Runtime Entity（checkpoint_id 关联）
+[ ] RepairLoop：max_repair_attempts + S1(成功) S2(预算耗尽) S3(不可恢复执行错误) S4(中断/BLOCKED)
+[ ] Test FAIL 不标 PlanStep FAILED；只有 budget exhausted 才标
+[ ] Target PASS + Regression FAIL → 不 COMPLETED，Repair 针对 Regression
+[ ] 7 项 Required + 8 项 Recommended 测试全绿，每条对应验收
+[ ] 全量 pytest 不低于 805 基线
+[ ] DD-W4-D2-01 落盘，Evidence = PROPOSED
+[ ] 周度评测预留字段/事件就位（不写评测脚本）
+[ ] Failure Cases 已记录
+[ ] 28 个面试问题 + 关键追问可独立回答
+[ ] 明确不做：ErrorClassifier（Day 3）、Session 持久化（Day 4）、完整 CLI、Benchmark/Ablation 执行（周度集中）
+```
