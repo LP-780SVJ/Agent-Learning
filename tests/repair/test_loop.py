@@ -517,3 +517,45 @@ class TestRepairLoopRun:
         assert result.outcome is RepairRunOutcome.INTERRUPTED
         assert len(agent.calls) == 1
         assert result.initial_candidate is not None
+
+
+# ===================================================================
+# RepairAgent 异常（loop.py 总闸门分支）
+# ===================================================================
+
+class TestAgentException:
+    """repair_agent.propose_patch 抛异常 → NO_PATCH → EXECUTION_ERROR。"""
+
+    def test_agent_exception_records_no_patch(self, git_repo: Path) -> None:
+        """验收(总闸门): agent 抛异常 → attempts 记录 NO_PATCH、
+        outcome=EXECUTION_ERROR、不再调用 agent。"""
+        from .conftest import ScriptedVerificationService
+
+        class _RaisingAgent:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def propose_patch(self, context) -> str:
+                self.calls += 1
+                raise RuntimeError("model crashed")
+
+        svc = ScriptedVerificationService([_fail()])
+        agent = _RaisingAgent()
+
+        result = RepairLoop(
+            verification_service=svc, workspace=GitWorkspace(git_repo)
+        ).run(
+            task=_task(),
+            plan_step_title="P1",
+            initial_patch=make_patch("x = 1", "x = 2"),
+            target_request=_req("vt", VerificationKind.TARGETED_TEST),
+            workspace_root=git_repo,
+            repair_agent=agent,
+            max_repair_attempts=3,
+        )
+
+        assert result.outcome is RepairRunOutcome.EXECUTION_ERROR
+        assert len(result.attempts) == 1
+        assert result.attempts[0].outcome is RepairOutcome.NO_PATCH
+        assert result.attempts[0].patch_hash is None
+        assert agent.calls == 1  # 异常后不再调用

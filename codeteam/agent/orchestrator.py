@@ -34,7 +34,11 @@ from codeteam.planning.models import (
 )
 from codeteam.planning.planner import Planner, RepositoryContext
 from codeteam.repair.loop import RepairAgent, RepairLoop
-from codeteam.repair.models import RepairLoopRunResult, RepairRunOutcome
+from codeteam.repair.models import (
+    RepairLoopRunResult,
+    RepairOutcome,
+    RepairRunOutcome,
+)
 from codeteam.task.models import TaskSpec, create_task_spec
 from codeteam.task.state import InvalidTransitionError, TaskState, TaskStatus
 from codeteam.verification.models import VerificationRequest
@@ -408,7 +412,14 @@ class SingleAgentOrchestrator:
                         data={"attempt_no": attempt.attempt_no,
                             "patch_hash": attempt.patch_hash},
                     ))
-                if attempt.changed_files:
+                # F3 修复：PATCH_FAILED 的 attempt 只发 proposed 不发 applied。
+                # changed_files 保留"patch 本打算改哪些文件"的审计信息
+                # （不清空），但事件层的 applied 必须与磁盘事实一致——
+                # patch 没落地就不能宣称已应用。
+                if (
+                    attempt.changed_files
+                    and attempt.outcome is not RepairOutcome.PATCH_FAILED
+                ):
                     events.append(make_event(
                         AgentEventType.REPAIR_PATCH_APPLIED,
                         f"修复 Patch 应用: {', '.join(attempt.changed_files)}",

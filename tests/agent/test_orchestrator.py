@@ -762,3 +762,117 @@ class TestExecutePlanStep:
         ]
         assert applied[0].data["attempt_no"] == 1
         assert "m.py" in applied[0].data["changed_files"]
+
+    def test_non_ready_state_returns_without_progression(
+        self, tmp_path: Path
+    ) -> None:
+        """验收(execute_plan_step 守卫): task_state 处于 CREATED（非 READY）
+        → 返回结果不推进、不抛异常（orchestrator.py 守卫分支）。"""
+        import subprocess as sp
+
+        def git(*args: str) -> None:
+            sp.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+        git("init")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (tmp_path / "m.py").write_text("x = 1\n")
+        git("add", "-A")
+        git("commit", "-m", "b")
+
+        orchestrator = SingleAgentOrchestrator(
+            inspector=_FakeInspector(context=_ctx()),
+            planner=MockPlanner(plan=_plan()),
+            repository_root=tmp_path,
+            verification_service=_ScriptedService([]),
+            workspace=GitWorkspace(tmp_path),
+        )
+
+        task_state = TaskState(task_id="t-cre")  # 初始 CREATED，不推进到 READY
+        plan_step = _step()
+
+        result = orchestrator.execute_plan_step(
+            task=_task_spec("t-cre"),
+            plan_step=plan_step,
+            task_state=task_state,
+            initial_patch=(
+                "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n"
+                "@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+            ),
+            repair_agent=MockRepairAgent(patches=[]),
+            target_request=_target_request("t-cre", tmp_path),
+            workspace_root=tmp_path,
+        )
+
+        # 不抛异常，状态不推进
+        assert result.task_status == TaskStatus.CREATED
+        assert result.step_status == PlanStepStatus.PENDING
+        assert result.loop_result is None
+
+    def test_patch_failed_attempt_not_replayed_as_applied(
+        self, tmp_path: Path
+    ) -> None:
+        """验收(F3 回归): PATCH_FAILED 的 attempt 回放只发
+        repair.patch_proposed，不发 repair.patch_applied——
+        patch 没落地不能宣称已应用。"""
+        import subprocess as sp
+
+        from codeteam.repair.models import RepairOutcome
+        from codeteam.verification.models import VerificationResult, VerificationStatus
+
+        def git(*args: str) -> None:
+            sp.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+        git("init")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (tmp_path / "m.py").write_text("x = 1\n")
+        git("add", "-A")
+        git("commit", "-m", "b")
+
+        fail = VerificationResult(
+            verification_id="vt",
+            status=VerificationStatus.FAILED,
+            exit_code=1,
+            stderr="FAILED t::a - AssertionError: boom",
+            failure_signature="t::a+AssertionError",
+        )
+
+        orchestrator = SingleAgentOrchestrator(
+            inspector=_FakeInspector(context=_ctx()),
+            planner=MockPlanner(plan=_plan()),
+            repository_root=tmp_path,
+            verification_service=_ScriptedService([fail]),
+            workspace=GitWorkspace(tmp_path),
+        )
+        task_state = _ready_state()
+        plan_step = _step()
+
+        result = orchestrator.execute_plan_step(
+            task=_task_spec(),
+            plan_step=plan_step,
+            task_state=task_state,
+            initial_patch=(
+                "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n"
+                "@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+            ),
+            repair_agent=MockRepairAgent(
+                patches=[
+                    # context 不匹配（文件已是 x = 2）→ PATCH_FAILED
+                    ("diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n"
+                     "@@ -1 +1 @@\n-x = 99\n+x = 100\n"),
+                ]
+            ),
+            target_request=_target_request("t-step", tmp_path),
+            workspace_root=tmp_path,
+            max_repair_attempts=1,
+        )
+
+        # 场景确认：attempt 是 PATCH_FAILED 且 changed_files 非空
+        assert result.loop_result is not None
+        assert result.loop_result.attempts[0].outcome is RepairOutcome.PATCH_FAILED
+        assert result.loop_result.attempts[0].changed_files
+
+        types = [e.event_type for e in result.events]
+        assert AgentEventType.REPAIR_PATCH_PROPOSED in types
+        assert AgentEventType.REPAIR_PATCH_APPLIED not in types
