@@ -15,6 +15,7 @@ Orchestrator 只协调，不实现底层逻辑：
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -25,6 +26,10 @@ from codeteam.events import (
     AgentEventType,
     make_event,
 )
+from codeteam.failures.classifier import ErrorClassifier
+from codeteam.failures.models import AgentFailure, FailureStage
+from codeteam.failures.recovery import RecoveryAction, RecoveryPolicy
+from codeteam.failures.retry import RetryPolicy
 from codeteam.git.workspace import GitWorkspace
 from codeteam.planning.models import (
     Plan,
@@ -113,6 +118,11 @@ class SingleAgentOrchestrator:
         repository_root: Path,
         verification_service: VerificationService | None = None,
         workspace: GitWorkspace | None = None,
+        # ── 错误恢复注入（全部可选，测试可替换）──
+        classifier: ErrorClassifier | None = None,
+        recovery_policy: RecoveryPolicy | None = None,
+        retry_policy: RetryPolicy | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
         """全部依赖注入——测试可替换，生产可换真实实现。
 
@@ -125,7 +135,10 @@ class SingleAgentOrchestrator:
         self._repository_root = repository_root
         self._verification_service = verification_service
         self._workspace = workspace
-
+        self._classifier = classifier or ErrorClassifier()
+        self._recovery_policy = recovery_policy or RecoveryPolicy()
+        self._retry_policy = retry_policy or RetryPolicy()
+        self._sleeper = sleeper or time.sleep
     # ── 主入口 ────────────────────────────────────────────
 
     def run(
@@ -156,10 +169,26 @@ class SingleAgentOrchestrator:
                 state=state,
                 events=events,
             )
-        except Exception as exc:  # noqa: BLE001 — 总闸门：任何未预期异常必须转 FAILED，不能上抛
+        except KeyboardInterrupt:
+            # I6：用户中断是 Runtime Control Flow，不是 Failure（day3 §四十五）
+            return self._pause(state, events, reason="user_interrupt")
+        except _TerminalFailure as tf:
+            # 已知 Domain Failure：分类/决策已完成，直接用其消息失败。
+            # reason 含 source_type 以保持 D1 契约「error 含异常类型名」
+            # （类型名不含敏感信息，原始消息仍在 failure.source_message 中），
+            # 并含终态原因（如 max_attempts_exhausted）供审计定位。
             return self._fail(
-                state,
-                events,
+                state, events,
+                reason=(
+                    f"{tf.failure.code.value}: "
+                    f"{tf.failure.message} "
+                    f"[{tf!s}] "
+                    f"(来源: {tf.failure.source_type or 'unknown'})"
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — 兜底：未知异常仍 FAILED（D1 不回归）
+            return self._fail(
+                state, events,
                 reason=f"{type(exc).__name__}: {exc}",
             )
 
@@ -218,9 +247,15 @@ class SingleAgentOrchestrator:
             )
         )
         started = time.monotonic()
-        plan = self._planner.create_plan(
-            task=spec,
-            repo_context=repo_context,
+        plan = self._execute_with_recovery(
+            state=state,
+            events=events,
+            stage=FailureStage.MODEL_CALL,
+            operation="plan_generation",
+            action=lambda: self._planner.create_plan(
+                task=spec,
+                repo_context=repo_context,
+            ),
         )
         planner_ms = int((time.monotonic() - started) * 1000)
         events.append(
@@ -324,6 +359,132 @@ class SingleAgentOrchestrator:
         return OrchestrationResult(
             task_id=state.task_id,
             status=TaskStatus.FAILED,
+            events=events,
+            error=reason,
+            task_state=state,
+        )
+
+    def _execute_with_recovery(
+        self,
+        *,
+        state: TaskState,
+        events: list[AgentEvent],
+        stage: FailureStage,
+        operation: str,
+        action: Callable[[], object],
+    ):
+        """执行一个操作，失败时走「分类 → 决策 → 执行」恢复循环。
+
+        可重试失败（RETRY + 预算内）→ 等待后重试同一操作；
+        终态（STOP / PAUSE / 预算耗尽 / 无执行器的恢复）→ 抛
+        _TerminalFailure，由 run() 闸门转为 FAILED。
+
+        Returns:
+            action 的返回值（恢复成功时）。
+        """
+        attempt = 1
+        while True:
+            try:
+                return action()
+            except KeyboardInterrupt:
+                # 中断不进循环——直接抛给闸门（闸门 → PAUSE）
+                raise
+            except Exception as exc:  # noqa: BLE001 — 恢复循环必须捕获任意操作异常
+                # ① 检测 → 分类（deterministic，不调模型）
+                events.append(make_event(
+                    AgentEventType.ERROR_DETECTED,
+                    f"检测到失败: {type(exc).__name__}",
+                    data={"operation": operation, "stage": stage.value,
+                          "source_type": type(exc).__name__},
+                ))
+                failure = self._classifier.classify(
+                    error=exc,
+                    stage=stage,
+                    operation=operation,
+                    task_id=state.task_id,
+                    attempt=attempt,
+                )
+                events.append(make_event(
+                    AgentEventType.ERROR_CLASSIFIED,
+                    f"错误分类: {failure.category.value}/{failure.code.value}",
+                    data={"category": failure.category.value,
+                          "code": failure.code.value,
+                          "retryable": failure.retryable},
+                ))
+
+                # ② 决策
+                action_type = self._recovery_policy.decide(failure)
+                events.append(make_event(
+                    AgentEventType.RECOVERY_DECIDED,
+                    f"恢复决策: {action_type.value}",
+                    data={"action": action_type.value},
+                ))
+
+                # ③ 执行
+                if action_type == RecoveryAction.RETRY:
+                    decision = self._retry_policy.decide(failure)
+                    if not decision.should_retry:
+                        # I7：预算耗尽 → 不再执行任何操作
+                        events.append(make_event(
+                            AgentEventType.RETRY_EXHAUSTED,
+                            f"重试预算耗尽: {decision.reason}",
+                            data={"reason": decision.reason,
+                                  "attempt": attempt},
+                        ))
+                        raise _TerminalFailure(failure, decision.reason)
+                    events.append(make_event(
+                        AgentEventType.RETRY_SCHEDULED,
+                        f"重试已排期: delay={decision.delay_seconds}s",
+                        data={"delay_seconds": decision.delay_seconds,
+                              "attempt": decision.attempt},
+                    ))
+                    self._sleeper(decision.delay_seconds)
+                    attempt = decision.attempt
+                    events.append(make_event(
+                        AgentEventType.RETRY_STARTED,
+                        f"重试开始: attempt={attempt}",
+                        data={"attempt": attempt},
+                    ))
+                    continue  # 重试同一操作
+
+                if action_type == RecoveryAction.PAUSE:
+                    raise _TerminalFailure(failure, "pause")
+
+                # REPAIR / REREAD / COMPACT 等：Day 3 只发事件与终态，
+                # 执行接线留 Day 5（明确不做清单）
+                events.append(make_event(
+                    AgentEventType.RECOVERY_STARTED,
+                    f"恢复执行开始: {action_type.value}",
+                    data={"action": action_type.value},
+                ))
+                raise _TerminalFailure(
+                    failure,
+                    f"recovery_executor_not_wired:{action_type.value}",
+                )
+
+    def _pause(
+        self,
+        state: TaskState,
+        events: list[AgentEvent],
+        *,
+        reason: str,
+    ) -> OrchestrationResult:
+        """进入 PAUSED 并返回结果（与 _fail 对称的 I6 路径）。"""
+        try:
+            state.transition_to(TaskStatus.PAUSED, reason=reason)
+        except InvalidTransitionError:
+            pass
+        else:
+            events.append(self._status_event(state, reason))
+
+        events.append(make_event(
+            AgentEventType.TASK_PAUSED,
+            f"任务暂停: {reason}",
+            data={"task_id": state.task_id, "reason": reason},
+        ))
+        return OrchestrationResult(
+            task_id=state.task_id,
+            status=TaskStatus.PAUSED,
             events=events,
             error=reason,
             task_state=state,
@@ -465,3 +626,10 @@ class SingleAgentOrchestrator:
                 loop_result=loop_result,
                 events=events,
             )
+
+class _TerminalFailure(Exception):
+    """恢复循环的终态信号：已分类的 Domain Failure，交给 run() 闸门。"""
+
+    def __init__(self, failure: AgentFailure, reason: str) -> None:
+        super().__init__(reason)
+        self.failure = failure

@@ -49,6 +49,19 @@ class AgentEventType(str, Enum):
     REPAIR_EXHAUSTED = "repair.exhausted"
     REPAIR_FAILED = "repair.failed"
 
+     # ── Day 3：错误分类与恢复事件（dotted 命名族）──
+    # 注意：RETRY_SCHEDULED（"retry_scheduled"，Week1 定义、无调用方）
+    # 在 Day 3 复用于 Domain 重试调度——语义一致，值保持兼容。
+    ERROR_DETECTED = "error.detected"          # 捕获到底层失败
+    ERROR_CLASSIFIED = "error.classified"      # 分类完成（category/code）
+    RECOVERY_DECIDED = "recovery.decided"      # 决策完成（action）
+    RETRY_STARTED = "retry.started"            # 第 N 次重试开始
+    RETRY_EXHAUSTED = "retry.exhausted"        # 重试预算耗尽
+    RECOVERY_STARTED = "recovery.started"      # 非 RETRY 恢复开始执行
+    RECOVERY_COMPLETED = "recovery.completed"  # 恢复执行成功
+    RECOVERY_FAILED = "recovery.failed"        # 恢复执行自身失败
+    TASK_PAUSED = "task.paused"                # 任务暂停（USER_INTERRUPT）
+
 
 @dataclass(frozen=True)
 class AgentEvent:

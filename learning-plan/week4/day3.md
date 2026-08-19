@@ -5192,3 +5192,232 @@ Day 3 解决：
 ```
 
 也就是从 **Failure Recovery** 正式走向 **Crash Recovery + Resume**。
+
+---
+
+# 附录：Day 3 教学工程地图（Coder Agent 首轮输出）
+
+> 以下为 Coder Agent 按规约 §三十一 15 节结构输出的工程地图，基于只读检查的实际代码接口。
+
+## 1. 今天在整个 Coding Agent 中做什么
+
+**一句话**：把 Orchestrator 里那个"任何异常 → 直接 FAILED"的总闸门，升级成一个**有语义的故障分类 + 恢复决策系统**。
+
+```
+以前（D1/D2 现状）：
+  出现异常 → except Exception → _fail() → FAILED
+  （无论 429、Policy DENY、Ctrl+C 全部一视同仁）
+
+今天（Day 3）：
+  出现异常 → ErrorClassifier（这是什么类型的失败？）
+           → AgentFailure（typed domain failure）
+           → RecoveryPolicy（下一步做什么？）
+           → RETRY / REPAIR / REPLAN / REREAD / PAUSE / STOP
+```
+
+真实世界中 Agent 会遭遇 8 种完全不同的失败——模型 503（重试有意义）、API Key 错误（重试永远无效）、Patch 上下文失配（重试同一个 Patch 一定失败）、pytest 失败（重跑测试不能修代码）、Policy DENY（重试等于绕过安全策略）、用户拒绝审批（重试等于忽略用户决定）、Sandbox 不可用（绝不能降级裸机执行）、用户 Ctrl+C（重试等于无视用户停止请求）。用一个 `retry()` 处理全部 8 种，是 Agent Runtime 的典型大坑。
+
+## 2. Capability Mapping
+
+```text
+Primary:
+  Agent Runtime（Fault Model + Recovery Orchestration）
+
+Secondary:
+  Observability（error.* / recovery.* / retry.* 事件序列）
+  Safety（SECURITY 类 Fail Closed、Policy/Approval Deny 硬编码 STOP）
+  Evaluation（50 Case Fault Injection 数据驱动测试）
+
+求职价值：这不是"写一堆异常类型"，而是
+「底层故障 → Agent 行为」的语义层——面试时可讲
+Retry Ownership、Fail Closed、Thundering Herd、Retry Storm 等工业概念。
+```
+
+## 3. Theory（压缩版）
+
+4 组核心概念：
+
+| 概念 | 回答的问题 | 例子 |
+|---|---|---|
+| ErrorCategory | 这是哪一类问题？ | MODEL / PATCH / TEST / SECURITY |
+| Retryable | 重试同一动作有合理成功概率吗？ | RATE_LIMIT=是，AUTH_FAILED=否 |
+| Transient/Permanent | 原因会随时间消失吗？ | 503=是，API Key 错误=否 |
+| RecoveryAction | Runtime 下一步干什么？ | RETRY / REPAIR / REPLAN / PAUSE / STOP |
+
+四个**不是**一回事。Retryable ≠ Transient（远程写超时是 transient 但不可盲重试——幂等性问题）。Retry ≠ Repair ≠ Replan（同动作 / 新实现 / 新策略）。
+
+**最核心设计原则**：同一个 `TimeoutError` 在不同 stage 映射成不同 AgentFailure——MODEL_CALL stage → MODEL_TIMEOUT→RETRY；VERIFICATION stage → TEST_TIMEOUT→REPAIR。所以 Classifier 必须接收 `(error, stage, operation, metadata)`，不能只看 `type(exception)`。
+
+## 4. Industrial Design（压缩版）
+
+| 工业系统 | 做法 | 启示 |
+|---|---|---|
+| GitHub Copilot SDK | `onErrorOccurred` Hook 提供 `errorType`/`errorContext`/`recoverable` | 分类信息由 Runtime 提供，应用决定恢复 |
+| OpenAI API | 明确区分可恢复（500/503/429）与不可恢复（billing/quota/auth） | Transient 才 Retry；billing 类 Retry 无效 |
+| Claude Code Hooks | `PostToolUseFailure` vs `PermissionDenied` 是不同生命周期事件 | 授权失败 ≠ 操作失败 |
+| OpenAI rate-limit 指南 | Retry-After 优先，无 Header 用 backoff+jitter；避免 SDK/应用层 Retry 叠加 | RetryPolicy 设计 + Retry Storm 规避 |
+
+## 5. 当前仓库检查（只读核实结果）
+
+### 已存在、今天要复用的
+
+| 模块 | 实际接口 | 今天的用途 |
+|---|---|---|
+| `task/state.py` | `TaskState.PAUSED` 已存在（第 31 行） | I6 不需要新增状态 |
+| `planning/models.py` | `replan()` 已存在 | REPLAN 动作直接复用 |
+| `repair/` | Day2 RepairLoop 已存在 | REPAIR 动作直接复用 |
+| `verification/models.py` | `VerificationStatus`：PASSED/FAILED/TIMED_OUT/START_FAILED/BLOCKED/INCONCLUSIVE | TEST_FAILED/TEST_TIMEOUT 映射源 |
+| `execution/models.py` | `PolicyDecision.DENY`、`ApprovalDecision.DENIED`、`CommandStatus` | POLICY_DENIED/APPROVAL_DENIED 映射源 |
+| `sandbox/errors.py` | `SandboxError`/`DockerUnavailableError` | SANDBOX_UNAVAILABLE 映射源 |
+| `events.py` | 已有 task.*/verification.*/repair.*/approval.* + Week1 的 `RETRY_SCHEDULED` | 需新增 error./recovery./retry. 事件 |
+
+### 冲突与缺口
+
+| 问题 | 详情 |
+|---|---|
+| 命名冲突 | day3 建议 `codeteam/errors/` 包，但 `codeteam/errors.py` 已被 Week1 传输层占用，被 `llm/openai_compatible.py` + 2 个测试文件依赖（禁止修改） |
+| Retry Storm 风险 | `llm/openai_compatible.py` 已有 `RetryConfig(base_delay=0.5, 指数退避)`——传输层已 Retry，Task-level RetryPolicy 必须明确 Ownership |
+| 总闸门 | `orchestrator.py:159` `except Exception → _fail()`——今天升级为 classify → recover → 预算耗尽才 FAILED |
+| events.py 缺口 | 缺 error.detected/error.classified/recovery.decided/retry.scheduled/retry.started/retry.exhausted/recovery.started/recovery.completed/recovery.failed/task.paused |
+
+## 6. 涉及文件
+
+新增：
+
+```text
+codeteam/failures/            ← 新 Domain 错误包（DD 中论证命名）
+├── __init__.py
+├── models.py                 ← ErrorCategory/AgentErrorCode/FailureStage/RecoveryAction/AgentFailure
+├── classifier.py             ← ErrorClassifier：raw failure + stage → AgentFailure
+├── recovery.py               ← RecoveryPolicy：AgentFailure → RecoveryAction（只决策）
+└── retry.py                  ← RetryPolicy：backoff+jitter+Retry-After+budget（只算 delay）
+
+tests/failures/               ← test_classifier / test_recovery_policy / test_retry_policy / test_fault_injection
+docs/design_decisions/DD-W4-D3-01.md
+```
+
+修改：
+
+```text
+codeteam/agent/orchestrator.py   ← Step 6：总闸门升级
+codeteam/events.py               ← 新增 error/recovery/retry 事件
+tests/agent/                     ← 恢复集成测试
+```
+
+禁止修改：`codeteam/errors.py`、`codeteam/llm/`、Week1 传输层测试、`tests/fixtures/` 原件、已有 DD 文件、规约文件。
+
+## 7. Architecture / Data Flow
+
+```text
+                    SingleAgentOrchestrator.run()
+                              │
+                              ▼
+                      Operation 执行
+                              │
+                      ┌───────┴───────┐
+                      ▼               ▼
+                   SUCCESS         FAILURE
+                                      │
+                                      ▼
+                     ┌────────────────────────────────┐
+                     │ ① ErrorClassifier              │
+                     │   classify(error, stage,       │
+                     │            operation, metadata)│
+                     │   只分类：不 sleep 不 retry     │
+                     │   不调模型（deterministic）     │
+                     └────────────────┬───────────────┘
+                                      ▼
+                              AgentFailure（typed）
+                        category/code/stage/retryable/
+                        transient/cause 链（wrap not erase）
+                                      │
+                                      ▼
+                     ┌────────────────────────────────┐
+                     │ ② RecoveryPolicy               │
+                     │   failure.code → action        │
+                     │   只决策：不执行               │
+                     │   SECURITY 类硬编码 STOP       │
+                     └────────────────┬───────────────┘
+                                      ▼
+                     ┌────────────────────────────────┐
+                     │ ③ Orchestrator 执行 Recovery   │
+                     │   RETRY → RetryPolicy 算 delay │
+                     │   REPAIR → Day2 RepairLoop     │
+                     │   REPLAN → Day1 planner        │
+                     │   REREAD → 重读+重生成         │
+                     │   PAUSE → TaskState.PAUSED     │
+                     │   STOP → _fail()               │
+                     └────────────────────────────────┘
+```
+
+RetryPolicy 内部：
+
+```text
+RetryPolicy.decide(failure, attempt, retry_after, elapsed)
+    ├── failure.retryable == False → should_retry=False（秒判）
+    ├── attempt >= max_attempts → should_retry=False（retry.exhausted）
+    ├── elapsed >= max_total_delay → should_retry=False（时间预算）
+    └── 否则 → delay = min(max_delay, base × 2^attempt)
+              有 Retry-After → max(retry_after, backoff)
+              加 jitter → RetryDecision(delay)
+
+注意：Policy 只算 delay，不 time.sleep——
+等待由 Orchestrator 或注入的 sleeper 完成（可测性）
+```
+
+## 8. 今日步骤拆分（7 步）
+
+| Step | 目标 | 涉及文件 | 完成标志 |
+|---|---|---|---|
+| 1 | 4 个枚举（Category/Code/Stage/Action） | `failures/models.py`（部分） | 枚举可导入，覆盖 day3 规格 |
+| 2 | AgentFailure 模型（cause preservation） | `failures/models.py` | 能构造完整实例 |
+| 3 | Deterministic ErrorClassifier | `failures/classifier.py` | 8 Required 映射全对 |
+| 4 | RecoveryPolicy（只决策） | `failures/recovery.py` | SECURITY 硬编码 STOP |
+| 5 | RetryPolicy（只算 delay） | `failures/retry.py` | decide() 可测，不真 sleep |
+| 6 | 接 Orchestrator + events | `agent/orchestrator.py` + `events.py` | 8 集成测试全绿 |
+| 7 | 50 Case Fault Injection | `tests/failures/` | 50 条全绿，FailureCase 可被周度脚本 import |
+
+依赖：1→2→3→4→5 线性；6 依赖 3/4/5；7 依赖 3/4。
+
+## 9. Test Strategy
+
+Required 8 条：rate limit→retry / model timeout→retry / patch mismatch→reread / test fail→repair / policy deny→stop / approval deny→stop / sandbox unavailable→stop / Ctrl+C→PAUSED。每条说明对应哪条验收、为什么能证明。
+
+Recommended 10 条：重点 cause preservation（T17）、secret-safe message（T18）、Retry-After（T16）、retry exhausted（T15）。
+
+50 Case 分布：MODEL10/CONTEXT6/PATCH7/TOOL6/SECURITY6/TEST5/GIT4/SESSION4/INTERRUPT2。全部 Fake，不真实打爆外部系统，不真实 sleep。
+
+## 10. Design Decision Plan
+
+DD-W4-D3-01（Evidence = PROPOSED）必须回答 9 个问题：新包命名（推荐 `codeteam/failures/`，旧 errors.py 保留传输层）、Retry Ownership、职责分离、Classification=deterministic / Diagnosis=model-assisted、方案 B（recommended_recovery 存 Failure 但执行在 Orchestrator）、stage 敏感性、cause preservation、Unknown 默认 fail closed、第一版不做清单。
+
+## 11. Benchmark Plan（周度预留，今天不执行）
+
+今天只做数据出口：FailureCase 可被周度脚本 import；AgentFailure/RetryDecision 字段包含周度指标所需信息。周度实验规格写进 DD：Category/Code Accuracy（含 Confusion Matrix）、Recovery Action Accuracy、Unnecessary/Unsafe Retry Count。禁止写评测脚本、宣称 SUPPORTED、虚构数字。
+
+## 12. Ablation Plan（周度预留）
+
+Typed Recovery vs Generic Retry。Hypothesis：Typed Recovery 在 patch/test/security/permanent 类失败上显著优于 Generic Retry（Generic Retry 不改变导致失败的 State）。Corpus：10 transient/10 patch/10 verification/10 security/10 permanent。SUPPORTED 结论必须等数据。
+
+## 13. Failure Cases to Watch
+
+12 个模式：误分类（SECURITY 类最高测试优先级）、Permanent 无限 Retry（双预算）、原始 Exception 丢失（wrap not erase）、安全错误被自动 Retry（硬编码 STOP）、Timeout 统一 Retry（stage 敏感）、无 Backoff/Jitter、Retry Storm（Ownership）、Retry 副作用（幂等性）、Recovery 自己失败/无限套娃（Recovery Budget）。
+
+## 14. Interview Focus
+
+30 个问题按 6 组。最易答错的：同 Timeout 不同 stage 不同 code、Retryable vs Transient、Retry Storm 叠加、Policy Deny 不可 Retry 的安全理由、Fault Injection 的确定性价值、"不就是写一堆异常类型吗"的标准答案模板（day3 §一百三十二）。
+
+## 15. 今日最终完成标准
+
+```text
+[ ] 7 个 Runtime Invariant 全部成立并有对应测试（I1~I7）
+[ ] 8 条 Required 测试全绿，每条说明对应验收
+[ ] 10 条 Recommended 尽量覆盖
+[ ] 50 Case Fault Injection 数据驱动测试全绿
+[ ] 全量 pytest ≥ W4D2 基线，Week1 传输层测试不破坏
+[ ] ruff 0 error
+[ ] DD-W4-D3-01 落盘（Evidence = PROPOSED）
+[ ] 事件序列完整：Rate Limit 恢复可重放 day3 §一百一十九 时间线
+[ ] 总闸门升级后：意外异常仍 FAILED（D1 不回归），已知 Domain Failure 走恢复
+[ ] 明确不做清单写进报告
+```

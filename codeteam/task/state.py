@@ -38,14 +38,17 @@ class TaskStatus(str, Enum):
 TASK_TRANSITIONS: dict[TaskStatus, tuple[TaskStatus, ...]] = {
     TaskStatus.CREATED: (
         TaskStatus.INSPECTING,
+        TaskStatus.PAUSED,  # W4D3 I6：用户中断可发生在任意阶段 → PAUSED
         TaskStatus.FAILED,
     ),
     TaskStatus.INSPECTING: (
         TaskStatus.PLANNING,
+        TaskStatus.PAUSED,  # W4D3 I6
         TaskStatus.FAILED,
     ),
     TaskStatus.PLANNING: (
         TaskStatus.READY,
+        TaskStatus.PAUSED,  # W4D3 I6：Ctrl+C 于规划期 → PAUSED 而非 FAILED
         TaskStatus.FAILED,
     ),
     TaskStatus.READY: (
