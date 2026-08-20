@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import importlib
+import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -9,6 +12,7 @@ from typing import Any, cast
 import pytest
 
 from codeteam.events import AgentEventType
+from codeteam.planning.models import Plan, PlanStep, PlanStepStatus
 from codeteam.session.errors import (
     RepositoryMismatchError,
     SessionNotFoundError,
@@ -22,8 +26,10 @@ from codeteam.session.models import (
     Session,
     SessionEvent,
     SessionStatus,
+    SessionUsage,
 )
 from codeteam.session.store import JsonSessionStore
+from codeteam.task.state import TaskStatus
 
 from .conftest import (
     commit_file,
@@ -33,6 +39,8 @@ from .conftest import (
     make_session,
     make_worktree_ref,
 )
+
+SUBPROCESS_TIMEOUT_SECONDS = 10.0
 
 
 def _service_module() -> Any:
@@ -445,6 +453,109 @@ def test_resume_resumable_reconstructs_runtime_saves_running_and_holds_lock(
     assert lock_path.exists()
     events, _ = store.load_events(session.manifest.session_id)
     assert events[-1].type is AgentEventType.SESSION_RESUMED
+
+
+def test_resume_in_new_process_preserves_durable_runtime_state(
+    tmp_path: Path,
+    git_repo,
+) -> None:
+    store_root = tmp_path / "sessions"
+    store = JsonSessionStore(store_root)
+    plan = Plan(
+        plan_id="plan-1",
+        task_id="task-1",
+        steps=(
+            PlanStep(
+                step_id="P1",
+                title="Inspect",
+                description="Inspect repository",
+                status=PlanStepStatus.COMPLETED,
+            ),
+            PlanStep(
+                step_id="P2",
+                title="Verify",
+                description="Run verification",
+                status=PlanStepStatus.RUNNING,
+            ),
+        ),
+    )
+    session = store.create(
+        make_session(
+            git_repo,
+            status=SessionStatus.PAUSED,
+            task_status=TaskStatus.VERIFYING,
+            plan=plan,
+            usage=SessionUsage(
+                input_tokens=101,
+                output_tokens=202,
+                cost_usd=0.42,
+                tool_calls=7,
+                repair_attempts=2,
+                retry_count=3,
+            ),
+            worktree=make_worktree_ref(git_repo),
+            checkpoint_ids=("cp-1", "cp-2"),
+            current_checkpoint_id="cp-2",
+        )
+    )
+    script = (
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "from codeteam.session.service import SessionService\n"
+        "from codeteam.session.store import JsonSessionStore\n"
+        "store = JsonSessionStore(Path(sys.argv[1]))\n"
+        "service = SessionService(\n"
+        "    store,\n"
+        "    runtime_factory=lambda session: {\n"
+        "        'rebuilt_for': session.manifest.session_id,\n"
+        "        'provider': session.provider_id,\n"
+        "        'model': session.model_id,\n"
+        "    },\n"
+        ")\n"
+        "outcome = service.resume(sys.argv[2], current_repo=Path(sys.argv[3]))\n"
+        "session = outcome.session\n"
+        "print(json.dumps({\n"
+        "    'session_status': session.status.value,\n"
+        "    'task_id': session.task.task_id,\n"
+        "    'task_status': session.task_status.value,\n"
+        "    'plan_steps': [step.status.value for step in session.plan.steps],\n"
+        "    'worktree_path': session.worktree.path,\n"
+        "    'usage': session.usage.model_dump(),\n"
+        "    'checkpoint_ids': list(session.checkpoint_ids),\n"
+        "    'current_checkpoint_id': session.current_checkpoint_id,\n"
+        "    'runtime': outcome.runtime,\n"
+        "}))\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(store_root), session.manifest.session_id, str(git_repo)],
+        capture_output=True,
+        text=True,
+        shell=False,
+        timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["session_status"] == SessionStatus.RUNNING.value
+    assert payload["task_id"] == "task-1"
+    assert payload["task_status"] == TaskStatus.VERIFYING.value
+    assert payload["plan_steps"] == [
+        PlanStepStatus.COMPLETED.value,
+        PlanStepStatus.RUNNING.value,
+    ]
+    assert payload["worktree_path"] == str(git_repo)
+    assert payload["usage"]["tool_calls"] == 7
+    assert payload["usage"]["repair_attempts"] == 2
+    assert payload["usage"]["retry_count"] == 3
+    assert payload["checkpoint_ids"] == ["cp-1", "cp-2"]
+    assert payload["current_checkpoint_id"] == "cp-2"
+    assert payload["runtime"] == {
+        "rebuilt_for": session.manifest.session_id,
+        "provider": "provider-a",
+        "model": "model-a",
+    }
 
 
 def test_successful_resume_lock_is_released_by_pause(

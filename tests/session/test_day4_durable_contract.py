@@ -78,6 +78,19 @@ def test_last_failure_source_message_is_redacted_when_persisted(git_repo) -> Non
     assert loaded.last_failure.source_message == "<redacted>"
 
 
+def test_last_failure_metadata_secret_is_redacted_when_persisted(git_repo) -> None:
+    session = make_session(
+        git_repo,
+        last_failure=make_failure().model_copy(
+            update={"metadata": {"api_key": "sk-test-metadata-secret"}}
+        ),
+    )
+
+    raw_json = session.model_dump_json()
+
+    assert "sk-test-metadata-secret" not in raw_json
+
+
 def test_ephemeral_objects_are_rejected_from_durable_snapshot(git_repo) -> None:
     runtime_object = cast(Any, object())
 

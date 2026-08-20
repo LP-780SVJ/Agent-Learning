@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -237,7 +238,7 @@ def _target_request(task_id: str, cwd: Path) -> VerificationRequest:
 
 def _make_orchestrator(tmp_path: Path) -> SingleAgentOrchestrator:
     return SingleAgentOrchestrator(
-        inspector=_FakeInspector(_ctx()),
+        inspector=cast(Any, _FakeInspector(_ctx())),
         planner=_StaticPlanner(_plan()),
         repository_root=tmp_path,
         verification_service=VerificationService(),

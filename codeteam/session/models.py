@@ -31,6 +31,48 @@ SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 
 CURRENT_SCHEMA_VERSION = 1
 
+_SENSITIVE_METADATA_KEY_MARKERS = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "authorization",
+        "bearer",
+        "credential",
+        "credentials",
+        "password",
+        "passwd",
+        "private_key",
+        "secret",
+        "token",
+    }
+)
+
+
+def _is_sensitive_metadata_key(key: object) -> bool:
+    if not isinstance(key, str):
+        return False
+    normalized = key.lower().replace("-", "_").replace(" ", "_")
+    return any(
+        marker in normalized for marker in _SENSITIVE_METADATA_KEY_MARKERS
+    ) or normalized in {"auth", "key"} or normalized.endswith("_key")
+
+
+def _redact_metadata(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "<redacted>"
+            if _is_sensitive_metadata_key(key)
+            else _redact_metadata(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_metadata(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_metadata(item) for item in value)
+    if isinstance(value, set):
+        return {_redact_metadata(item) for item in value}
+    return value
+
 
 class SessionStatus(str, Enum):
     """Session 的 Runtime 生命周期状态。
@@ -205,13 +247,13 @@ class Session(BaseModel):
         source_message 是内部诊断信息、可能含敏感内容，
         在序列化边界打码。副作用：model_dump() 输出中该字段
         变为 dict；load 回来 source_message 恒为 "<redacted>"。
-        metadata 字段的脱敏是已知限制（记入 Failure Case）。
         """
         if value is None:
             return None
         data = value.model_dump()
         if data.get("source_message") is not None:
             data["source_message"] = "<redacted>"
+        data["metadata"] = _redact_metadata(data.get("metadata", {}))
         return data
 
 
