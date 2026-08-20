@@ -96,6 +96,15 @@ class JsonSessionStore:
     def _events_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / _EVENTS_NAME
 
+    def session_dir(self, session_id: str) -> Path:
+        """Return the protected directory for one session.
+
+        Service-level writer locks live beside ``session.json`` and
+        ``events.jsonl``. Exposing this path keeps locking in the lifecycle
+        layer while preserving Store's path traversal guard.
+        """
+        return self._session_dir(session_id)
+
     # ── 快照：create / save / load ─────────────────────
 
     def create(self, session: Session) -> Session:
@@ -232,11 +241,6 @@ class JsonSessionStore:
             except ValidationError:
                 dropped += 1
         return events, dropped
-
-    def _last_valid_seq(self, session_id: str) -> int:
-        """扫描事件文件取最大合法 seq（MVP O(n)，周度 Benchmark 后再优化）。"""
-        events, _ = self.load_events(session_id)
-        return events[-1].seq if events else 0
 
     # ── context.json（派生状态，Day 5 升级为完整 Compaction）──
 

@@ -54,3 +54,14 @@ class CheckpointMissingError(SessionError):
 
 class ProviderUnavailableError(SessionError):
     """Session 记录的 provider/model 当前不可用（不许静默换模型）。"""
+
+class SessionRecoveryRequiredError(SessionError):
+    """对账结论为 RECOVERY_REQUIRED：不能直接续跑。
+
+    不是「坏了」：Session 已被标记 RECOVERY_REQUIRED 落盘，
+    issues 携带具体漂移项，等待恢复流程（Day 5）或人工介入。
+    """
+
+    def __init__(self, issues: tuple[str, ...] | list[str]) -> None:
+        super().__init__("; ".join(issues))
+        self.issues = tuple(issues)
