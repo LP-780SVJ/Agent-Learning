@@ -49,7 +49,7 @@ class AgentEventType(str, Enum):
     REPAIR_EXHAUSTED = "repair.exhausted"
     REPAIR_FAILED = "repair.failed"
 
-     # ── Day 3：错误分类与恢复事件（dotted 命名族）──
+    # ── Day 3：错误分类与恢复事件（dotted 命名族）──
     # 注意：RETRY_SCHEDULED（"retry_scheduled"，Week1 定义、无调用方）
     # 在 Day 3 复用于 Domain 重试调度——语义一致，值保持兼容。
     ERROR_DETECTED = "error.detected"          # 捕获到底层失败
@@ -61,6 +61,13 @@ class AgentEventType(str, Enum):
     RECOVERY_COMPLETED = "recovery.completed"  # 恢复执行成功
     RECOVERY_FAILED = "recovery.failed"        # 恢复执行自身失败
     TASK_PAUSED = "task.paused"                # 任务暂停（USER_INTERRUPT）
+
+    # ── Day 4：Session 持久化事件（dotted 命名族）──
+    SESSION_CREATED = "session.created"
+    SESSION_PAUSED = "session.paused"
+    SESSION_RESUMED = "session.resumed"
+    SESSION_RESUME_REJECTED = "session.resume_rejected"
+    SESSION_RECOVERY_REQUIRED = "session.recovery_required"
 
 
 @dataclass(frozen=True)

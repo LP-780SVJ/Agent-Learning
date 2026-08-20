@@ -88,7 +88,6 @@ class StepExecutionResult(BaseModel):
     loop_result: RepairLoopRunResult | None = None
     events: list[AgentEvent] = Field(default_factory=list)
 
-
 class SingleAgentOrchestrator:
     """单 Agent 任务编排器。
 
@@ -123,6 +122,11 @@ class SingleAgentOrchestrator:
         recovery_policy: RecoveryPolicy | None = None,
         retry_policy: RetryPolicy | None = None,
         sleeper: Callable[[float], None] | None = None,
+        # ── W4D4 Step 4：暂停持久化回调 ──
+        # orchestrator 不依赖 SessionService 类型（依赖倒置）；
+        # 调用方绑定，如：
+        #   lambda reason: service.pause(session, reason=reason)
+        pause_persister: Callable[[str], None] | None = None,
     ) -> None:
         """全部依赖注入——测试可替换，生产可换真实实现。
 
@@ -139,6 +143,7 @@ class SingleAgentOrchestrator:
         self._recovery_policy = recovery_policy or RecoveryPolicy()
         self._retry_policy = retry_policy or RetryPolicy()
         self._sleeper = sleeper or time.sleep
+        self._pause_persister = pause_persister
     # ── 主入口 ────────────────────────────────────────────
 
     def run(
@@ -482,14 +487,80 @@ class SingleAgentOrchestrator:
             f"任务暂停: {reason}",
             data={"task_id": state.task_id, "reason": reason},
         ))
+        # W4D4 Step 4：PAUSED 已在内存成立 → 交给持久化回调。
+        # 持久化失败不抛出（保持 run() 绝不抛异常的 D1 契约），
+        # 但必须在结果中可见：error 附加 persist 失败信息，
+        # 调用方（Step 7 脚本）检查 error 决定是否安全退出。
+        persist_error: str | None = None
+        if self._pause_persister is not None:
+            try:
+                self._pause_persister(reason)
+            except Exception as exc:  # noqa: BLE001 — 见上，不允许崩进程
+                persist_error = f"pause_persist_failed: {type(exc).__name__}: {exc}"
+
         return OrchestrationResult(
             task_id=state.task_id,
             status=TaskStatus.PAUSED,
             events=events,
-            error=reason,
+            error=reason if persist_error is None
+                  else f"{reason}; {persist_error}",
             task_state=state,
         )
     
+    def _pause_step(
+        self,
+        *,
+        task: TaskSpec,
+        plan_step: PlanStep,
+        task_state: TaskState,
+        events: list[AgentEvent],
+        reason: str,
+    ) -> StepExecutionResult:
+        """W4D4 K1：执行期中断 → task PAUSED、step 保持 RUNNING。
+
+        与 _pause（run() 闸门）对称，但是 StepExecutionResult 层的暂停出口：
+        - 中断不是 step 失败，step 状态原样保留（通常是 RUNNING）
+        - 二次防御：transition 抛 InvalidTransitionError 时不再重复发事件
+        - Step 4 将在此接 SessionService.pause() 持久化
+        """
+        try:
+            task_state.transition_to(TaskStatus.PAUSED, reason=reason)
+        except InvalidTransitionError:
+            pass
+        else:
+            events.append(self._status_event(task_state, reason))
+
+        events.append(make_event(
+            AgentEventType.TASK_PAUSED,
+            f"任务暂停: {reason}",
+            data={"task_id": task.task_id, "reason": reason,
+                  "plan_step_id": plan_step.step_id},
+        ))
+        # W4D4 Step 4：PAUSED 已在内存成立 → 交给持久化回调。
+        # 持久化失败不抛出；StepExecutionResult 没有 error 字段，
+        # 失败信息进 TASK_PAUSED 事件 data（上方事件已 append，
+        # 故此处只补一条持久化失败事件，便于审计）。
+        if self._pause_persister is not None:
+            try:
+                self._pause_persister(reason)
+            except Exception as exc:  # noqa: BLE001 — 不允许崩进程
+                events.append(make_event(
+                    AgentEventType.TASK_PAUSED,
+                    f"暂停持久化失败: {exc}",
+                    data={"task_id": task.task_id,
+                          "reason": reason,
+                          "persist_error": f"{type(exc).__name__}: {exc}",
+                          "plan_step_id": plan_step.step_id},
+                ))
+
+        return StepExecutionResult(
+            task_id=task.task_id,
+            plan_step_id=plan_step.step_id,
+            task_status=TaskStatus.PAUSED,
+            step_status=plan_step.status,
+            events=events,
+        )
+
     def execute_plan_step(
             self,
             *,
@@ -553,18 +624,36 @@ class SingleAgentOrchestrator:
                 data={"task_id": task.task_id, "plan_step_id": plan_step.step_id},
             ))
 
-            loop_result = loop.run(
-                task=task,
-                plan_step_title=plan_step.title,
-                initial_patch=initial_patch,
-                target_request=target_request,
-                workspace_root=workspace_root,
-                repair_agent=repair_agent,
-                max_repair_attempts=max_repair_attempts,
-                related_regression_request=related_regression_request,
-            )
+            loop_result = None
+            interrupted = False
+            try:
+                loop_result = loop.run(
+                    task=task,
+                    plan_step_title=plan_step.title,
+                    initial_patch=initial_patch,
+                    target_request=target_request,
+                    workspace_root=workspace_root,
+                    repair_agent=repair_agent,
+                    max_repair_attempts=max_repair_attempts,
+                    related_regression_request=related_regression_request,
+                )
+            except KeyboardInterrupt:
+                # W4D4 K1：执行期 Ctrl+C 是 Runtime Control Flow，不是 step 失败。
+                # RepairLoop 的 except Exception 不会捕获 KeyboardInterrupt
+                # （它继承 BaseException），此处原生穿透——必须就地转 PAUSED。
+                # Step 4 将在此接 SessionService：先停操作、再持久化 PAUSED。
+                interrupted = True
 
             # ④ 从结果回放 attempt 事件
+            if interrupted:
+                return self._pause_step(
+                    task=task,
+                    plan_step=plan_step,
+                    task_state=task_state,
+                    events=events,
+                    reason="user_interrupt",
+                )
+
             for attempt in loop_result.attempts:
                 if attempt.patch_hash:
                     events.append(make_event(

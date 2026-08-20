@@ -64,11 +64,13 @@ TASK_TRANSITIONS: dict[TaskStatus, tuple[TaskStatus, ...]] = {
     TaskStatus.VERIFYING: (
         TaskStatus.COMPLETED,
         TaskStatus.IMPLEMENTING,  # 验证失败 → 回去修复
+        TaskStatus.PAUSED,  # W4D4 K1：验证期 Ctrl+C → PAUSED（Session 持久化前提）
         TaskStatus.FAILED,
     ),
     TaskStatus.PAUSED: (
         TaskStatus.READY,
         TaskStatus.IMPLEMENTING,
+        TaskStatus.PLANNING,  # W4D4 K3：规划期暂停的任务可恢复到规划中
     ),
     TaskStatus.COMPLETED: (),
     TaskStatus.FAILED: (),

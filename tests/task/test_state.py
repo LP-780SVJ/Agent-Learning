@@ -68,8 +68,8 @@ class TestLegalTransitions:
         """验收(状态机正确性): 除 PAUSED 外，每个非 Terminal 状态
         都有 FAILED 出口；Terminal 状态无任何出口。
 
-        PAUSED 按转移表设计只有 READY/IMPLEMENTING 两个出口
-        （day1.md 第四十五节），单独断言。
+        PAUSED 出口 = 恢复面（READY/IMPLEMENTING/PLANNING），
+        单独断言。PLANNING 为 W4D4 K3 补齐：规划期暂停可恢复。
         """
         for status in TaskStatus:
             outlets = TASK_TRANSITIONS[status]
@@ -79,6 +79,7 @@ class TestLegalTransitions:
                 assert outlets == (
                     TaskStatus.READY,
                     TaskStatus.IMPLEMENTING,
+                    TaskStatus.PLANNING,  # W4D4 K3
                 )
             else:
                 assert TaskStatus.FAILED in outlets
@@ -97,7 +98,9 @@ class TestIllegalTransitions:
             (TaskStatus.CREATED, TaskStatus.COMPLETED),
             (TaskStatus.CREATED, TaskStatus.PLANNING),
             (TaskStatus.PLANNING, TaskStatus.IMPLEMENTING),  # 跳过 READY
-            (TaskStatus.PAUSED, TaskStatus.PLANNING),
+            # W4D4 K3 后 PAUSED→PLANNING 合法；改断言真正非法的
+            # 恢复跳级：PAUSED→VERIFYING（跳过 IMPLEMENTING）
+            (TaskStatus.PAUSED, TaskStatus.VERIFYING),
         ],
     )
     def test_illegal_jump_rejected(

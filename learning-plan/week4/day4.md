@@ -4734,3 +4734,249 @@ Day 4 则第一次保证：
 > **即使运行 Agent 的那个 Python Process 消失，上面这些 Task、Plan、Recovery、Worktree 和 Budget 仍然不会一起消失。**
 
 这就是从一个“可以跑几十分钟的 Agent Script”向真正 **Agent Runtime** 跨出的关键一步。
+
+---
+
+# 附录：W4D4 当日工程地图（Coder Agent 产出，2026-08-20）
+
+> 基线：week4 @ 2823c79，全量 987 passed / 6 skipped（6 skip 均为 Docker 能力跳过）。
+> 本地图基于对仓库的只读检查（task/models、planning/models、failures/models、git/checkpoint、git/worktree、git/models、agent/orchestrator、events、usage/tracker、tests/git/conftest），所有接口以实测代码为准。
+
+## 1. 今天在整个 Coding Agent 中做什么
+
+前三天给 Agent 装了“大脑”：D1 知道做什么（TaskSpec→Plan）、D2 知道做得对不对（Verify→Repair）、D3 知道出错后怎么办（Classify→Recover）。但这些全部活在**进程内存**里——Python 进程一死，Task、Plan、Usage、Checkpoint 链全部蒸发。
+
+今天解决：**进程死了，工作不丢**。
+
+```text
+                  ┌─ Persistent Session（今天新建）─┐
+                  │  task / plan / status / usage   │
+                  │  worktree ref / checkpoint refs │
+                  │  active_operation               │
+                  └───────────┬─────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+        Process A 运行中                 Process A 死亡
+        （Ctrl+C / SIGKILL）                │
+              │                            ▼
+              ▼                       Process B 启动
+        session.json (PAUSED)              │
+                                              ▼
+                                   codeteam resume <id>
+                                              │
+                     ┌────────────────────────┤
+                     ▼                        ▼
+              State Reconciliation     Runtime Reconstruction
+             （记忆 vs 现实一致吗？）    （重建 ModelClient 等）
+                     └───────────┬────────────┘
+                                 ▼
+                           继续执行任务
+```
+
+**核心公式**：`Resume = Durable State + State Reconciliation + Runtime Reconstruction`，绝不等于 `pickle.load(agent)`。
+
+**没有它会怎样**：长任务（30+ 分钟、几十次 Tool Call、几万 token）中途崩溃 = 全部重来；Usage 归零 = 预算被绕过；Repair counter 归零 = Stopping Condition 失效。
+
+## 2. Capability Mapping
+
+```text
+Primary:   Agent Runtime — Session Lifecycle / Crash Recovery /
+           State Reconciliation
+Secondary: Workspace & Sandbox（worktree/checkpoint 引用校验、drift 检测）
+           Observability（events.jsonl 审计历史、session.* 事件）
+           Safety（single-writer lock、sanitize、fail-closed resume）
+           Evaluation（Benchmark/Ablation 数据出口）
+```
+
+**面试价值**：这是区分“会调 LLM 的人”和“会做 Agent Runtime 的人”的模块。面试官问“你的 Agent 崩溃后怎么办”，能答出 Crash Consistency / Atomic Write / Stale RUNNING / Operation Boundary / Reconciliation 的候选人极少。
+
+## 3. Theory（今天必须吃透的概念）
+
+| 概念 | 一句话定义 | 反例（不用会怎样） |
+|---|---|---|
+| Durable State | 进程死后仍存在、新进程仅凭它就能理解“做到哪了” | 只存内存 → 崩溃全丢 |
+| Ephemeral State | 只在本进程有意义的对象（ModelClient/Popen/Lock） | pickle 它们 → 反序列化出废对象 |
+| Snapshot | 某时刻完整可加载状态（session.json） | 只有 Event → 每次 replay 全历史 |
+| Event Log | append-only 事实历史（events.jsonl） | 只有 Snapshot → 不知道“为什么走到现在” |
+| Atomic Write | temp + write + flush + fsync + os.replace | 直接 `open(w)` → 崩溃留半个 JSON |
+| State Reconciliation | 持久化“期望状态” vs 外部“实际状态”对账 | 不对账 → worktree 已删还假装继续 |
+| Stale RUNNING | 磁盘=RUNNING 但无活跃 Runtime → 必须 RECOVERY_REQUIRED | 当作“另一进程在跑”或直接续跑 → 状态损坏 |
+| ActiveOperation | in-flight 操作的 prepared/started/completed 边界 | Patch 半途 Crash → 盲目重放同一 patch |
+| Single-writer lock | 一个 Session 同时只允许一个 writer | 双进程同时 resume → worktree 互相踩 |
+| schema_version | Durable State 的格式代数 | 无版本 → 改模型后旧 Session 被 Pydantic 硬猜 |
+
+关键区分（正文反复强调）：
+
+- `load()` ≠ `resume()`：load 只说“磁盘里是什么”，resume 才回答“能不能继续”
+- Main HEAD drift ≠ 阻塞：main 前进不影响 task worktree；**task worktree drift 才是 RECOVERY_REQUIRED**
+- Checkpoint（workspace 文件状态）≠ Session（Runtime 状态）：Session 只存 checkpoint **引用**
+
+## 4. Industrial Design
+
+| 系统 | 方案 | 对 CodeTeam 的启发 |
+|---|---|---|
+| OpenAI Codex | `thread/start` / `thread/resume` / `thread/fork` 分离；resume 恢复 metadata；required MCP 初始化失败则 resume 直接失败 | load ≠ resume 的职责分离；恢复失败要 fail loudly 不降级 |
+| Claude Code | 持续写本地 transcript；`--resume` 恢复；运行中 Session 小文件用于检测并发/Crash；SessionStore 可镜像到 S3/Redis | “运行中标记”检测 stale RUNNING；Checkpoint 与 Session 关联 |
+| GitHub Copilot CLI | 完整 Session 落文件 + SQLite 派生索引；Store 损坏可从 Session Files reindex | Durable record 是 Source of Truth，索引只是派生物 |
+
+方案权衡（今天要做出的选择）：
+
+| 决策点 | 选项 A | 选项 B | 推荐 |
+|---|---|---|---|
+| 持久化格式 | pickle Runtime 对象 | Durable Domain State (JSON) + 重建 | **B**（可观察、可迁移、安全） |
+| 恢复来源 | Event Replay | Snapshot = SoT，Event = 审计 | **Snapshot**（MVP 不做 Event Sourcing） |
+| Cross-repo | 显式拒绝（方案 A） | 自动切回原 repo（方案 B） | **A**（显式、不偷偷操作别的目录） |
+| 多文件一致性 | 三文件事务 | session.json = SoT，其余派生 | **SoT**（最坏丢一条 event，状态仍正确） |
+
+## 5. 当前仓库检查（2026-08-20 实测）
+
+**已存在、可直接复用**：
+
+| 模块 | 实际接口 | 对今天的意义 |
+|---|---|---|
+| `codeteam/task/models.py` | `TaskSpec(BaseModel)`，含 validator | Pydantic → 可直接嵌进 Session |
+| `codeteam/planning/models.py` | `Plan/PlanStep(BaseModel)`，steps 是 tuple | 可直接持久化；PlanStep 有 status 字段 |
+| `codeteam/failures/models.py` | `AgentFailure(BaseModel)`，**已有 `session_id` 字段（D4 预留）**，`cause` 已 `exclude=True` | `last_failure` 直接复用，序列化安全 |
+| `codeteam/git/models.py` | `WorktreeInfo(BaseModel)`: task_id/branch_name/path/base_sha/head_sha | `WorktreeRef` 的字段来源 |
+| `codeteam/git/checkpoint.py` | `CheckpointManager.list_checkpoints()` 可校验链；state_root 强制在 workspace 外（`_validate_runtime_state_outside_workspace`） | checkpoint chain 校验入口；sessions 目录同样注意别放进 task worktree |
+| `codeteam/git/worktree.py` | `WorktreeManager`，默认 `.codeteam/worktrees` | resume 时 worktree 存在性/归属校验 |
+| `codeteam/events.py` | `AgentEventType` 枚举（dotted 风格），**尚无 session.*** | 只新增枚举成员，不动 `retry_scheduled`（O1） |
+| `codeteam/agent/orchestrator.py` | `run()` 有 KeyboardInterrupt→`_pause` 闸门；`_pause` **只改内存状态，不落盘** | 今天接线点：pause 后必须经 SessionService 持久化 |
+| `tests/git/conftest.py` | `run_git()`（argv/shell=False/timeout）+ `git_repo_factory` | tests/session 复用此模式 |
+
+**缺口（今天要新建/修改）**：
+
+- `codeteam/session/` 不存在 → 四文件全新建
+- **K1**：`codeteam/task/state.py` VERIFYING（约 64-68 行）无 PAUSED 出口；`orchestrator.execute_plan_step` 无 KeyboardInterrupt 分支
+- **K3**：`codeteam/task/state.py` PAUSED 恢复面（约 69-72 行）缺 PLANNING
+- `codeteam/events.py` 无 `session.*` 事件族
+- `.gitignore` 只有 `.codeteam/backups/`，无 `.codeteam/sessions/` → 需加一行
+
+**一个需要注意的坑**：`UsageTracker`/`UsageRecord`/`TokenCost` 是 **dataclass 不是 Pydantic**，且 tracker 本身是 ephemeral 聚合器 → Session 需要**自己的 durable 聚合模型**（如 `SessionUsage`：累计 input/output tokens、cost、tool_calls、repair_attempts），resume 时据此重建预算判断，而不是序列化 UsageTracker。
+
+## 6. 涉及文件
+
+**新增（生产）**：
+
+```text
+codeteam/session/
+├── __init__.py     公共导出
+├── errors.py       SessionError 层级（NOT_FOUND/CORRUPTED/SCHEMA_UNSUPPORTED/
+│                   ALREADY_ACTIVE/WORKTREE_MISSING/REPO_MISMATCH/...）
+├── models.py       SessionStatus / SessionManifest / RepositoryRef /
+│                   WorktreeRef / ActiveOperation(OperationStatus) /
+│                   SessionUsage / SessionEvent / ContextMetadata / Session
+├── store.py        JsonSessionStore：create/save/load/append_event/load_events
+│                   atomic_write（temp+flush+fsync+replace）在此文件
+└── service.py      SessionService：create_session/pause/resume
+                    + SessionReconciler（对账）+ writer lock
+```
+
+**新增（测试/文档）**：`tests/session/`（含跨进程实验脚本驱动的测试）、`docs/design_decisions/DD-W4-D4-01.md`、`DD-W4-D4-02.md`
+
+**最小修改（逐条理由）**：
+
+| 文件 | 改动 | 理由 |
+|---|---|---|
+| `codeteam/task/state.py` | VERIFYING 加 PAUSED；PAUSED 恢复面加 PLANNING | K1/K3 验收项 |
+| `codeteam/events.py` | 新增 `session.created/paused/resumed/resume_rejected/recovery_required` 枚举 | 事件可观测性；不动旧命名 |
+| `codeteam/agent/orchestrator.py` | pause 路径接 SessionService 持久化；execute_plan_step 补 KeyboardInterrupt→PAUSED | 先停操作再持久化的顺序闸门（§二十八） |
+| `.gitignore` | 加 `.codeteam/sessions/` | 本地 runtime state 不入库 |
+
+## 7. Architecture / Data Flow
+
+```text
+CLI(Day6) ─→ SessionService ─┬─→ JsonSessionStore ──→ .codeteam/sessions/<id>/
+                             │     create/save/load      ├ session.json  ← Atomic Snapshot (SoT)
+                             │     append_event          ├ events.jsonl  ← seq 严格递增+state_version
+                             │                           └ context.json  ← 最小 metadata
+                             ├─→ Reconciler（对账）
+                             │     repo identity (git_common_dir, 不是 remote URL)
+                             │     base SHA 存在性 / task worktree identity+HEAD+dirty
+                             │     checkpoint chain (list_checkpoints)
+                             │     provider 配置可用性
+                             │     stale RUNNING / active_operation in-flight
+                             └─→ RuntimeFactory（重建 ephemeral：ModelClient 等，Day5 完善）
+
+pause() 顺序（不可颠倒）：
+  stop accepting ops → interrupt active op → capture refs → save PAUSED → append event → exit
+
+resume() 管线：
+  locate → load → schema_version 检查 → acquire lock → reconcile（逐项）
+  → 判定 RESUMABLE / RECOVERY_REQUIRED / INVALID(拒绝) → reconstruct → RUNNING → continue
+```
+
+Session 状态语义：磁盘 `RUNNING` + 无锁持有者 → `RECOVERY_REQUIRED`（绝不直接续跑）；`COMPLETED` → 拒绝 resume（同一 Task 语义）。
+
+## 8. 今日步骤拆分（严格按正文 §一百零七，叠加 K1/K3 与测试）
+
+| Step | 内容 | 前置 | 完成标志 |
+|---|---|---|---|
+| 0 | 状态机补齐：K1（VERIFYING→PAUSED、execute_plan_step KeyboardInterrupt）+ K3（PAUSED→PLANNING）+ `.gitignore` | 无 | 3 个转移测试 + orchestrator 中断测试绿 |
+| 1 | Durable Contract：`models.py` 全部模型（先定义哪些字段 Durable、哪些对象绝不进 Session） | Step 0 | 模型构造/校验测试 |
+| 2 | `JsonSessionStore` + atomic write（fault injection 打点：replace 前抛异常） | Step 1 | atomic write failure 测试：旧 v10 完整可读 |
+| 3 | Event Writer/Loader：seq 严格递增、含 state_version、容忍末尾 partial line | Step 2 | partial event line 测试 |
+| 4 | `pause()`：先停 Active Operation 再持久化 PAUSED；接 orchestrator 闸门 | Step 2 | pause 顺序测试 |
+| 5 | Reconciliation：repo identity / worktree / checkpoint / stale RUNNING 清单 | Step 1 | 各 drift 场景测试 |
+| 6 | `resume()`：load→reconcile→reconstruct→RUNNING；COMPLETED 拒绝；single-writer lock | Step 5 | resume 全场景测试 |
+| 7 | **跨进程强制验收实验**（subprocess 双进程 + SIGINT）+ Benchmark/Ablation 数据出口 + DD 文档 | Step 1-6 | 六项未丢证据落 test_log |
+
+每步按固定 12 节小步结构展开（目标/检查/语法解释/参考代码/验证/常见错误…）。
+
+## 9. Test Strategy
+
+**§七十二 10 类**（创建 / save-load 等价 / 新进程恢复 / PAUSED→RUNNING / NOT_FOUND / 损坏 / worktree missing / main HEAD changed 不误判 / task worktree drift / cross-repo 拒绝）+ **§七十三 8 项**（stale RUNNING、atomic write failure、partial event line、concurrent resume、checkpoint missing、provider missing、schema unsupported、completed 不可 resume）。
+
+测试能证明什么：
+
+- **正确性**：save/load 往返等价、状态机转移合法性
+- **Crash Consistency**：fault injection 证明 replace 前崩溃 → 旧 snapshot 完整
+- **Runtime 不变量**：stale RUNNING 不被当正常、安全错误 fail-closed
+- **端到端**：两个真实 OS 进程 + SIGINT，六项（Task/Plan/Worktree/Usage/Checkpoint/CurrentState）逐一断言
+
+工程约束：tmp_path 独立 git 仓库 + local identity（复用 `tests/git/conftest.py` 模式）、无真实 sleep、无 skip 掩盖、跨进程实验用 subprocess 驱动脚本。
+
+## 10. Design Decision Plan
+
+- **DD-W4-D4-01**：Durable Domain State vs Runtime Object Serialization（pickle）。备选 A/B 对比，Evidence: PROPOSED，验证指标 = Ablation 的 Rework Ratio
+- **DD-W4-D4-02**：Snapshot(Source of Truth) + Append-only Event Log vs Snapshot-only vs Event-only。验证指标 = Benchmark 的 load latency（证明 snapshot 不随 event 数增长）
+
+## 11. Benchmark Plan（今日只设计，周度执行）
+
+| 指标 | 回答的问题 | 数据出口（今天保证存在） |
+|---|---|---|
+| Snapshot save/load P50/P95 | 持久化开销 | save/load 前后 `time.monotonic()` 差值可测 |
+| events 100/500/1000 规模 | 磁盘增长速度 | `events.jsonl` 字节数 / event 数；**load 只读 session.json → load latency 应不随 event 数增长**（设计验证点） |
+| Resume-to-ready | 真正恢复多快 | load+reconcile+reconstruct 总耗时 |
+| Crash Recovery Latency | 异常中断恢复多快 | stale RUNNING→RECOVERY_REQUIRED 判定耗时 |
+
+记录环境（commit/Python 版本/迭代次数），保证可复现。
+
+## 12. Ablation Plan（今日只设计）
+
+**No Persistence vs Persistence**：相同 Task/Model/Repo/Kill-point，比较 Rework Ratio（重复 tool calls / 总数）、time to next productive action、repeated tokens/cost。Hypothesis：Persistence 使 Rework Ratio 从 ~80% 降到 ~10%。字段来源：events.jsonl 的 tool_called 事件 + SessionUsage。
+
+## 13. Failure Cases to Watch（今天重点防御）
+
+F1 原地写损坏半个 JSON → atomic write；F2 stale RUNNING 被当正常续跑；F3 Patch 半途 Crash 被盲目重放 → ActiveOperation 边界；F4 双进程并发 resume → single-writer；F5 worktree 被删后“重建空 worktree 假装继续”；F6 main HEAD 粗暴比较误拒（抵消 worktree 隔离价值）；F7 checkpoint 引用悬空被悄悄清空；F8 provider 消失被静默换模型；F9 events.jsonl 半行导致整个 log 打不开；F10 secret 落盘（sanitize before persist）；F11 Usage/repair counter 不 durable → 预算绕过。
+
+## 14. Interview Focus
+
+必答：Durable vs Ephemeral？为什么 load ≠ resume？resume 时磁盘=RUNNING 怎么办？Patch apply 中途 Crash 怎么办？为什么不能 pickle Agent？flush/fsync/replace 各解决什么？为什么三个 JSON 天然不是事务？Main HEAD 变了为什么不阻塞？Usage 为什么必须 durable？怎么证明 resume 真有效（跨进程+fault injection）？
+
+杀手问题预案：“Resume 不就是读回聊天历史？” → 用 §一一十二 的框架答（Durable Domain State + Reconciliation + Reconstruction，而非 conversation replay）。
+
+## 15. 今日最终完成标准
+
+```text
+[ ] session 包四文件，Store/Service 职责分离（load≠resume）
+[ ] atomic write fault injection 验证通过
+[ ] stale RUNNING → RECOVERY_REQUIRED regression 测试
+[ ] K1/K3 补齐（VERIFYING→PAUSED、PAUSED→PLANNING）
+[ ] 跨进程 Ctrl+C→Resume 实验真实执行，六项未丢证据落盘
+[ ] §七十二 10 类 + §七十三 8 项测试全绿
+[ ] 全量回归 ≥ 987 passed / 6 skipped；触达文件 ruff 0 error
+[ ] DD-W4-D4-01/02 已写（Evidence: PROPOSED，Benchmark/Ablation 仅设计）
+[ ] 按 13 节结构输出每日总结
+```

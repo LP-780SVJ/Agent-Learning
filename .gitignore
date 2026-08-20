@@ -18,6 +18,7 @@ dist/
 
 # Codeteam runtime artifacts
 .codeteam/backups/
+.codeteam/sessions/
 .claude/worktrees/
 
 # Aider artifacts
