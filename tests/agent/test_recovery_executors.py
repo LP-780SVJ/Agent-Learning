@@ -22,7 +22,13 @@ from codeteam.agent.orchestrator import (
     SingleAgentOrchestrator,
     _TerminalFailure,
 )
-from codeteam.context.compaction import CompactionReason, CompactionRequest
+from codeteam.context.compaction import (
+    CompactionReason,
+    CompactionRequest,
+    CompactionResult,
+    ContextSummary,
+    MessageRef,
+)
 from codeteam.events import AgentEvent, AgentEventType
 from codeteam.failures.models import FailureStage
 from codeteam.llm.error_mapper import (
@@ -79,10 +85,18 @@ class _OverflowOncePlanner:
 
 
 class _RecordingCompactor:
-    """记录 (request, messages) 并可编程失败。"""
+    """记录 (request, messages) 并可编程返回压缩计量。"""
 
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        tokens_after: int | None = None,
+        recent_window_over_budget: bool = False,
+    ) -> None:
         self.fail = fail
+        self.tokens_after = tokens_after
+        self.recent_window_over_budget = recent_window_over_budget
         self.calls: list[tuple[CompactionRequest, tuple[Message, ...]]] = []
 
     def compact(
@@ -90,11 +104,39 @@ class _RecordingCompactor:
         request: CompactionRequest,
         *,
         messages: tuple[Message, ...],
-    ) -> object:
+    ) -> CompactionResult:
         self.calls.append((request, messages))
         if self.fail:
             raise RuntimeError("compactor exploded")
-        return object()  # _try_compact 只关心是否抛异常
+        tokens_after = (
+            self.tokens_after
+            if self.tokens_after is not None
+            else request.target_context_tokens
+        )
+        return CompactionResult(
+            summary=ContextSummary(
+                summary_version=1,
+                compacted_message_indices=tuple(range(len(messages))),
+            ),
+            reason=request.reason,
+            compacted_refs=tuple(
+                MessageRef(
+                    index=index,
+                    role=message.role,
+                    token_count=len(message.content or ""),
+                )
+                for index, message in enumerate(messages)
+            ),
+            tokens_before=request.current_context_tokens,
+            tokens_after=tokens_after,
+            summary_tokens=max(tokens_after - 10, 0),
+            recent_window_tokens=(
+                request.recent_window_budget_tokens + 1
+                if self.recent_window_over_budget
+                else request.recent_window_budget_tokens
+            ),
+            recent_window_over_budget=self.recent_window_over_budget,
+        )
 
 
 def _compaction_materials() -> tuple[CompactionRequest, tuple[Message, ...]]:
@@ -238,6 +280,94 @@ class TestCompactRecoveryPublicPath:
 
         assert result.status == TaskStatus.FAILED
         assert AgentEventType.RECOVERY_FAILED in _types(result.events)
+
+    def test_compaction_still_over_budget_fails_terminal(self, tmp_path) -> None:
+        """压缩执行成功但 tokens_after 仍超过目标预算时不可重试。"""
+        planner = _OverflowOncePlanner()
+        compactor = _RecordingCompactor(tokens_after=501)
+        orchestrator = _orchestrator(
+            tmp_path,
+            planner,
+            compactor=compactor,
+            provider=_compaction_materials,
+        )
+
+        result = orchestrator.run(request="x", task_id="t-c6-over-budget")
+
+        assert result.status == TaskStatus.FAILED
+        assert planner.calls == 1
+        assert "compact_recovery_failed" in (result.error or "")
+        types = _types(result.events)
+        assert AgentEventType.RECOVERY_FAILED in types
+        assert AgentEventType.RECOVERY_COMPLETED not in types
+
+    def test_recent_window_over_budget_is_observable(self, tmp_path) -> None:
+        """单条 recent message 超预算时，恢复事件必须留下审计证据。"""
+        planner = _OverflowOncePlanner()
+        compactor = _RecordingCompactor(recent_window_over_budget=True)
+        orchestrator = _orchestrator(
+            tmp_path,
+            planner,
+            compactor=compactor,
+            provider=_compaction_materials,
+        )
+
+        result = orchestrator.run(request="x", task_id="t-c7-recent-over")
+
+        assert result.status == TaskStatus.READY
+        event = next(
+            e for e in result.events
+            if e.data.get("observation") == "recent_window_over_budget"
+        )
+        assert event.event_type is AgentEventType.RECOVERY_COMPLETED
+        assert event.data["action"] == "compact_context"
+        assert event.data["recent_window_budget_tokens"] == 100
+
+    def test_recent_window_over_budget_and_still_over_target_fails_without_completed_observation(
+        self,
+        tmp_path,
+    ) -> None:
+        """recent window 超预算且整体仍超目标预算时，最终失败路径
+        不能先发 misleading recovery.completed 观测事件。"""
+        planner = _OverflowOncePlanner()
+        compactor = _RecordingCompactor(
+            tokens_after=501,
+            recent_window_over_budget=True,
+        )
+        orchestrator = _orchestrator(
+            tmp_path,
+            planner,
+            compactor=compactor,
+            provider=_compaction_materials,
+        )
+
+        result = orchestrator.run(
+            request="x",
+            task_id="t-c8-recent-over-and-still-over",
+        )
+
+        assert result.status == TaskStatus.FAILED
+        assert planner.calls == 1
+        assert "compact_recovery_failed" in (result.error or "")
+        types = _types(result.events)
+        assert AgentEventType.RECOVERY_FAILED in types
+
+        misleading_observations = [
+            event
+            for event in result.events
+            if event.event_type is AgentEventType.RECOVERY_COMPLETED
+            and event.data.get("action") == "compact_context"
+            and event.data.get("observation") == "recent_window_over_budget"
+        ]
+        assert misleading_observations == []
+
+        successful_compact_events = [
+            event
+            for event in result.events
+            if event.event_type is AgentEventType.RECOVERY_COMPLETED
+            and event.data.get("action") == "compact_context"
+        ]
+        assert successful_compact_events == []
 
     def test_repeated_overflow_bounded_by_attempt_loop(self, tmp_path) -> None:
         """持续 overflow：每次 COMPACT 成功但操作仍溢出 → 反复

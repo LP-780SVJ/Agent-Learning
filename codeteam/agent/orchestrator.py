@@ -21,6 +21,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from codeteam.agent.inspection import RepositoryInspector
+from codeteam.context.compaction import CompactionRequest, ContextCompactor
 from codeteam.events import (
     AgentEvent,
     AgentEventType,
@@ -44,12 +45,11 @@ from codeteam.repair.models import (
     RepairOutcome,
     RepairRunOutcome,
 )
+from codeteam.schemas.messages import Message
 from codeteam.task.models import TaskSpec, create_task_spec
 from codeteam.task.state import InvalidTransitionError, TaskState, TaskStatus
 from codeteam.verification.models import VerificationRequest
 from codeteam.verification.service import VerificationService
-from codeteam.context.compaction import ContextCompactor, CompactionRequest
-from codeteam.schemas.messages import Message
 
 
 class OrchestrationResult(BaseModel):
@@ -547,7 +547,24 @@ class SingleAgentOrchestrator:
             result = self._compactor.compact(request, messages=messages)
         except Exception:  # noqa: BLE001 — compactor 异常按恢复失败处理
             return False
-        return True
+
+        fits_target = result.tokens_after <= request.target_context_tokens
+
+        if result.recent_window_over_budget and fits_target:
+            events.append(make_event(
+                AgentEventType.RECOVERY_COMPLETED,
+                "压缩完成，但 recent window 单条消息超出预算",
+                data={
+                    "action": "compact_context",
+                    "observation": "recent_window_over_budget",
+                    "recent_window_tokens": result.recent_window_tokens,
+                    "recent_window_budget_tokens": (
+                        request.recent_window_budget_tokens
+                    ),
+                },
+            ))
+
+        return fits_target
 
     def _try_reread(
         self,
