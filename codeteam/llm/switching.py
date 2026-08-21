@@ -197,6 +197,11 @@ class ModelSwitchService:
             return self._rejected(request, RejectionReason.UNKNOWN_MODEL, str(e))
         except ProviderCredentialError as e:
             return self._rejected(request, RejectionReason.MISSING_CREDENTIAL, str(e))
+        except RegistryError as e:
+            # 兜底捕获其余 RegistryError（当前来源：capability mismatch）。
+            # 三个子类已在上方分支处理，此处必然是校验层拒绝——
+            # 修复前该异常未被捕获，CAPABILITY_MISMATCH 拒绝路径不可达。
+            return self._rejected(request, RejectionReason.CAPABILITY_MISMATCH, str(e))
 
         # ⑥ context compatibility：小窗口 → 调用方注入的 compact 回调
         #    （compact 执行权在调用方——本层只判定放行与否）

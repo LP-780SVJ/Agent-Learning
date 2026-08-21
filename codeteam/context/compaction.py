@@ -261,12 +261,19 @@ class ContextCompactor:
     def _fallback_summary(
         inp: SummarizationInput,
     ) -> ContextSummary:
-        """deterministic 保底：消息降为 role 统计（无信息幻觉风险）。"""
+        """deterministic 保底：消息降为 role 统计（无信息幻觉风险）。
+
+        summary_version 占位为 1——compact() 随后必经 model_copy
+        以 previous_summary 链重算版本，此值不进入结果。
+        （缺陷修复：此前缺该必填字段，未注入 summarizer 时
+        fallback 构造直接 ValidationError，默认压缩器不可用。）
+        """
         role_counts: dict[str, int] = {}
         for m in inp.messages:
             role_counts[m.role] = role_counts.get(m.role, 0) + 1
         stats = "; ".join(f"{r}×{c}" for r, c in sorted(role_counts.items()))
         return ContextSummary(
+            summary_version=1,
             task_goal=(inp.previous_summary.task_goal if inp.previous_summary else ""),
             confirmed_facts=(inp.previous_summary.confirmed_facts if inp.previous_summary else ()),
             unresolved_issues=(f"auto_compacted: {stats}",),
