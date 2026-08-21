@@ -23,6 +23,10 @@ from codeteam.failures.models import (
     RecoveryAction,
 )
 from codeteam.git.models import PatchResult, PatchStatus
+from codeteam.llm.error_mapper import (
+    TO_AGENT_ERROR_CODE,
+    NormalizedModelError,
+)
 from codeteam.sandbox.errors import SandboxError, SandboxMountError
 from codeteam.verification.models import VerificationStatus
 
@@ -184,6 +188,9 @@ class ErrorClassifier:
 
         检测顺序（从最具体到最兜底）：
         ① KeyboardInterrupt → USER_INTERRUPT（BaseException，不是 Exception）
+        ①b NormalizedModelError → 读 provider 归一化字段直查（W4D5 Step 4，
+            零消息猜测；CONTEXT_OVERFLOW 映射 CONTEXT_BUDGET_EXCEEDED，
+            与 ⑧ 的 overflow 消息路径同语义——路径收敛）
         ② ApprovalDecision.DENIED → APPROVAL_DENIED
         ③ PolicyDecision.DENY / CommandStatus.POLICY_DENIED → POLICY_DENIED
         ④ SandboxError 家族 → SANDBOX_UNAVAILABLE
@@ -198,6 +205,21 @@ class ErrorClassifier:
         if isinstance(error, KeyboardInterrupt):
             return self._build(
                 AgentErrorCode.USER_INTERRUPT, stage, operation,
+                task_id, attempt, session_id, merged, error,
+            )
+
+        # ①b 归一化 Provider 错误（W4D5 Step 4）：读抛出点的结构化字段，
+        #     零消息猜测。stage 无关——归一化事实比 stage 标签更可信；
+        #     映射缺失走 UNKNOWN 兜底（fail closed，不 KeyError）。
+        if isinstance(error, NormalizedModelError):
+            merged.update(error.metadata)
+            merged["provider_id"] = error.provider_id
+            mapped = TO_AGENT_ERROR_CODE.get(error.normalized_code)
+            code = (
+                AgentErrorCode(mapped) if mapped else AgentErrorCode.UNKNOWN
+            )
+            return self._build(
+                code, stage, operation,
                 task_id, attempt, session_id, merged, error,
             )
 

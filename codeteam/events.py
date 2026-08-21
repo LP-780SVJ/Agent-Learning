@@ -69,6 +69,12 @@ class AgentEventType(str, Enum):
     SESSION_RESUME_REJECTED = "session.resume_rejected"
     SESSION_RECOVERY_REQUIRED = "session.recovery_required"
 
+    MODEL_SWITCH_REQUESTED = "model.switch_requested"
+    MODEL_SWITCH_APPLIED   = "model.switch_applied"
+    MODEL_SWITCH_REJECTED  = "model.switch_rejected"
+    TURN_STARTED           = "turn.started"
+    TURN_COMPLETED         = "turn.completed"
+
 
 @dataclass(frozen=True)
 class AgentEvent:

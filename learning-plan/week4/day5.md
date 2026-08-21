@@ -2756,3 +2756,219 @@ Evidence
 > CodeTeam 的 Durable Session 和 Model-visible Active Context 是分离的。Session 保留完整执行历史，但每个 Turn 由 ContextAssembler 从 authoritative Task/Plan/Instructions、版本化 Structured Summary、Recent Window 和当前 Retrieval 重新构建 Active Context。ContextBudget 由实际 `(provider, model)` 的 ModelMetadata 决定。切换 Model 时先在 Turn Boundary 固定当前 Turn，验证目标模型的 Capability 和 Context Capacity；如果目标窗口更小，则先执行 Compaction，且 Summary 不作为安全约束和 Plan State 的权威来源，这些信息会从 Durable State 重新注入。切换成功后重新构建 Provider Client，并从下一个 Turn 开始生效；每个 Turn 单独记录 Provider、Model、Usage 和 Cost。Provider-specific Error 则统一映射到 CodeTeam 的 AgentFailure，因此上层 Repair/Retry Runtime 不依赖具体供应商。
 
 到这个程度，你实现的已经不再是“**支持两个 API 的 Agent**”，而开始真正接近一个 **Provider-neutral、Long-running、Context-aware Agent Runtime**。
+
+---
+
+# 附录：W4D5 当日工程地图（Coder Agent 产出，2026-08-21）
+
+> 基线：week4 @ e96ac58，全量 1044 passed / 6 skipped（6 skip 均为 Docker 能力跳过）。
+> 本地图基于对仓库的只读检查（llm/base、llm/mock、llm/openai_compatible、context/*、events、session/service、orchestrator K2 接线点、tests 布局），所有接口以实测代码为准。
+
+## 1. 今天在整个 Coding Agent 中做什么
+
+前四天回答了“做什么 / 对不对 / 错了怎么办 / 死了怎么续”。今天解决两个**长任务必然撞上**的问题：
+
+```text
+问题 A：Session 跑了 2 小时、300 条消息、120 次 Tool Call
+        → 下一次 Model Call 不可能全发 → 压缩什么？谁权威？
+
+问题 B：Agent 不能绑死一个模型
+        → 换 Provider/Model 改变的是 Capacity/Capability/Cost/Error 语义
+```
+
+两大主题的连接点（正文 §三十五，今天最核心的一张图）：
+
+```text
+Durable Session（完整记忆，只增不减）
+        │ Context selection（每 Turn 重组）
+        ▼
+┌─ Active Context（当前工作集）────────────────┐
+│ System Rules / Repo Rules / TaskSpec / Plan   │ ← Authoritative 重新注入
+│ Compact Summary（结构化 Working Memory）      │ ← Durable Derived Facts
+│ Recent Window / Retrieved Code                │ ← Ephemeral
+└──────────────────┬────────────────────────────┘
+                   ▼ 按 (provider, model) 的 ModelMetadata 算 Budget
+            ModelSelection ──Turn Boundary──→ Provider A / Provider B
+                   ▼
+              ModelClient → AgentLoop
+```
+
+两条铁律：**Session 是“记住了什么”，Context 是“这次给模型看什么”**；**Compaction 只改 Active Context，绝不删 Durable History**。
+
+## 2. Capability Mapping
+
+```text
+Primary:   Context Engineering（分层重组 / Token Budget / 有损压缩策略）
+           Agent Runtime — Provider-neutral Model Layer
+Secondary: Agent Harness（turn boundary 不变量、恢复动作接线 K2）
+           Observability（turn.* / model.* / context.* 事件、per-turn 归因）
+           Safety（API key 不落盘、capability 校验、fail-closed switch）
+           Evaluation（Lost Constraint Rate 等数据出口）
+```
+
+**面试价值**：正文结尾那道题——“会话几小时、Context 快满、用户切到小窗口 Provider，怎么保证任务继续？”——是 Agent Infra 岗位的高频区分题，答案的全部零件今天造。
+
+## 3. Theory（必须吃透的概念）
+
+| 概念 | 一句话 | 反例 |
+|---|---|---|
+| Durable vs Active Context | 磁盘全量记忆 vs 每 Turn 工作集 | messages 无限 append 直接发 |
+| Summarization ⊂ Compaction | 前者是压缩技术，后者是完整 Runtime Operation（检测→保留策略→重组→重算预算） | 以为“生成摘要”=Compaction |
+| 三级权威分层 | Authoritative（重注入）/ Durable Facts（结构化 Summary）/ Ephemeral（Recent/Retrieval） | 用户约束指望 LLM Summary 记住 |
+| Context Budget 公式 | window − reserved_output − headroom − system/tools/instructions/task_plan | 塞到 window−1 再等 Provider 报错 |
+| Recent Window 按 token 不按条数 | 20 条消息 ≠ 预算（一条 Tool Output 可 20K） | keep_last_n=20 |
+| Turn Boundary 切换 | Turn 内 ModelSelection 不可变；mid-turn 请求排队 | Model A 发 Tool Call、Model B 接 Result |
+| Provider ≠ Model | 连接方式 vs 能力容量；metadata 键是 (provider_id, model_id) | metadata["model-x"] 单键 |
+| Switch = Transaction | validate→compat→compact→rebuild→persist→event，任一步失败旧 selection 有效 | session.model = new 一行了事 |
+| 有损但可防 | Compaction 是 lossy + 重要信息保护策略 | 只测 tokens_after < tokens_before |
+
+## 4. Industrial Design
+
+| 系统 | 做法 | 启发 |
+|---|---|---|
+| GitHub Copilot CLI | ~80% 触发后台压缩留 20% headroom；~95% 等待完成；>20KiB Tool Output 落盘只给 preview；公开承认有损 | headroom 提前量；Tool Output 是最大消耗源 |
+| Claude Code | 阈值随真实 window 调整；Gateway/Custom Model 可显式修正 window；/compact 指定保留重点；Fallback 不切更小窗口模型 | **window metadata 属于部署而非模型名** |
+| OpenAI | /responses/compact Provider-native 压缩 | 选 Route A（自有结构化 Summary）保 Provider-neutral，native 作未来优化 |
+| Codex | model 与 model_provider 分离；resume 换模型给 Warning + 下 Turn 生效 | resume override 语义 |
+
+方案权衡：后台异步压缩（GitHub）vs **Turn Boundary 同步压缩（我们，MVP）**——避免 snapshot+并发 merge 复杂度；自有 Summary vs Provider-native——neutrality 优先。
+
+## 5. 当前仓库检查（2026-08-21 实测）
+
+| 现状 | 接口事实 | 对今天的意义 |
+|---|---|---|
+| `codeteam/llm/base.py` | 仅 ModelResponse dataclass | **ModelClient Protocol 尚未形式化**，今天补 |
+| `codeteam/llm/mock.py` | MockModelClient.complete(*args, **kwargs) -> str | 双 Provider Mock 的基础 |
+| `codeteam/llm/openai_compatible.py` | OpenAICompatibleClient.complete(messages) -> str + RetryConfig | 真实 Adapter 原型；error mapper 接它 |
+| `codeteam/context/` **名称冲突警示** | Week 2 的 compressor.py/budget.py/models.py 是 **repo-map 代码文件压缩**（CompressionLevel 降级链），非会话压缩 | 新文件必须用 **compaction.py / assembler.py** 区分，docstring 首行声明区别 |
+| `codeteam/events.py:61-62` | recovery.completed/failed **已定义、零发射方**（W4D3 O2） | K2 债务确认 |
+| `codeteam/agent/orchestrator.py:467` | 非 RETRY/PAUSE 动作 → recovery_executor_not_wired:{action} + Terminal | K2 接线点 |
+| `codeteam/session/service.py:196` | resume(session_id, *, current_repo) 完整落地（lock/reconciler/runtime_factory） | override 优先级在此扩展 |
+| session/models.py | ContextMetadata 最小版；provider_id/model_id 已 durable | 今天升级 ContextMetadata |
+| 测试 | 1044/6 全绿；tests/llm/ 不存在 | 新建测试目录 |
+| docs | DD-W4-D4-01/02 已补写（2026-08-21 Step 0 完成） | Step 0 已还债 |
+
+**缺口**：compaction/assembler/registry/selection/error_mapper/switching 全部不存在；无 context.*/model.switch_*/turn.* 事件；DD-W4-D5-01/02 未写（今日收尾产出）。
+
+## 6. 涉及文件
+
+**新增（生产）**：
+
+```text
+codeteam/llm/
+├── registry.py      ProviderConfig / ProviderRegistry /
+│                    ModelSelection / ModelMetadata / ContextBudget 计算
+├── error_mapper.py  ModelErrorMapper：Provider 异常 → 7 类统一码
+│                    （RATE_LIMIT/TIMEOUT/AUTH/CONTEXT_OVERFLOW/
+│                     INVALID_REQUEST/SERVER/UNKNOWN）→ 接 AgentErrorCode
+└── switching.py     ModelSwitchService：11 步 Transaction +
+│                    TurnBoundaryQueue（mid-turn 排队）
+
+codeteam/context/
+├── compaction.py    CompactionReason / ContextSummary（§十七结构化）/
+│                    CompactionRequest / CompactionResult /
+│                    ContextCompactor（summarizer 注入式）
+└── assembler.py     ActiveContext / ContextAssembler /
+                     Recent Window token 装配 / Tier 重注入
+
+tests/llm/           registry / error_mapper / switching 测试
+tests/context/       compaction / assembler 测试（追加文件，不动 Week2 测试）
+docs/design_decisions/  DD-W4-D5-01 / DD-W4-D5-02
+「明确不做清单」      落位提议：docs/design_decisions/W4-not-doing-list.md（待用户确认）
+```
+
+**最小修改（逐条理由）**：
+
+| 文件 | 改动 | 理由 |
+|---|---|---|
+| events.py | +context.compacted / context.stale_rebuilt / model.switch_requested / applied / rejected / turn.started / completed | 可观测 + per-turn 归因 |
+| session/models.py | ContextMetadata 升级（+summary_version / compaction 引用）；CONTEXT_STALE 判定 | §四：model-visible state |
+| agent/orchestrator.py | K2：COMPACT 动作接线 + recovery.completed/failed 发射 | 偿还 W4D3 债 |
+| failures/（若必须） | classifier 消费归一化错误码的最小接入 | §4.9 |
+| llm/base.py | 形式化 ModelClient Protocol（现有 complete 签名为准） | registry 返回类型契约 |
+
+## 7. Architecture / Data Flow
+
+```text
+【上午】Compaction
+Turn 结束 → 量 context tokens（按 (provider,model) metadata）
+  → 超阈值? → CompactionRequest(reason=AUTO_THRESHOLD)
+  → ContextCompactor：老 Summary + 待压消息 → 注入 summarizer
+  → ContextSummary vN（结构化）+ Recent Window（token 预算内从后往前装）
+  → 写 context.json（version+1）
+下一 Turn → ContextAssembler：
+  TaskSpec/Plan/Repo Rules/Checkpoint ← 从 Session 权威重注入（不信任 Summary）
+  + Summary + Recent + Retrieved → ActiveContext
+  → 前置检查：context_version 匹配? 不匹配 → CONTEXT_STALE → rebuild（不 fail Session）
+
+【下午】Switching
+switch_requested(selection) → [turn 进行中? → 排队，Turn 完成后处理]
+  → resolve provider/model → capability 校验 → credential 校验
+  → target window < current context? → COMPACT → 仍超? → reject（旧 selection 有效）
+  → rebuild ModelClient → persist（Session.current_selection + 事件）→ 下一 Turn 生效
+每 Turn：turn.started(provider/model/context_tokens) + turn.completed(tokens/cost/latency)
+
+【K2】_execute_with_recovery 的 COMPACT 分支：
+  compact() 成功 → recovery.completed + retry once
+  compact() 失败 → recovery.failed + _TerminalFailure
+```
+
+## 8. 今日步骤拆分（正文 §四十五顺序）
+
+| Step | 内容 | 时机 | 完成标志 |
+|---|---|---|---|
+| 0 | 补写 DD-W4-D4-01/02 | 热身还债 | ✅ 已完成（2026-08-21） |
+| 1 | llm/registry.py：ModelSelection/ModelMetadata/ProviderRegistry + Budget 公式 | 上午 | **先有容量才知道何时压**（§四十五明令） |
+| 2 | context/compaction.py：Summary/Request/Result/Compactor（summarizer 注入，Mock 可测） | 上午 | 6 要素保留测试 |
+| 3 | context/assembler.py + ContextMetadata 升级 + CONTEXT_STALE→rebuild | 上午 | Invariant + tier 重注入测试 |
+| 4 | llm/error_mapper.py：双 Provider 异常→统一码→接 classifier | 下午 | 双样例归一化测试 |
+| 5 | llm/switching.py：Switch Transaction + turn boundary 队列 + per-turn 持久化 + resume override | 下午 | §四十六 Model 矩阵 14 项 |
+| 6 | K2 接线：orchestrator COMPACT 分支 + recovery.completed/failed + 私有测试升级公共路径 | 下午 | W4D3 债清 |
+| 7 | 「明确不做清单」+ DD-W4-D5-01/02 + 13 节总结 | 收尾 | REREAD/RETRIEVE 归属明确 |
+
+## 9. Test Strategy
+
+§四十六矩阵全量：**Context 10 项**（约束/Plan/checkpoint 重注入、failed test 保留、huge tool output 不永久占位、under-budget 不压、超阈值触发、压后仍超不开下一 Turn）+ **Model 14 项**（双 Provider 正常、invalid provider/model/credential/capability 拒绝且旧 selection 保留、小窗口先压、压后仍超拒绝、mid-turn 排队、next turn 生效、双 Provider 429 同归一化、resume 无/有 override）。
+
+工程约束：全 Mock/Fake client、无真实网络 / sleep / skip、tmp_path、遵守 AGENTS.md。
+
+## 10. Design Decision Plan
+
+- **DD-W4-D5-01** Structured Context Compaction（核心：LLM summary 不是 safety/constraints/plan/checkpoint 的权威来源）——Ablation A3 后定 SUPPORTED
+- **DD-W4-D5-02** Provider-neutral Model Runtime（核心：AgentLoop 只依赖 ModelClient；turn 内 selection 不可变）——A4 架构度量
+
+## 11. Benchmark Plan（仅设计，数据出口今日保证）
+
+Provider A/B × 5 固定任务：success / tokens / cost / latency / tool calls / repairs + **compaction count / time-to-first-green / provider retry count**（§四十八）。命名纪律：报告叫 *Model/Provider Configuration Comparison*（§四十七陷阱：不可宣称“Provider A 比 B 强 20%”）。Compaction Benchmark 七指标（§四十九），**Lost Constraint Rate 为核心**。
+
+## 12. Ablation Plan（仅设计）
+
+- **A3**：No Compaction vs Naive Truncation vs Structured（三组——No Compaction 预期撞墙，真正的对手是 naive truncation）→ lost-constraint / plan continuity / repeated retrieval
+- **A4**：Single vs Provider-neutral——**架构度量**（新增 Provider 需改的 core files 数、AgentLoop/Planner/RepairLoop 改动 LOC、契约测试数）
+
+## 13. Failure Cases to Watch
+
+C1 约束丢失（Summary 漏“不改 API”）；C2 Summary 幻觉（不区分 confirmed/failed/unresolved）；C3 传话游戏式 Summary Drift（版本化+可回溯）；C4 Recent 因果丢失（只在 Turn Boundary 压）；C5 **window metadata 错**（Gateway 实际 128K、以为 400K→压缩太晚）；S1 小窗口切换不预压；S2 capability mismatch 下一 Turn 才炸；S3 mid-turn 切换；S4 usage 归因错（per-turn 记录防）；S5 silent resume 换模；S6 Provider 错误泄漏进 Orchestrator。
+
+## 14. Interview Focus
+
+必答：Session Persistence 与 Compaction 区别？为什么 Durable Instructions 不能靠 Summary？Recent Window 为什么按 token？为什么 switch 只在 Turn Boundary？Switch 的 11 步里哪步最容易失败？window metadata 为什么绑定 (provider,model)？Lost Constraint Rate 怎么测？API key 为什么绝不进 Session？
+
+杀手题就是正文结尾那道——用 §五十五架构答（分离→重组→metadata 预算→boundary 事务→归因→错误归一）。
+
+## 15. 今日最终完成标准
+
+```text
+[ ] Durable Session 与 Active Context 分离（assembler 每 Turn 重组）
+[ ] Budget 基于 ModelMetadata；headroom 有测试
+[ ] 结构化 ContextSummary + Recent Window + 4 类权威重注入
+[ ] Compact 不删 durable history（Invariant 测试）
+[ ] 6 要素保留 + CONTEXT_STALE→rebuild 测试
+[ ] ProviderRegistry / Selection / Metadata / ErrorMapper；AgentLoop 零 provider 分支
+[ ] Turn 内 selection 不可变；mid-turn 排队；小窗口先压；压后仍超拒绝
+[ ] per-turn provider/model/tokens/cost 落事件；resume override 优先级
+[ ] K2：COMPACT 接线 + recovery.completed/failed 发射；不做清单落盘
+[ ] 全量回归 ≥ 1044/6，触达文件 ruff 0 error
+[ ] DD-W4-D5-01/02（PROPOSED）✓ DD-W4-D4-01/02 已于 Step 0 补写完成
+[ ] 13 节每日总结
+```

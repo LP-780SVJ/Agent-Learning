@@ -48,6 +48,8 @@ from codeteam.task.models import TaskSpec, create_task_spec
 from codeteam.task.state import InvalidTransitionError, TaskState, TaskStatus
 from codeteam.verification.models import VerificationRequest
 from codeteam.verification.service import VerificationService
+from codeteam.context.compaction import ContextCompactor, CompactionRequest
+from codeteam.schemas.messages import Message
 
 
 class OrchestrationResult(BaseModel):
@@ -122,6 +124,12 @@ class SingleAgentOrchestrator:
         recovery_policy: RecoveryPolicy | None = None,
         retry_policy: RetryPolicy | None = None,
         sleeper: Callable[[float], None] | None = None,
+        # ── W4D5 Step 6（K2）：恢复执行器注入 ──
+        compactor: ContextCompactor | None = None,
+        recovery_context_provider: (
+            Callable[[], tuple[CompactionRequest, tuple[Message, ...]]] | None
+        ) = None,
+        rereader: Callable[[AgentFailure], None] | None = None,
         # ── W4D4 Step 4：暂停持久化回调 ──
         # orchestrator 不依赖 SessionService 类型（依赖倒置）；
         # 调用方绑定，如：
@@ -144,6 +152,9 @@ class SingleAgentOrchestrator:
         self._retry_policy = retry_policy or RetryPolicy()
         self._sleeper = sleeper or time.sleep
         self._pause_persister = pause_persister
+        self._compactor = compactor
+        self._recovery_context_provider = recovery_context_provider
+        self._rereader = rereader
     # ── 主入口 ────────────────────────────────────────────
 
     def run(
@@ -455,17 +466,107 @@ class SingleAgentOrchestrator:
                 if action_type == RecoveryAction.PAUSE:
                     raise _TerminalFailure(failure, "pause")
 
-                # REPAIR / REREAD / COMPACT 等：Day 3 只发事件与终态，
-                # 执行接线留 Day 5（明确不做清单）
+                # ── W4D5 Step 6（K2）：恢复动作执行接线 ──
+                # COMPACT / REREAD 升级为「执行 → recovery.completed →
+                # retry」；其余（REPAIR/RETRIEVE/REPLAN/ASK_USER）保持
+                # Day 3 终态行为（明确不做清单，Step 7 落盘）。
                 events.append(make_event(
                     AgentEventType.RECOVERY_STARTED,
                     f"恢复执行开始: {action_type.value}",
                     data={"action": action_type.value},
                 ))
+
+                if action_type == RecoveryAction.COMPACT_CONTEXT:
+                    compacted = self._try_compact(
+                        state, events, failure,
+                    )
+                    if compacted:
+                        events.append(make_event(
+                            AgentEventType.RECOVERY_COMPLETED,
+                            f"压缩完成，重试: {operation}",
+                            data={"action": "compact_context",
+                                  "attempt": attempt},
+                        ))
+                        continue  # 回循环顶重试同一操作
+                    events.append(make_event(
+                        AgentEventType.RECOVERY_FAILED,
+                        f"压缩失败或不可用: {operation}",
+                        data={"action": "compact_context"},
+                    ))
+                    raise _TerminalFailure(
+                        failure, "compact_recovery_failed",
+                    )
+
+                if action_type == RecoveryAction.REREAD_AND_REGENERATE:
+                    reread = self._try_reread(state, events, failure)
+                    if reread:
+                        events.append(make_event(
+                            AgentEventType.RECOVERY_COMPLETED,
+                            f"重读完成，重试: {operation}",
+                            data={"action": "reread_and_regenerate",
+                                  "attempt": attempt},
+                        ))
+                        continue
+                    events.append(make_event(
+                        AgentEventType.RECOVERY_FAILED,
+                        f"重读恢复失败: {operation}",
+                        data={"action": "reread_and_regenerate"},
+                    ))
+                    raise _TerminalFailure(
+                        failure, "reread_recovery_failed",
+                    )
+
+                # REPAIR / RETRIEVE_MORE_CONTEXT / REPLAN / ASK_USER：
+                # 保持 Day 3 终态（明确不做清单）
                 raise _TerminalFailure(
                     failure,
                     f"recovery_executor_not_wired:{action_type.value}",
                 )
+
+    def _try_compact(
+        self,
+        state: TaskState,
+        events: list[AgentEvent],
+        failure: AgentFailure,
+    ) -> bool:
+        """执行 COMPACT 恢复。返回 False = 不可恢复（未注入/执行异常）。
+
+        compactor 或材料 provider 未注入时返回 False 走终态——
+        保持 Day 3 行为兼容（50 Case 相关断言不破坏）。
+        """
+        if (
+            self._compactor is None
+            or self._recovery_context_provider is None
+        ):
+            return False
+        try:
+            request, messages = self._recovery_context_provider()
+        except Exception:  # noqa: BLE001 — 材料构造失败按恢复失败处理
+            return False
+        try:
+            result = self._compactor.compact(request, messages=messages)
+        except Exception:  # noqa: BLE001 — compactor 异常按恢复失败处理
+            return False
+        return True
+
+    def _try_reread(
+        self,
+        state: TaskState,
+        events: list[AgentEvent],
+        failure: AgentFailure,
+    ) -> bool:
+        """REREAD 最小实现：MVP 语义 = 重读最近相关文件（注入回调）。
+
+        完整「重读 + 重新生成」需 LLM 链路（Day 6+，不做清单）；
+        本步接线：rereader 回调成功 → 视为上下文已刷新 → retry。
+        """
+        if self._rereader is None:
+            return False
+        try:
+            self._rereader(failure)
+        except Exception:  # noqa: BLE001
+            return False
+        return True
 
     def _pause(
         self,

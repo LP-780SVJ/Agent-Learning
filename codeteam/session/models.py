@@ -20,6 +20,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
 
+from codeteam.context.compaction import ContextSummary
 from codeteam.events import AgentEventType
 from codeteam.failures.models import AgentFailure
 from codeteam.planning.models import Plan
@@ -203,9 +204,16 @@ class SessionEvent(BaseModel):
 
 
 class ContextMetadata(BaseModel):
-    """context.json 的最小版。完整 Compaction 是 Day 5。"""
+    """context.json：model-visible context state（W4D5 从最小 metadata 升级）。
+
+    summary 从裸 str 升级为结构化 ContextSummary（§十七）；
+    expected_summary_version 与 session.json 对齐——错位 = CONTEXT_STALE
+    → rebuild（派生状态，不 fail Session，day4 §九十四）。
+    """
     context_version: int = 1
-    summary: str | None = None
+    summary: ContextSummary | None = None
+    expected_summary_version: int | None = None
+    recent_window_indices: tuple[int, ...] = ()
     recent_turn_ids: tuple[str, ...] = ()
     retrieved_files: tuple[str, ...] = ()
 
