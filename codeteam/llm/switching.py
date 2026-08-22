@@ -7,6 +7,9 @@
 事务（§三十七，任一步失败旧 selection 保持有效）：
   resolve → capability → credential → metadata → context compat
   → [compact] → rebuild client → persist → event → 下一 Turn 生效
+
+Turn 计量（W4D6 B11）：turn.completed 携带 input/output_tokens、
+model_calls、cost_usd——per-turn 归因与 Benchmark 出口的数据源。
 """
 from __future__ import annotations
 
@@ -14,10 +17,11 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
-from codeteam.llm.base import ModelClient
+from codeteam.llm.base import ModelClient, ModelResponse
 from codeteam.llm.registry import (
     ModelMetadata,
     ModelSelection,
@@ -27,6 +31,7 @@ from codeteam.llm.registry import (
     UnknownModelError,
     UnknownProviderError,
 )
+from codeteam.schemas.messages import Message
 
 
 class SwitchOutcome(str, Enum):
@@ -61,6 +66,54 @@ class SwitchResult:
 
 EventSink = Callable[[str, dict[str, Any]], None]
 PersistHook = Callable[[ModelSelection], None]
+
+
+class _MeteredClient:
+    """截获模型响应计量的透传包装（W4D6 B11）。
+
+    结构化满足 ModelClient Protocol（runtime_checkable 按形状判定，
+    无需继承）；box 由 turn() 创建、finally 读取——失败 Turn 同样
+    归因（S4）。model_calls 在调用前递增：尝试即计数，tokens 仅
+    成功且响应为 ModelResponse 时可得（诚实降级为 0）。
+    """
+
+    def __init__(self, inner: ModelClient, box: dict[str, int]) -> None:
+        self._inner = inner
+        self._box = box
+
+    def complete(self, messages: list[Message]) -> str | ModelResponse:
+        self._box["model_calls"] += 1
+        result = self._inner.complete(messages)
+        # Protocol 声明 str；真实/测试 client 可返回 ModelResponse
+        # （agent_loop._normalize_model_response 同款兼容）——两种
+        # 形态都计调用次数，token 计量仅结构化形态可得
+        if isinstance(result, ModelResponse):
+            self._box["input_tokens"] += result.input_tokens
+            self._box["output_tokens"] += result.output_tokens
+        return result
+
+
+def _turn_cost(
+    metadata: ModelMetadata,
+    input_tokens: int,
+    output_tokens: int,
+) -> float | None:
+    """按部署价格计算 Turn 成本（Decimal 域算完再转 float）。
+
+    价格未配置 → None："不知道"不得伪装成 0.0，否则周度
+    Benchmark 的 per-turn cost 汇总会静默失真。
+    """
+    if (
+        metadata.input_price_per_million is None
+        or metadata.output_price_per_million is None
+    ):
+        return None
+    cost = (
+        Decimal(input_tokens) / 1_000_000 * metadata.input_price_per_million
+        + Decimal(output_tokens) / 1_000_000
+        * metadata.output_price_per_million
+    )
+    return float(cost)
 
 
 @dataclass
@@ -136,8 +189,24 @@ class ModelSwitchService:
             "model_id": selection.model_id,
             "context_tokens": context_tokens,
         })
+        # B11：tokens 只在响应返回后可知 → Turn 边界是唯一可靠计量点。
+        # metadata 取数在 try 内（与 build_client 同一失败面）：
+        # 未知 selection 仍走 started→completed 完整生命周期，
+        # finally 引用前先置 None 防 NameError。
+        metadata: ModelMetadata | None = None
+        usage_box: dict[str, int] = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "model_calls": 0,
+        }
         try:
-            yield self._registry.build_client(selection)
+            metadata = self._registry.metadata(selection)
+            yield cast(
+                ModelClient,
+                _MeteredClient(
+                    self._registry.build_client(selection), usage_box
+                ),
+            )
         finally:
             scope = self._active_turn
             self._active_turn = None
@@ -145,6 +214,20 @@ class ModelSwitchService:
                 "turn_id": scope.turn_id if scope else "?",
                 "provider_id": selection.provider_id,
                 "model_id": selection.model_id,
+                # B11（W4D5 PARTIAL 收口）：per-turn 计量——S4 归因
+                # + 周度 Benchmark per-turn cost 出口 + CLI 渲染数据源
+                "input_tokens": usage_box["input_tokens"],
+                "output_tokens": usage_box["output_tokens"],
+                "model_calls": usage_box["model_calls"],
+                "cost_usd": (
+                    _turn_cost(
+                        metadata,
+                        usage_box["input_tokens"],
+                        usage_box["output_tokens"],
+                    )
+                    if metadata is not None
+                    else None
+                ),
             })
             self._drain_after_boundary()
 

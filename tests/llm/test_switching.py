@@ -8,20 +8,26 @@
 - 小窗口模型切换 → compat_check（压缩钩子）先行；压后仍放不下 → 拒绝
 - Turn 内 selection 不可变；mid-turn switch → QUEUED
 - Turn 结束（boundary）才 drain 队列；下一 Turn 用新模型
-- per-turn provider/model 落事件（S4 usage 归因）
+- per-turn provider/model/tokens/cost 落事件（S4 usage 归因）
 - persist hook 在生效时被调用（durable 同步）
 - resume：从 durable (provider_id, model_id) 重建 selection 并验证；
   显式 override 走完整事务，失败不动 session selection
 - 架构度量（A4）：AgentLoop / Orchestrator 零 provider 分支
 
+W4D6 B11 追加：turn.completed 的 per-turn 计量（tokens/cost）。
+
 工程约束：全 Fake client/事件接收器，无网络、无 sleep、无 skip。
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import pytest
 
+from codeteam.llm.base import ModelClient, ModelResponse
 from codeteam.llm.registry import (
     ModelMetadata,
     ModelSelection,
@@ -31,6 +37,7 @@ from codeteam.llm.registry import (
 )
 from codeteam.llm.switching import (
     ModelSwitchService,
+    RejectionReason,
     SwitchOutcome,
     SwitchRequest,
     SwitchResult,
@@ -117,8 +124,13 @@ def _sel(provider: str, model: str) -> ModelSelection:
     return ModelSelection(provider_id=provider, model_id=model)
 
 
-def _switch(service, target: ModelSelection) -> SwitchResult:
+def _switch(service: ModelSwitchService, target: ModelSelection) -> SwitchResult:
     return service.request_switch(SwitchRequest(target=target))
+
+
+def _rejection(result: SwitchResult) -> RejectionReason:
+    assert result.rejection is not None
+    return result.rejection
 
 
 # ── 双 Provider 正常运行 ─────────────────────────────────
@@ -181,7 +193,7 @@ class TestSwitchRejections:
         self._seed(service)
         result = _switch(service, _sel("prov-ghost", "model-a"))
         assert result.outcome is SwitchOutcome.REJECTED
-        assert result.rejection.value == "unknown_provider"
+        assert _rejection(result).value == "unknown_provider"
         assert service.current_selection == _sel("prov-a", "model-a")
         assert events.of("model.switch_rejected")
 
@@ -190,7 +202,7 @@ class TestSwitchRejections:
         self._seed(service)
         result = _switch(service, _sel("prov-a", "model-ghost"))
         assert result.outcome is SwitchOutcome.REJECTED
-        assert result.rejection.value == "unknown_model"
+        assert _rejection(result).value == "unknown_model"
         assert service.current_selection == _sel("prov-a", "model-a")
 
     def test_missing_credential_rejected_old_kept(self, monkeypatch) -> None:
@@ -203,7 +215,7 @@ class TestSwitchRejections:
             pass
         result = _switch(service, _sel("prov-a", "model-a-notools"))
         assert result.outcome is SwitchOutcome.REJECTED
-        assert result.rejection.value == "missing_credential"
+        assert _rejection(result).value == "missing_credential"
         assert service.current_selection == _sel("prov-a", "model-a")
 
     def test_capability_mismatch_rejected_old_kept(self) -> None:
@@ -213,7 +225,7 @@ class TestSwitchRejections:
         self._seed(service)
         result = _switch(service, _sel("prov-a", "model-a-notools"))
         assert result.outcome is SwitchOutcome.REJECTED
-        assert result.rejection.value == "capability_mismatch"
+        assert _rejection(result).value == "capability_mismatch"
         assert service.current_selection == _sel("prov-a", "model-a")
 
     def test_rejection_events_emitted(self) -> None:
@@ -256,7 +268,7 @@ class TestContextCompatOnSwitch:
         assert seeded.outcome is SwitchOutcome.APPLIED
         result = _switch(service, _sel("prov-b", "model-b-small"))
         assert result.outcome is SwitchOutcome.REJECTED
-        assert result.rejection.value == "context_still_overflow"
+        assert _rejection(result).value == "context_still_overflow"
         assert service.current_selection == _sel("prov-a", "model-a")
 
     def test_no_compat_check_means_unchecked(self) -> None:
@@ -346,6 +358,161 @@ class TestPersistHook:
         service, _ = _service(persist=persisted.append)
         _switch(service, _sel("prov-ghost", "x"))
         assert persisted == []
+
+
+# ── B11：turn.completed 的 per-turn 计量（W4D6 Step 1）──
+
+
+class _TokenReportingClient:
+    """返回 ModelResponse 的假 client（tokens 非零）。"""
+
+    def __init__(self, *, input_tokens: int, output_tokens: int) -> None:
+        self._input = input_tokens
+        self._output = output_tokens
+
+    def complete(self, messages: list[Message]) -> ModelResponse:
+        return ModelResponse(
+            content="ok",
+            model="metered-fake",
+            input_tokens=self._input,
+            output_tokens=self._output,
+        )
+
+
+class _RaisingClient:
+    """complete 必炸的假 client（失败 Turn 归因）。"""
+
+    def complete(self, messages: list[Message]) -> str:
+        raise RuntimeError("model blew up")
+
+
+def _metered_registry(
+    *,
+    input_price: Decimal | None,
+    output_price: Decimal | None,
+    factory=None,
+) -> ProviderRegistry:
+    reg = ProviderRegistry()
+    metadata = ModelMetadata(
+        provider_id="p", model_id="m",
+        context_window_tokens=8000, max_output_tokens=500,
+    )
+    if input_price is not None and output_price is not None:
+        metadata = metadata.model_copy(update={
+            "input_price_per_million": input_price,
+            "output_price_per_million": output_price,
+        })
+    reg.register_provider(
+        ProviderConfig(
+            provider_id="p",
+            client_factory=(
+                cast(Callable[[ModelSelection], ModelClient], factory)
+                if factory is not None
+                else cast(
+                    Callable[[ModelSelection], ModelClient],
+                    lambda sel: _TokenReportingClient(
+                        input_tokens=1500, output_tokens=300,
+                    ),
+                )
+            ),
+        ),
+        models=(metadata,),
+    )
+    return reg
+
+
+class TestTurnUsageAccounting:
+    """B11：tokens 只在响应返回后可知 → Turn 边界是唯一计量点。"""
+
+    def test_completed_carries_tokens_and_cost(self) -> None:
+        """ModelResponse 形态 + 已配置价格 → 四字段齐全，cost 精确。"""
+        events = _RecordingEvents()
+        service = ModelSwitchService(
+            _metered_registry(
+                input_price=Decimal("0.15"),
+                output_price=Decimal("0.60"),
+            ),
+            on_event=events,
+        )
+        with service.turn(_sel("p", "m")) as client:
+            client.complete([Message(role="user", content="hi")])
+
+        completed = events.of("turn.completed")[0]
+        assert completed["input_tokens"] == 1500
+        assert completed["output_tokens"] == 300
+        assert completed["model_calls"] == 1
+        # 1500/1e6×0.15 + 300/1e6×0.60 = 0.000405（Decimal 精确后转 float）
+        assert completed["cost_usd"] == pytest.approx(0.000405)
+
+    def test_multiple_calls_accumulate(self) -> None:
+        """一个 Turn 多次 complete → 计量是累计语义（repair 场景）。"""
+        events = _RecordingEvents()
+        service = ModelSwitchService(
+            _metered_registry(
+                input_price=Decimal("0.15"),
+                output_price=Decimal("0.60"),
+            ),
+            on_event=events,
+        )
+        with service.turn(_sel("p", "m")) as client:
+            client.complete([Message(role="user", content="a")])
+            client.complete([Message(role="user", content="b")])
+
+        completed = events.of("turn.completed")[0]
+        assert completed["input_tokens"] == 3000
+        assert completed["output_tokens"] == 600
+        assert completed["model_calls"] == 2
+
+    def test_str_only_client_degrades_honestly(self) -> None:
+        """返 str 的 client（Protocol 声明形态）+ 无价格 →
+        tokens 0、calls 1、cost None——不伪造数据。"""
+        service, events = _service()  # 既有工厂：str client + 无价格
+        with service.turn(_sel("prov-a", "model-a")) as client:
+            client.complete([Message(role="user", content="x")])
+
+        completed = events.of("turn.completed")[0]
+        assert completed["input_tokens"] == 0
+        assert completed["output_tokens"] == 0
+        assert completed["model_calls"] == 1
+        assert completed["cost_usd"] is None
+
+    def test_no_pricing_yields_none_not_zero(self) -> None:
+        """tokens 已报但价格未配置 → cost None（"不知道"≠"免费"）。"""
+        events = _RecordingEvents()
+        service = ModelSwitchService(
+            _metered_registry(input_price=None, output_price=None),
+            on_event=events,
+        )
+        with service.turn(_sel("p", "m")) as client:
+            client.complete([Message(role="user", content="x")])
+
+        completed = events.of("turn.completed")[0]
+        assert completed["input_tokens"] == 1500
+        assert completed["cost_usd"] is None
+
+    def test_failed_turn_still_attributed(self) -> None:
+        """Turn 内异常 → completed 仍发：calls=1（尝试即计数）、
+        tokens=0；价格在但 0 tokens → cost 0.0（数学事实，非伪装）。"""
+        events = _RecordingEvents()
+        service = ModelSwitchService(
+            _metered_registry(
+                input_price=Decimal("0.15"),
+                output_price=Decimal("0.60"),
+                factory=lambda sel: _RaisingClient(),
+            ),
+            on_event=events,
+        )
+        with (
+            pytest.raises(RuntimeError),
+            service.turn(_sel("p", "m")) as client,
+        ):
+            client.complete([Message(role="user", content="x")])
+
+        completed = events.of("turn.completed")[0]
+        assert completed["model_calls"] == 1
+        assert completed["input_tokens"] == 0
+        assert completed["output_tokens"] == 0
+        assert completed["cost_usd"] == 0.0
 
 
 # ── resume：durable 重建与显式 override ──────────────────
