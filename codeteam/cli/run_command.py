@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import uuid
 from pathlib import Path
@@ -62,6 +64,14 @@ def run_agent_task(request: RunRequest) -> None:
     )
 
     render_text(f"Session: {session.manifest.session_id}")
+
+    if os.environ.get("CODETEAM_CLI_TEST_WAIT_AFTER_SESSION") == "1":
+        try:
+            signal.pause()
+        except KeyboardInterrupt as error:
+            session_service.pause(session, reason="user_interrupt")
+            render_text(f"Status: {TaskStatus.PAUSED.value}")
+            raise typer.Exit(130) from error
 
     planner = MockPlanner(
         plan=create_plan(

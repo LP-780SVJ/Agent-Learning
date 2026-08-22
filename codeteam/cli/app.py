@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
+from enum import Enum
 from pathlib import Path
 from typing import Annotated, cast
 
@@ -18,6 +19,11 @@ app = typer.Typer(
 )
 
 
+class CliOutputFormat(str, Enum):
+    TEXT = "text"
+    JSON = "json"
+
+
 @app.command("inspect-repo")
 def inspect_repo(
     path: Annotated[
@@ -25,14 +31,14 @@ def inspect_repo(
         typer.Argument(help="仓库路径（默认当前目录）"),
     ] = Path("."),
     output_format: Annotated[
-        str,
+        CliOutputFormat,
         typer.Option("--format", help="输出格式：text 或 json"),
-    ] = "text",
+    ] = CliOutputFormat.TEXT,
 ) -> None:
     """检查仓库索引健康状况。"""
     from codeteam.cli.inspect_command import run_inspect
 
-    args = Namespace(path=str(path), format=output_format)
+    args = Namespace(path=str(path), format=output_format.value)
     run_inspect(args)
 
 
@@ -55,9 +61,9 @@ def context(
         typer.Option("--budget", help="Repo Map Token 预算（默认 1024）"),
     ] = 1024,
     output_format: Annotated[
-        str,
+        CliOutputFormat,
         typer.Option("--format", help="输出格式：text 或 json"),
-    ] = "text",
+    ] = CliOutputFormat.TEXT,
 ) -> None:
     """根据任务查询构建上下文。"""
     from codeteam.cli.context_command import run_context
@@ -67,7 +73,7 @@ def context(
         path=str(path),
         top_k=top_k,
         budget=budget,
-        format=output_format,
+        format=output_format.value,
     )
     run_context(args)
 
@@ -163,9 +169,9 @@ def diff(
         typer.Option("--base", help="Diff 的基准 ref"),
     ] = "HEAD",
     output_format: Annotated[
-        str,
+        CliOutputFormat,
         typer.Option("--format", help="输出格式：text 或 json"),
-    ] = "text",
+    ] = CliOutputFormat.TEXT,
 ) -> None:
     """查看已有 Session 对应工作区的 diff。"""
     from codeteam.cli.requests import DiffRequest
@@ -175,7 +181,7 @@ def diff(
         session_id=session_id,
         repo=repo,
         base_ref=base_ref,
-        output_format=cast(OutputFormat, output_format),
+        output_format=cast(OutputFormat, output_format.value),
     )
     diff_agent_session(request)
 
@@ -189,9 +195,9 @@ def rollback(
         typer.Option("--repo", help="仓库路径（默认当前目录）"),
     ] = Path("."),
     output_format: Annotated[
-        str,
+        CliOutputFormat,
         typer.Option("--format", help="输出格式：text 或 json"),
-    ] = "text",
+    ] = CliOutputFormat.TEXT,
 ) -> None:
     """回滚指定 Session 的 checkpoint。"""
     from codeteam.cli.requests import RollbackRequest
@@ -201,7 +207,7 @@ def rollback(
         session_id=session_id,
         checkpoint_id=checkpoint_id,
         repo=repo,
-        output_format=cast(OutputFormat, output_format),
+        output_format=cast(OutputFormat, output_format.value),
     )
     rollback_agent_session(request)
 

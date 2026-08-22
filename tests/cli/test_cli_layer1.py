@@ -132,3 +132,48 @@ def test_errors_go_to_stderr_not_stdout() -> None:
     assert "session 不存在" in result.stderr
     assert "Traceback" not in result.stderr
 
+
+def test_diff_invalid_format_exits_2_without_calling_business(
+    monkeypatch,
+) -> None:
+    called = False
+
+    def fake_diff(request: DiffRequest) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr("codeteam.cli.run_command.diff_agent_session", fake_diff)
+
+    result = runner.invoke(app, ["diff", "ses_abc", "--format", "xml"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "Invalid value" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not called
+
+
+def test_rollback_invalid_format_exits_2_without_calling_business(
+    monkeypatch,
+) -> None:
+    called = False
+
+    def fake_rollback(request: RollbackRequest) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "codeteam.cli.run_command.rollback_agent_session",
+        fake_rollback,
+    )
+
+    result = runner.invoke(
+        app,
+        ["rollback", "ses_abc", "cp-000001", "--format", "xml"],
+    )
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "Invalid value" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not called

@@ -1,13 +1,13 @@
 """eval 命令：运行检索评测实验。"""
 from __future__ import annotations
 
-from dataclasses import asdict
-from datetime import datetime, timezone
 import hashlib
 import json
-from pathlib import Path
-import sys
 import subprocess
+import sys
+from dataclasses import asdict
+from datetime import UTC, datetime
+from pathlib import Path
 
 from codeteam.application.repository_index import (
     RepositoryIndexes,
@@ -22,14 +22,25 @@ from codeteam.imports.graph import ImportGraph
 from codeteam.ranking.file_ranker import FileRanker
 from codeteam.ranking.models import RankingWeights
 from codeteam.search.candidate_generator import CandidateGenerator
+from codeteam.search.models import SearchExecution, SearchQuery
 from codeteam.search.query_analyzer import QueryAnalyzer
 from codeteam.search.ripgrep import RipgrepClient
 from codeteam.symbols.index import SymbolIndex
 
-
 VALID_METHODS = {"filename", "ripgrep", "ripgrep_symbol", "hybrid"}
 CANDIDATE_LIMIT = 50
 EVAL_CONTEXT_BUDGET = 0
+
+
+class _DisabledRipgrepClient(RipgrepClient):
+    """No-op ripgrep client for eval methods that intentionally disable text search."""
+
+    def search(
+        self,
+        query: SearchQuery,
+        search_path: str = ".",
+    ) -> SearchExecution:
+        return SearchExecution(pattern=query.pattern)
 
 
 def run_eval(args) -> None:
@@ -152,7 +163,7 @@ def save_run_manifest(
         "context_budget": context_budget,
         "ranking_weights": asdict(RankingWeights()),
         "diagnostics_summary": diagnostics_summary or {},
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(UTC).isoformat(),
     }
     output_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
@@ -227,7 +238,7 @@ def _ripgrep_version() -> str | None:
 def _parser_version() -> str | None:
     try:
         import tree_sitter
-    except Exception:
+    except ImportError:
         return None
     return getattr(tree_sitter, "__version__", "tree_sitter-installed")
 
@@ -265,9 +276,12 @@ def _build_retriever(
         use_import_graph: bool,
     ) -> list[str]:
         qa = QueryAnalyzer()
+        ripgrep_client = (
+            RipgrepClient() if use_ripgrep else _DisabledRipgrepClient()
+        )
         cg = CandidateGenerator(
             analyzer=qa,
-            ripgrep=RipgrepClient() if use_ripgrep else None,
+            ripgrep=ripgrep_client,
             symbol_index=indexes.symbol_index if use_symbol else SymbolIndex(),
             filename_index=indexes.filename_index,
             import_graph=indexes.import_graph if use_import_graph else ImportGraph(),
