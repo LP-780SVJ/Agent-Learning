@@ -1,0 +1,242 @@
+"""Independent grader for agent coding benchmarks."""
+from __future__ import annotations
+
+import os
+import shlex
+import subprocess
+import time
+from pathlib import Path
+
+from codeteam.evaluation.agent_models import (
+    AgentEvalTask,
+    EvalRunConfig,
+    GraderCommandResult,
+    GradeResult,
+    PatchActorResult,
+    PatchActorStatus,
+)
+
+OUTPUT_LIMIT = 8_000
+
+
+class AgentGrader:
+    """Run hidden acceptance and public regression checks for a task workspace."""
+
+    def __init__(
+        self,
+        *,
+        project_root: Path | None = None,
+        hidden_root: Path | None = None,
+    ) -> None:
+        self.project_root = (project_root or _default_project_root()).resolve()
+        self.hidden_root = (hidden_root or self.project_root / "eval_hidden" / "week4").resolve()
+        self.python = self.project_root / ".venv" / "bin" / "python"
+
+    def grade(
+        self,
+        *,
+        task: AgentEvalTask,
+        workspace_root: Path,
+        actor_result: PatchActorResult,
+        config: EvalRunConfig,
+    ) -> GradeResult:
+        workspace_root = workspace_root.resolve()
+        acceptance_results = tuple(
+            self._run_command(
+                command=command,
+                workspace_root=workspace_root,
+                timeout_seconds=min(task.budget.timeout_seconds, config.task_timeout_seconds),
+            )
+            for command in task.acceptance_commands
+        )
+        regression_results = tuple(
+            self._run_command(
+                command=command,
+                workspace_root=workspace_root,
+                timeout_seconds=min(task.budget.timeout_seconds, config.task_timeout_seconds),
+            )
+            for command in task.regression_commands
+        )
+
+        acceptance_passed = bool(acceptance_results) and all(
+            result.passed for result in acceptance_results
+        )
+        regression_passed = all(result.passed for result in regression_results)
+        within_budget = (
+            actor_result.duration_ms
+            <= min(task.budget.timeout_seconds, config.task_timeout_seconds) * 1000
+            and actor_result.patch_attempts <= config.max_steps
+            and actor_result.repair_attempts <= config.max_repairs
+        )
+        safety_violations = self._find_safety_violations(actor_result.changed_files)
+        security_passed = not safety_violations
+        actor_completed = actor_result.status == PatchActorStatus.COMPLETED
+        success = (
+            actor_completed
+            and acceptance_passed
+            and regression_passed
+            and within_budget
+            and security_passed
+        )
+        failure_category = _failure_category(
+            actor_result=actor_result,
+            acceptance_passed=acceptance_passed,
+            regression_passed=regression_passed,
+            within_budget=within_budget,
+            security_passed=security_passed,
+        )
+
+        return GradeResult(
+            success=success,
+            acceptance_passed=acceptance_passed,
+            regression_passed=regression_passed,
+            within_budget=within_budget,
+            security_passed=security_passed,
+            acceptance_results=acceptance_results,
+            regression_results=regression_results,
+            changed_files=actor_result.changed_files,
+            safety_violations=tuple(safety_violations),
+            failure_category=failure_category,
+            error=actor_result.error if not success else None,
+        )
+
+    def _run_command(
+        self,
+        *,
+        command: str,
+        workspace_root: Path,
+        timeout_seconds: int,
+    ) -> GraderCommandResult:
+        formatted = _format_command(
+            command,
+            python=self.python,
+            workspace_root=workspace_root,
+            project_root=self.project_root,
+            hidden_root=self.hidden_root,
+        )
+        argv = tuple(shlex.split(formatted))
+        started = time.monotonic()
+        env = os.environ.copy()
+        env["PYTHONPATH"] = _prepend_path(
+            str(workspace_root),
+            env.get("PYTHONPATH", ""),
+        )
+        try:
+            result = subprocess.run(  # noqa: UP022
+                list(argv),
+                cwd=workspace_root,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                shell=False,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            return GraderCommandResult(
+                command=formatted,
+                argv=argv,
+                exit_code=None,
+                duration_ms=_elapsed_ms(started),
+                stdout=_limit(error.stdout or ""),
+                stderr=_limit(error.stderr or ""),
+                timed_out=True,
+                error=f"timed out after {timeout_seconds}s",
+            )
+        except OSError as error:
+            return GraderCommandResult(
+                command=formatted,
+                argv=argv,
+                exit_code=None,
+                duration_ms=_elapsed_ms(started),
+                error=f"{type(error).__name__}: {error}",
+            )
+
+        return GraderCommandResult(
+            command=formatted,
+            argv=argv,
+            exit_code=result.returncode,
+            duration_ms=_elapsed_ms(started),
+            stdout=_limit(result.stdout),
+            stderr=_limit(result.stderr),
+        )
+
+    @staticmethod
+    def _find_safety_violations(changed_files: tuple[str, ...]) -> list[str]:
+        violations: list[str] = []
+        for raw_path in changed_files:
+            path = Path(raw_path)
+            parts = path.parts
+            if path.is_absolute():
+                violations.append(f"absolute changed path: {raw_path}")
+            if ".." in parts:
+                violations.append(f"path traversal in changed path: {raw_path}")
+            if parts and parts[0] == ".git":
+                violations.append(f"git metadata changed: {raw_path}")
+        return violations
+
+
+def _format_command(
+    command: str,
+    *,
+    python: Path,
+    workspace_root: Path,
+    project_root: Path,
+    hidden_root: Path,
+) -> str:
+    return command.format(
+        python=str(python),
+        workspace=str(workspace_root),
+        project_root=str(project_root),
+        hidden_root=str(hidden_root),
+    )
+
+
+def _failure_category(
+    *,
+    actor_result: PatchActorResult,
+    acceptance_passed: bool,
+    regression_passed: bool,
+    within_budget: bool,
+    security_passed: bool,
+) -> str | None:
+    if actor_result.status == PatchActorStatus.PROVIDER_BLOCKED:
+        return "provider_blocked"
+    if actor_result.status == PatchActorStatus.NO_PATCH:
+        return "no_patch"
+    if actor_result.status == PatchActorStatus.PATCH_FAILED:
+        return "patch_failed"
+    if actor_result.status == PatchActorStatus.FAILED:
+        return "actor_failed"
+    if not security_passed:
+        return "security_failed"
+    if not within_budget:
+        return "budget_exceeded"
+    if not acceptance_passed:
+        return "acceptance_failed"
+    if not regression_passed:
+        return "regression_failed"
+    return None
+
+
+def _prepend_path(path: str, existing: str) -> str:
+    if not existing:
+        return path
+    return f"{path}{os.pathsep}{existing}"
+
+
+def _limit(value: str | bytes) -> str:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    if len(value) <= OUTPUT_LIMIT:
+        return value
+    return value[:OUTPUT_LIMIT] + "\n... <truncated>"
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
+
+
+def _default_project_root() -> Path:
+    return Path(__file__).resolve().parents[2]

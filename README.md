@@ -24,14 +24,14 @@ The first four weeks are now at a closeout baseline.
 | Repair and failure recovery | Implemented foundation | `tests/repair/`, `tests/failures/`, `tests/agent/` |
 | Durable session and resume | Implemented | `tests/session/` |
 | CLI product layer | Implemented | `tests/cli/`, subprocess E2E |
-| 15-task coding benchmark | Designed, not run | `evals/week4/agent_task_suite_v1.jsonl` |
+| Agent EvalRunner / Grader | Implemented V1 | `codeteam/evaluation/agent_runner.py`, `eval_hidden/week4/` |
+| 15-task coding benchmark | Harness run with null actor; real LLM blocked by egress approval | `evals/week4/agent_runs/` |
 
 Latest closeout evidence:
 
 ```text
-normal sandbox:      1192 passed, 6 skipped
-elevated terminal:   1198 passed
-Docker integration:  42 passed
+normal sandbox:      1195 passed, 6 skipped
+Docker integration:  42 passed in prior elevated closeout run
 ```
 
 The current `codeteam run` command is still a productized shell around deterministic planning. It creates durable sessions and exercises orchestration, but it does not yet run a real LLM-backed patch-producing actor. For that reason the Week4 Day7 15-task task success rate is intentionally not claimed yet.
@@ -66,6 +66,7 @@ Core CLI commands:
 .venv/bin/python -m codeteam.cli.app inspect-repo . --format json
 .venv/bin/python -m codeteam.cli.app context "refresh token error path" --path tests/fixtures/test_repo --top-k 5 --budget 1024 --format json
 .venv/bin/python -m codeteam.cli.app eval --dataset evals/week2/file_retrieval.jsonl --repo tests/fixtures/test_repo --methods filename,ripgrep,ripgrep_symbol,hybrid --output evals/week2
+.venv/bin/python -m codeteam.cli.app agent-eval --suite evals/week4/agent_task_suite_v1.jsonl --output evals/week4/agent_runs/null_baseline --actor null --mode baseline
 .venv/bin/python -m codeteam.cli.app run "inspect this repository task" --repo .
 ```
 
@@ -111,7 +112,7 @@ codeteam/
 ├── llm/                           # provider-neutral model client pieces
 ├── agent/                         # repository inspection and orchestrator
 ├── cli/                           # Typer CLI and commands
-└── evaluation/                    # retrieval eval models/metrics/runner
+└── evaluation/                    # retrieval eval + task-level agent eval
 ```
 
 Detailed architecture notes are maintained in:
@@ -216,8 +217,9 @@ Capabilities:
 - CLI commands: `run`, `resume`, `diff`, `rollback`.
 - CLI invalid request handling with clean exit code `2`.
 - SIGINT E2E: `run` pauses a session, returns `130`, and `resume` rebuilds runtime in a new process.
+- Independent `agent-eval` path with `LLMPatchGenerator`, `PatchActor`, fresh workspace runner, hidden oracle grader, null baseline, and ablation modes.
 
-Important limitation: `run` is not yet a full autonomous coding task actor. The next engineering step is connecting a real LLM planner/patch actor, hidden-oracle EvalRunner, and repair loop into one end-to-end benchmarkable path.
+Important limitation: `run` is not yet a full autonomous coding task actor. The independent eval path can call a real LLM patch actor, but the latest real provider run was blocked by network/API egress approval. Null-actor benchmark runs prove the harness, not task-solving ability.
 
 ## Evaluation
 
@@ -227,7 +229,9 @@ Current evaluation artifacts:
 - `evals/medium_repo/file_retrieval.jsonl`: more realistic medium fixture benchmark.
 - `evals/week4/week2_retrieval/`: fresh Week4 rerun of the Week2 suite.
 - `evals/week4/medium_retrieval/`: fresh Week4 rerun of the medium suite.
-- `evals/week4/agent_task_suite_v1.jsonl`: 15-task agent benchmark design.
+- `evals/week4/agent_task_suite_v1.jsonl`: 15-task agent benchmark suite.
+- `eval_hidden/week4/`: hidden oracle V1 for the 15 task suite.
+- `evals/week4/agent_runs/`: null baseline, null ablations, and LLM smoke outputs.
 - `evals/week4/EVALUATION_WEEK4.md`: Week4 closeout report.
 - `test_log/2026-08-22_week4_day7_evaluation_log.md`: command log and conclusions.
 
@@ -254,10 +258,14 @@ Interpretation:
 15-task coding benchmark status:
 
 ```text
-designed: yes
-run:      no
-reason:   no real patch-producing actor yet
+suite:         yes
+hidden oracle: yes, V1
+null baseline: 15 tasks, 0 success, 4 hidden acceptance pass, 14 regression pass
+null ablation: direct/single-shot/no-compaction/naive-compaction harness runs complete
+real LLM:      blocked by network/API egress approval in this environment
 ```
+
+`LLMPatchGenerator` and `PatchActor` exist in the independent eval path. A trustworthy success rate still requires an explicitly approved provider endpoint and a full real-actor run.
 
 The project intentionally does not claim a task success rate until CodeTeam has an actor/judge evaluation harness with hidden acceptance tests, regression tests, fixed budgets, and safety invariants.
 

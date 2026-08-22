@@ -1,0 +1,12 @@
+{
+  "run_id": "no_compaction-f2293575",
+  "mode": "no_compaction",
+  "provider_id": "openai-compatible",
+  "model_id": "null",
+  "planning_enabled": true,
+  "repair_enabled": true,
+  "compaction_mode": "none",
+  "context_budget": 4096,
+  "task_count": 15,
+  "keep_workspaces": false
+}

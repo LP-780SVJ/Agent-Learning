@@ -1,0 +1,10 @@
+{
+  "run_id": "no_compaction-f2293575",
+  "mode": "no_compaction",
+  "task_count": 15,
+  "success_count": 0,
+  "provider_blocked_count": 0,
+  "acceptance_passed_count": 4,
+  "regression_passed_count": 14,
+  "security_passed_count": 15
+}

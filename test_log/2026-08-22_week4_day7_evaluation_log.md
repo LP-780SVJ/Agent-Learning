@@ -136,3 +136,81 @@ Recommended next phase:
 2. Address any P0/P1/P2 findings from that review.
 3. Build a real Day7 EvalRunner/Grader and patch actor before claiming task success rate.
 4. Treat medium_repo retrieval misses as the next context-engine improvement queue.
+
+## 2026-08-23 Update: Agent Eval Harness Implemented
+
+The previous "15-task coding benchmark: SPECIFIED_NOT_RUN" conclusion is now updated.
+
+New implementation:
+
+- `LLMPatchGenerator` extracts unified diffs from real LLM output.
+- `PatchActor` builds context, optionally plans, generates a patch, applies it with `GitWorkspace`, and records patch/tokens/events.
+- `AgentEvalRunner` creates an isolated git workspace per task from the configured fixture/base commit.
+- `AgentGrader` runs hidden acceptance commands, visible regression commands, budget checks, and changed-file safety checks.
+- `codeteam agent-eval` exposes the benchmark runner.
+- `eval_hidden/week4/` contains hidden oracle V1 for the 15-task suite.
+
+New commands and results:
+
+```bash
+.venv/bin/python -m pytest tests/evaluation/test_agent_eval_runner.py tests/evaluation/test_eval_command.py -q
+# 5 passed
+```
+
+```bash
+.venv/bin/python -m pytest -q
+# 1195 passed, 6 skipped in 18.62s
+```
+
+```bash
+.venv/bin/python -m ruff check \
+  codeteam/evaluation/agent_models.py \
+  codeteam/evaluation/agent_grader.py \
+  codeteam/evaluation/agent_runner.py \
+  codeteam/evaluation/patch_actor.py \
+  codeteam/cli/agent_eval_command.py \
+  codeteam/cli/app.py \
+  tests/evaluation/test_agent_eval_runner.py \
+  eval_hidden/week4
+# All checks passed
+```
+
+```bash
+.venv/bin/python -m codeteam.cli.app agent-eval \
+  --suite evals/week4/agent_task_suite_v1.jsonl \
+  --output evals/week4/agent_runs/null_baseline \
+  --actor null \
+  --mode baseline \
+  --keep-workspaces
+# 15 tasks, 0 success, 0 provider blocked, 4 acceptance passed, 14 regression passed
+```
+
+```bash
+.venv/bin/python -m codeteam.cli.app agent-eval \
+  --suite evals/week4/agent_task_suite_v1.jsonl \
+  --output evals/week4/agent_runs/null_ablations \
+  --actor null \
+  --mode ablations
+# direct_execute / single_shot / no_compaction / naive_compaction all ran
+# each mode: 15 tasks, 0 success, 4 acceptance passed, 14 regression passed
+```
+
+```bash
+.venv/bin/python -m codeteam.cli.app agent-eval \
+  --suite evals/week4/agent_task_suite_v1.jsonl \
+  --output evals/week4/agent_runs/llm_smoke \
+  --actor llm \
+  --mode baseline \
+  --limit 1
+# provider_blocked: URLError DNS failure in managed sandbox
+```
+
+An elevated network retry was requested but rejected by runtime approval review because it would send repository task/context data to an external LLM endpoint whose concrete destination had not been explicitly approved in this turn.
+
+Updated Day7 conclusion:
+
+- EvalRunner / Grader / LLMPatchGenerator / PatchActor: IMPLEMENTED V1.
+- 15-task benchmark harness: RUN with null actor baseline.
+- Ablation harness: RUN with null actor across direct execute, single shot, no compaction, and naive compaction.
+- Real LLM benchmark: BLOCKED_BY_APPROVAL/API_EGRESS.
+- Valid task-solving success rate: NOT CLAIMED.

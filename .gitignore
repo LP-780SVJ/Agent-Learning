@@ -20,6 +20,7 @@ dist/
 .codeteam/backups/
 .codeteam/sessions/
 .claude/worktrees/
+evals/week4/agent_runs/**/workspaces/
 
 # Aider artifacts
 .aider.chat.history.md

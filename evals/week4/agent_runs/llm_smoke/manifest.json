@@ -1,0 +1,12 @@
+{
+  "run_id": "baseline-b39b025c",
+  "mode": "baseline",
+  "provider_id": "openai-compatible",
+  "model_id": "deepseek-v4-pro",
+  "planning_enabled": true,
+  "repair_enabled": true,
+  "compaction_mode": "structured",
+  "context_budget": 4096,
+  "task_count": 1,
+  "keep_workspaces": false
+}

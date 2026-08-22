@@ -1,0 +1,12 @@
+{
+  "run_id": "single_shot-f34ef324",
+  "mode": "single_shot",
+  "provider_id": "openai-compatible",
+  "model_id": "null",
+  "planning_enabled": true,
+  "repair_enabled": false,
+  "compaction_mode": "structured",
+  "context_budget": 4096,
+  "task_count": 15,
+  "keep_workspaces": false
+}

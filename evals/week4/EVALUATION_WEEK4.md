@@ -1,10 +1,11 @@
 # Week 4 Day 7 Evaluation Report
 
-Date: 2026-08-22
+Date: 2026-08-23
 
-CodeTeam commit under evaluation: `56490a1cd858479bf0bb7a98635a0aa337e85365`
+CodeTeam state under evaluation: `101d95b` plus the current Week4 Day7
+agent-eval working-tree implementation.
 
-This report is a four-week closeout evaluation, not a claim that CodeTeam is already a full autonomous coding benchmark runner. The current CLI can inspect, retrieve context, create durable sessions, pause/resume, diff/rollback, enforce command policy, and execute Docker sandbox checks. The production `codeteam run` path still uses a deterministic `MockPlanner` shell, so the 15-task coding benchmark is specified but not executed as a real patch-producing agent.
+This report is a four-week closeout evaluation, not a claim that CodeTeam is already a full autonomous coding benchmark runner. The current CLI can inspect, retrieve context, create durable sessions, pause/resume, diff/rollback, enforce command policy, execute Docker sandbox checks, and run a task-level agent-eval harness. The production `codeteam run` path still uses a deterministic `MockPlanner` shell; real patch generation now exists in the independent evaluation path as `LLMPatchGenerator` + `PatchActor`.
 
 ## Reproducibility
 
@@ -15,13 +16,15 @@ Key configuration:
 | Field | Value |
 |---|---|
 | Python command | `.venv/bin/python` |
-| Repo commit | `56490a1cd858479bf0bb7a98635a0aa337e85365` |
+| Repo baseline commit | `101d95b` |
 | Retrieval Top K | 5 |
 | Retrieval methods | `filename,ripgrep,ripgrep_symbol,hybrid` |
 | Week2 dataset | `evals/week2/file_retrieval.jsonl` |
 | Medium dataset | `evals/medium_repo/file_retrieval.jsonl` |
-| Week4 task suite draft | `evals/week4/agent_task_suite_v1.jsonl` |
-| Real LLM smoke | attempted twice; blocked by provider overload |
+| Week4 task suite | `evals/week4/agent_task_suite_v1.jsonl` |
+| Hidden oracle V1 | `eval_hidden/week4/` |
+| Agent eval outputs | `evals/week4/agent_runs/` |
+| Real LLM smoke | local sandbox DNS failed; elevated network call rejected by egress approval policy |
 | Docker boundary | passed with elevated terminal access |
 
 ## Executed Commands
@@ -34,14 +37,17 @@ Key configuration:
 .venv/bin/python -m codeteam.cli.app eval --dataset evals/medium_repo/file_retrieval.jsonl --repo tests/fixtures/medium_repo --methods filename,ripgrep,ripgrep_symbol,hybrid --output evals/week4/medium_retrieval
 .venv/bin/python evals/evaluate_day4.py
 .venv/bin/python evals/w4d1_llm_smoke.py
+.venv/bin/python -m codeteam.cli.app agent-eval --suite evals/week4/agent_task_suite_v1.jsonl --output evals/week4/agent_runs/null_baseline --actor null --mode baseline --keep-workspaces
+.venv/bin/python -m codeteam.cli.app agent-eval --suite evals/week4/agent_task_suite_v1.jsonl --output evals/week4/agent_runs/null_ablations --actor null --mode ablations
+.venv/bin/python -m codeteam.cli.app agent-eval --suite evals/week4/agent_task_suite_v1.jsonl --output evals/week4/agent_runs/llm_smoke --actor llm --mode baseline --limit 1
 ```
 
 ## Regression Results
 
 | Check | Result | Notes |
 |---|---:|---|
-| Full pytest, normal sandbox | `1192 passed, 6 skipped` | Docker skipped because default sandbox cannot access Colima socket. |
-| Full pytest, elevated terminal | `1198 passed` | Docker integration executed; no skips. |
+| Full pytest, normal sandbox | `1195 passed, 6 skipped` | Docker skipped because default sandbox cannot access Colima socket. |
+| Full pytest, elevated terminal | `1198 passed` | Prior closeout run before agent-eval tests; Docker integration executed; no skips. |
 | Focused Week3/Week4 runtime tests | `314 passed, 6 skipped` | CLI, session, sandbox, execution, git; skips are Docker-only in normal sandbox. |
 | Docker sandbox boundary, elevated | `42 passed` | Workspace read/write succeeds; host secret, network, root FS write, socket checks pass. |
 | CLI tests | included in full run | Invalid `--format` now exits 2 without traceback; SIGINT pause/resume E2E covered. |
@@ -99,19 +105,25 @@ This 5-case script is retained as a historical smoke test. The newer CLI eval wi
 
 ## Real LLM Smoke
 
-`evals/w4d1_llm_smoke.py` was attempted twice using local `secrets.local.env`.
+`evals/w4d1_llm_smoke.py` was attempted earlier using local `secrets.local.env`.
 
-Both attempts reached the model path and failed with:
+Earlier attempts reached the model path and failed with:
 
 ```text
 model_overloaded: 模型服务暂时繁忙，正在重试。 [max_attempts_exhausted] (来源: URLError)
 ```
 
-This is recorded as `BLOCKED_BY_PROVIDER`, not as local CodeTeam success evidence. It does show that the smoke script can load configuration and enter the real provider path.
+The new `codeteam agent-eval --actor llm --limit 1` path was also attempted. In the managed sandbox it failed before reaching the provider:
+
+```text
+URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>
+```
+
+An elevated retry was requested, but the runtime approval review rejected it because the command would send repository task/context data to an external LLM endpoint whose concrete destination had not been explicitly approved in this turn. This is recorded as `BLOCKED_BY_APPROVAL/API_EGRESS`, not as a local implementation failure.
 
 ## 15-Task Agent Evaluation Status
 
-The suite draft is stored at `evals/week4/agent_task_suite_v1.jsonl`.
+The suite is stored at `evals/week4/agent_task_suite_v1.jsonl`; hidden oracle V1 is stored under `eval_hidden/week4/`.
 
 | Split | Count | Purpose |
 |---|---:|---|
@@ -125,9 +137,17 @@ The suite draft is stored at `evals/week4/agent_task_suite_v1.jsonl`.
 | Refactor | 3 |
 | Maintenance | 3 |
 
-Current status: `NOT_RUN`.
+Current executable harness status: `RUN_WITH_NULL_ACTOR`.
 
-Reason: the current `codeteam run` product path does not yet produce real patches from an LLM-backed actor. Running the 15 tasks today would produce misleading numbers. The correct next step is to implement the independent EvalRunner/Grader and a real patch actor, then run this suite with hidden acceptance tests.
+Null actor baseline output: `evals/week4/agent_runs/null_baseline/`.
+
+| Actor | Mode | Tasks | Success | Provider Blocked | Acceptance Passed | Regression Passed |
+|---|---|---:|---:|---:|---:|---:|
+| null | baseline | 15 | 0 | 0 | 4 | 14 |
+
+Interpretation: the runner, isolated workspace setup, hidden acceptance commands, regression commands, and result serialization work end to end. The success count is intentionally 0 because the null actor produces no patch; the grader requires `actor_status=completed` as well as passing tests, so pre-solved fixture behavior cannot inflate success.
+
+Real LLM actor status: `BLOCKED_BY_APPROVAL/API_EGRESS` after one-task smoke. The implementation path exists, but a valid coding success rate still requires explicit egress approval for the concrete provider endpoint and then a real run.
 
 ## Ablation Status
 
@@ -136,17 +156,26 @@ Reason: the current `codeteam run` product path does not yet produce real patche
 | Retrieval methods | RUN | `filename` / `ripgrep` / `ripgrep_symbol` / `hybrid` results above. |
 | Docker sandbox boundary | RUN | Elevated full pytest and sandbox integration passed. |
 | CLI invalid format / SIGINT resume | RUN | Covered by subprocess tests. |
-| Plan-first vs direct execute | SPECIFIED_NOT_RUN | Requires real patch actor and fixed EvalRunner. |
-| Repair loop vs single shot | SPECIFIED_NOT_RUN | Requires real patch actor and hidden oracle. |
-| Structured compaction vs truncation | SPECIFIED_NOT_RUN | Data model and tests exist; task-level eval runner still missing. |
+| Plan-first vs direct execute | HARNESS_RUN_NULL_ACTOR | `null_ablations/direct_execute`; real comparison blocked until LLM egress is approved. |
+| Repair loop vs single shot | HARNESS_RUN_NULL_ACTOR | `null_ablations/single_shot`; runner has a grader-driven repair loop, but null actor cannot demonstrate lift. |
+| Structured compaction vs no/naive compaction | HARNESS_RUN_NULL_ACTOR | `null_ablations/no_compaction` and `null_ablations/naive_compaction`; current PatchActor records compaction mode but does not yet run long multi-turn compaction traces. |
+
+Null ablation outputs:
+
+| Mode | Tasks | Success | Provider Blocked | Acceptance Passed | Regression Passed |
+|---|---:|---:|---:|---:|---:|
+| direct_execute | 15 | 0 | 0 | 4 | 14 |
+| single_shot | 15 | 0 | 0 | 4 | 14 |
+| no_compaction | 15 | 0 | 0 | 4 | 14 |
+| naive_compaction | 15 | 0 | 0 | 4 | 14 |
 
 ## Failure Cases
 
 | ID | Status | Component | Observation | Next Action |
 |---|---|---|---|---|
 | W4-F001 | OPEN | Retrieval | Medium business/cross-module queries often miss indirect gold files. | Improve semantic query expansion, dependency fanout, and config/doc seeding. |
-| W4-F002 | OPEN | Evaluation | 15-task coding suite is designed but not executable as a true actor/judge benchmark. | Build EvalRunner, hidden tests, fresh worktree harness, and patch actor. |
-| W4-F003 | ACCEPTED | Provider | Real LLM smoke blocked by external `model_overloaded`. | Retry with stable provider/model before claiming real LLM evidence. |
+| W4-F002 | PARTIAL | Evaluation | 15-task coding suite now has EvalRunner, Grader, hidden oracle V1, and PatchActor, but only null actor runs completed. | Approve concrete LLM egress and run real actor baseline plus ablations. |
+| W4-F003 | ACCEPTED | Provider/API Egress | Real LLM smoke previously hit `model_overloaded`; current managed sandbox DNS failed and elevated egress was rejected by policy review. | Explicitly approve the concrete provider/base URL before claiming real LLM evidence. |
 | W4-F004 | OPEN | Static hygiene | Full-repo ruff has many historical style issues; scoped touched-module ruff passes. | Decide whether to run a separate lint cleanup branch. |
 | W4-F005 | ACCEPTED | Type checking | Full mypy still has historical import-chain/stub debt. | Excluded by user for this closeout; keep tracked as type debt. |
 
@@ -154,4 +183,4 @@ Reason: the current `codeteam run` product path does not yet produce real patche
 
 Current four-week status: functional runtime foundations are in good shape. The repository passes full tests, including real Docker boundaries when terminal permissions allow it. The strongest implemented evidence is around Git safety, command policy, sandbox boundaries, durable sessions, CLI contracts, and retrieval evaluation.
 
-The biggest remaining product gap is the true coding actor/evaluation loop: CodeTeam does not yet run a real LLM-backed patch-producing agent through 15 hidden-oracle tasks. Day7 therefore closes with a reproducible evaluation baseline and a clear next benchmark design, not with an inflated task success rate.
+The biggest remaining product gap is now narrower: the independent coding benchmark loop exists, but a real LLM-backed run is blocked by provider/egress approval rather than by missing local harness code. Day7 therefore closes with executable benchmark infrastructure, null-actor baseline evidence, and a clear requirement for an explicitly approved provider run before claiming task-solving performance.

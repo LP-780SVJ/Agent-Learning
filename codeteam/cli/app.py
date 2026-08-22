@@ -24,6 +24,22 @@ class CliOutputFormat(str, Enum):
     JSON = "json"
 
 
+class AgentEvalActor(str, Enum):
+    LLM = "llm"
+    NULL = "null"
+
+
+class AgentEvalMode(str, Enum):
+    BASELINE = "baseline"
+    ABLATIONS = "ablations"
+    ALL = "all"
+
+
+class AgentEvalSplitOption(str, Enum):
+    DEV = "dev"
+    HELDOUT = "heldout"
+
+
 @app.command("inspect-repo")
 def inspect_repo(
     path: Annotated[
@@ -107,6 +123,62 @@ def eval_command(
         output=str(output),
     )
     run_eval(args)
+
+
+@app.command("agent-eval")
+def agent_eval(
+    suite: Annotated[
+        Path,
+        typer.Option("--suite", help="Agent task suite JSONL 文件"),
+    ] = Path("evals/week4/agent_task_suite_v1.jsonl"),
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="结果输出目录"),
+    ] = Path("evals/week4/agent_runs/latest"),
+    actor: Annotated[
+        AgentEvalActor,
+        typer.Option("--actor", help="patch actor: llm 或 null"),
+    ] = AgentEvalActor.LLM,
+    mode: Annotated[
+        AgentEvalMode,
+        typer.Option("--mode", help="baseline, ablations, all"),
+    ] = AgentEvalMode.BASELINE,
+    split: Annotated[
+        AgentEvalSplitOption | None,
+        typer.Option("--split", help="只运行 dev 或 heldout"),
+    ] = None,
+    task_id: Annotated[
+        list[str] | None,
+        typer.Option("--task-id", help="只运行指定 task，可重复"),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", help="最多运行多少个 task"),
+    ] = None,
+    context_budget: Annotated[
+        int,
+        typer.Option("--context-budget", help="Patch actor context token budget"),
+    ] = 4096,
+    keep_workspaces: Annotated[
+        bool,
+        typer.Option("--keep-workspaces", help="保留每个 task 的临时 workspace"),
+    ] = False,
+) -> None:
+    """运行 Week4 task-level coding benchmark。"""
+    from codeteam.cli.agent_eval_command import run_agent_eval
+
+    args = Namespace(
+        suite=str(suite),
+        output=str(output),
+        actor=actor.value,
+        mode=mode.value,
+        split=split.value if split is not None else None,
+        task_id=task_id,
+        limit=limit,
+        context_budget=context_budget,
+        keep_workspaces=keep_workspaces,
+    )
+    run_agent_eval(args)
 
 
 @app.command("run")
