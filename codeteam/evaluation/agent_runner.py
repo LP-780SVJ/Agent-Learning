@@ -68,6 +68,16 @@ class AgentEvalRunner:
         results: list[AgentEvalTaskResult] = []
         for task in tasks:
             task_workspace = workspace_root / _safe_name(task.task_id)
+            pristine_workspace = workspace_root / "_pristine" / _safe_name(task.task_id)
+            self._prepare_workspace(task=task, destination=pristine_workspace)
+            pristine_acceptance_results = self.grader.check_pristine_acceptance(
+                task=task,
+                workspace_root=pristine_workspace,
+                config=config,
+            )
+            if not self.keep_workspaces:
+                shutil.rmtree(pristine_workspace, ignore_errors=True)
+
             self._prepare_workspace(task=task, destination=task_workspace)
             started = time.monotonic()
             actor_result = self.actor.run(
@@ -80,11 +90,13 @@ class AgentEvalRunner:
                 workspace_root=task_workspace,
                 actor_result=actor_result,
                 config=config,
+                pristine_acceptance_results=pristine_acceptance_results,
             )
             repair_attempts = 0
             while (
                 config.repair_enabled
                 and not grade.success
+                and grade.failure_category != "oracle_not_discriminative"
                 and actor_result.status in {
                     PatchActorStatus.COMPLETED,
                     PatchActorStatus.PATCH_FAILED,
@@ -106,6 +118,7 @@ class AgentEvalRunner:
                     workspace_root=task_workspace,
                     actor_result=actor_result,
                     config=config,
+                    pristine_acceptance_results=pristine_acceptance_results,
                 )
             duration_ms = int((time.monotonic() - started) * 1000)
             results.append(
@@ -124,8 +137,10 @@ class AgentEvalRunner:
                     regression_passed=grade.regression_passed,
                     within_budget=grade.within_budget,
                     security_passed=grade.security_passed,
+                    pristine_acceptance_passed=grade.pristine_acceptance_passed,
                     acceptance_results=grade.acceptance_results,
                     regression_results=grade.regression_results,
+                    pristine_acceptance_results=grade.pristine_acceptance_results,
                     duration_ms=duration_ms,
                     changed_files=grade.changed_files,
                     patch_attempts=actor_result.patch_attempts,
@@ -134,6 +149,7 @@ class AgentEvalRunner:
                     input_tokens=actor_result.input_tokens,
                     output_tokens=actor_result.output_tokens,
                     cost_usd=actor_result.cost_usd,
+                    artifact_paths=actor_result.artifact_paths,
                     failure_category=grade.failure_category,
                     error=grade.error,
                 )
@@ -163,6 +179,7 @@ class AgentEvalRunner:
                     "context_budget": config.context_budget,
                     "task_count": len(tasks),
                     "keep_workspaces": self.keep_workspaces,
+                    "pristine_oracle_check": True,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -316,6 +333,9 @@ def summarize_agent_eval_results(
         acceptance_passed_count=sum(result.acceptance_passed for result in results),
         regression_passed_count=sum(result.regression_passed for result in results),
         security_passed_count=sum(result.security_passed for result in results),
+        pristine_acceptance_passed_count=sum(
+            result.pristine_acceptance_passed for result in results
+        ),
     )
 
 
@@ -327,6 +347,9 @@ def _summarize_grade_failure(grade: GradeResult) -> str:
     lines: list[str] = []
     if grade.failure_category:
         lines.append(f"failure_category: {grade.failure_category}")
+    if grade.error:
+        lines.append("actor_error:")
+        lines.append(grade.error[-2000:])
     for result in (*grade.acceptance_results, *grade.regression_results):
         if result.passed:
             continue
@@ -355,6 +378,9 @@ def _merge_actor_results(
             "cost_usd": previous.cost_usd + current.cost_usd,
             "changed_files": tuple(
                 dict.fromkeys((*previous.changed_files, *current.changed_files))
+            ),
+            "artifact_paths": tuple(
+                dict.fromkeys((*previous.artifact_paths, *current.artifact_paths))
             ),
             "events": (*previous.events, *current.events),
         },

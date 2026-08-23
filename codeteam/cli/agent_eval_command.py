@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import json
 import os
+import socket
+import ssl
+import time
+import urllib.error
 import urllib.request
 from argparse import Namespace
+from dataclasses import dataclass
 from pathlib import Path
 
 from codeteam.evaluation.agent_grader import AgentGrader
@@ -27,6 +32,34 @@ from codeteam.schemas.messages import Message
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SECRETS_PATH = PROJECT_ROOT / "secrets.local.env"
+DEFAULT_LLM_TIMEOUT_SECONDS = 120.0
+DEFAULT_LLM_MAX_ATTEMPTS = 4
+DEFAULT_LLM_BACKOFF_SECONDS = 1.0
+
+
+@dataclass(frozen=True)
+class ProviderAttemptFailure:
+    attempt: int
+    category: str
+    retryable: bool
+    message: str
+    status_code: int | None = None
+
+    def render(self) -> str:
+        status = f" status={self.status_code}" if self.status_code is not None else ""
+        retry = "retryable" if self.retryable else "non-retryable"
+        return f"attempt {self.attempt}: {self.category}{status} ({retry}): {self.message}"
+
+
+class ProviderRequestError(RuntimeError):
+    """Raised after a provider request exhausts retries or fails permanently."""
+
+    def __init__(self, failures: list[ProviderAttemptFailure]) -> None:
+        self.failures = tuple(failures)
+        super().__init__(
+            "provider request failed: "
+            + " | ".join(failure.render() for failure in self.failures)
+        )
 
 
 def run_agent_eval(args: Namespace) -> None:
@@ -236,6 +269,8 @@ def _make_complete(config: dict[str, str]):
 def _chat_completion_request(
     config: dict[str, str],
     messages: list[Message],
+    *,
+    sleep_func=time.sleep,
 ) -> str:
     body = json.dumps(
         {
@@ -246,14 +281,185 @@ def _chat_completion_request(
             ],
         }
     ).encode("utf-8")
-    request = urllib.request.Request(
-        f"{config['CODETEAM_LLM_BASE_URL'].rstrip('/')}/chat/completions",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {config['CODETEAM_LLM_API_KEY']}",
-            "Content-Type": "application/json",
-        },
+    max_attempts = _positive_int(
+        config.get("CODETEAM_LLM_MAX_ATTEMPTS"),
+        default=DEFAULT_LLM_MAX_ATTEMPTS,
     )
-    with urllib.request.urlopen(request, timeout=120) as response:
-        data = json.loads(response.read())
-    return data["choices"][0]["message"]["content"]
+    timeout_seconds = _positive_float(
+        config.get("CODETEAM_LLM_TIMEOUT_SECONDS"),
+        default=DEFAULT_LLM_TIMEOUT_SECONDS,
+    )
+    backoff_seconds = _positive_float(
+        config.get("CODETEAM_LLM_BACKOFF_SECONDS"),
+        default=DEFAULT_LLM_BACKOFF_SECONDS,
+    )
+    failures: list[ProviderAttemptFailure] = []
+
+    for attempt in range(1, max_attempts + 1):
+        request = urllib.request.Request(
+            f"{config['CODETEAM_LLM_BASE_URL'].rstrip('/')}/chat/completions",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {config['CODETEAM_LLM_API_KEY']}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                data = json.loads(response.read())
+            return data["choices"][0]["message"]["content"]
+        except Exception as error:
+            failure = _classify_provider_failure(error, attempt=attempt)
+            failures.append(failure)
+            if not failure.retryable or attempt >= max_attempts:
+                raise ProviderRequestError(failures) from error
+            sleep_func(backoff_seconds * (2 ** (attempt - 1)))
+
+    raise ProviderRequestError(failures)
+
+
+def _classify_provider_failure(
+    error: Exception,
+    *,
+    attempt: int,
+) -> ProviderAttemptFailure:
+    if isinstance(error, urllib.error.HTTPError):
+        body = _read_http_error_body(error)
+        message = body or str(error)
+        if error.code == 429:
+            return ProviderAttemptFailure(
+                attempt=attempt,
+                category="rate_limit",
+                retryable=True,
+                message=message,
+                status_code=error.code,
+            )
+        if error.code in {408, 504}:
+            return ProviderAttemptFailure(
+                attempt=attempt,
+                category="timeout",
+                retryable=True,
+                message=message,
+                status_code=error.code,
+            )
+        if error.code in {500, 502, 503}:
+            return ProviderAttemptFailure(
+                attempt=attempt,
+                category="server",
+                retryable=True,
+                message=message,
+                status_code=error.code,
+            )
+        if error.code in {401, 403}:
+            return ProviderAttemptFailure(
+                attempt=attempt,
+                category="auth",
+                retryable=False,
+                message=message,
+                status_code=error.code,
+            )
+        return ProviderAttemptFailure(
+            attempt=attempt,
+            category="invalid_request" if error.code == 400 else "http",
+            retryable=False,
+            message=message,
+            status_code=error.code,
+        )
+
+    if isinstance(error, urllib.error.URLError):
+        reason = error.reason
+        category = _network_failure_category(reason)
+        return ProviderAttemptFailure(
+            attempt=attempt,
+            category=category,
+            retryable=category in {"timeout", "ssl_eof", "network"},
+            message=str(reason),
+        )
+
+    if isinstance(error, TimeoutError | socket.timeout):
+        return ProviderAttemptFailure(
+            attempt=attempt,
+            category="timeout",
+            retryable=True,
+            message=str(error),
+        )
+
+    if isinstance(error, ssl.SSLError):
+        category = "ssl_eof" if _looks_like_ssl_eof(error) else "ssl"
+        return ProviderAttemptFailure(
+            attempt=attempt,
+            category=category,
+            retryable=category == "ssl_eof",
+            message=str(error),
+        )
+
+    if isinstance(error, OSError):
+        category = _network_failure_category(error)
+        return ProviderAttemptFailure(
+            attempt=attempt,
+            category=category,
+            retryable=category in {"timeout", "ssl_eof", "network"},
+            message=str(error),
+        )
+
+    return ProviderAttemptFailure(
+        attempt=attempt,
+        category="unknown",
+        retryable=False,
+        message=f"{type(error).__name__}: {error}",
+    )
+
+
+def _network_failure_category(reason: object) -> str:
+    if isinstance(reason, TimeoutError | socket.timeout):
+        return "timeout"
+    if isinstance(reason, ssl.SSLError):
+        return "ssl_eof" if _looks_like_ssl_eof(reason) else "ssl"
+    text = str(reason).lower()
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    if "unexpected_eof" in text or "eof occurred" in text:
+        return "ssl_eof"
+    if (
+        "nodename nor servname provided" in text
+        or "name or service not known" in text
+        or "temporary failure in name resolution" in text
+        or "getaddrinfo" in text
+    ):
+        return "dns"
+    return "network"
+
+
+def _looks_like_ssl_eof(error: BaseException) -> bool:
+    text = str(error).lower()
+    return "unexpected_eof" in text or "eof occurred" in text
+
+
+def _read_http_error_body(error: urllib.error.HTTPError) -> str:
+    try:
+        body = error.read()
+    except OSError:
+        return str(error)
+    if not body:
+        return str(error)
+    return body.decode("utf-8", errors="replace")[:1000]
+
+
+def _positive_int(value: str | None, *, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _positive_float(value: str | None, *, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default

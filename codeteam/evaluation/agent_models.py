@@ -91,6 +91,11 @@ class PatchActorResult(BaseModel):
     changed_files: tuple[str, ...] = ()
     applied_patch: bool = False
     generated_patch_sha256: str | None = None
+    raw_model_output_sha256: str | None = None
+    extracted_patch_sha256: str | None = None
+    artifact_paths: tuple[str, ...] = ()
+    patch_apply_stdout: str = ""
+    patch_apply_stderr: str = ""
     error: str | None = None
     events: tuple[str, ...] = ()
 
@@ -116,8 +121,10 @@ class GradeResult(BaseModel):
     regression_passed: bool
     within_budget: bool
     security_passed: bool
+    pristine_acceptance_passed: bool = False
     acceptance_results: tuple[GraderCommandResult, ...] = ()
     regression_results: tuple[GraderCommandResult, ...] = ()
+    pristine_acceptance_results: tuple[GraderCommandResult, ...] = ()
     changed_files: tuple[str, ...] = ()
     safety_violations: tuple[str, ...] = ()
     failure_category: str | None = None
@@ -139,8 +146,10 @@ class AgentEvalTaskResult(BaseModel):
     regression_passed: bool
     within_budget: bool
     security_passed: bool
+    pristine_acceptance_passed: bool = False
     acceptance_results: tuple[GraderCommandResult, ...] = ()
     regression_results: tuple[GraderCommandResult, ...] = ()
+    pristine_acceptance_results: tuple[GraderCommandResult, ...] = ()
     duration_ms: int
     changed_files: tuple[str, ...] = ()
     patch_attempts: int = 0
@@ -149,6 +158,7 @@ class AgentEvalTaskResult(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
+    artifact_paths: tuple[str, ...] = ()
     failure_category: str | None = None
     error: str | None = None
 
@@ -162,3 +172,4 @@ class AgentEvalRunSummary(BaseModel):
     acceptance_passed_count: int
     regression_passed_count: int
     security_passed_count: int
+    pristine_acceptance_passed_count: int = 0

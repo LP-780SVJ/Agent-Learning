@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from collections.abc import Callable
+from difflib import unified_diff
 from pathlib import Path
 from typing import Protocol
 
@@ -32,6 +34,7 @@ class PatchGenerator(Protocol):
         task: TaskSpec,
         plan: Plan | None,
         context: ContextBuildReport,
+        workspace_root: Path,
         failure_summary: str | None = None,
     ) -> str:
         """Return a unified diff patch."""
@@ -53,6 +56,8 @@ class LLMPatchGenerator:
         self.token_counter = token_counter or ApproximateTokenCounter()
         self.last_input_tokens = 0
         self.last_output_tokens = 0
+        self.last_raw_output = ""
+        self.last_extracted_patch = ""
 
     def generate_patch(
         self,
@@ -60,6 +65,7 @@ class LLMPatchGenerator:
         task: TaskSpec,
         plan: Plan | None,
         context: ContextBuildReport,
+        workspace_root: Path,
         failure_summary: str | None = None,
     ) -> str:
         prompt = self._build_prompt(
@@ -71,7 +77,12 @@ class LLMPatchGenerator:
         self.last_input_tokens = self.token_counter.count_text(prompt)
         raw = self._complete([Message(role="user", content=prompt)])
         self.last_output_tokens = self.token_counter.count_text(raw)
-        return extract_unified_diff(raw)
+        self.last_raw_output = raw
+        patch = patch_from_structured_file_edits(raw, workspace_root=workspace_root)
+        if patch is None:
+            patch = extract_unified_diff(raw)
+        self.last_extracted_patch = patch
+        return patch
 
     @staticmethod
     def _build_prompt(
@@ -112,7 +123,14 @@ class LLMPatchGenerator:
             lines.append("```")
         lines.append("")
         lines.append("## Output")
-        lines.append("Return a patch that can be applied by git apply.")
+        lines.append("Return only one of the supported output formats.")
+        lines.append(
+            "Preferred output is JSON: "
+            '{"files":[{"path":"relative/path.py","content":"full new file content"}]}.'
+        )
+        lines.append(
+            "If JSON is not practical, return a patch that can be applied by git apply."
+        )
         return "\n".join(lines)
 
 
@@ -125,6 +143,7 @@ class NullPatchGenerator:
         task: TaskSpec,
         plan: Plan | None,
         context: ContextBuildReport,
+        workspace_root: Path,
         failure_summary: str | None = None,
     ) -> str:
         return ""
@@ -142,6 +161,97 @@ def extract_unified_diff(text: str) -> str:
     if stripped.upper() in {"NO_PATCH", "NO_CHANGES"}:
         return ""
     return stripped
+
+
+def patch_from_structured_file_edits(
+    text: str,
+    *,
+    workspace_root: Path,
+) -> str | None:
+    payload = _extract_json_object(text)
+    if payload is None:
+        return None
+    files = payload.get("files")
+    if not isinstance(files, list):
+        return None
+
+    patches: list[str] = []
+    for item in files:
+        if not isinstance(item, dict):
+            return None
+        path = item.get("path")
+        content = item.get("content", item.get("new_content"))
+        if not isinstance(path, str) or not isinstance(content, str):
+            return None
+        if _unsafe_structured_edit_path(path):
+            raise ValueError(f"Unsafe structured edit path: {path!r}")
+        patches.append(
+            _full_file_edit_to_patch(
+                path=path,
+                content=content,
+                workspace_root=workspace_root,
+            )
+        )
+
+    return "".join(patches) if patches else None
+
+
+def _extract_json_object(text: str) -> dict | None:
+    stripped = _strip_code_fences(text.strip())
+    try:
+        value = json.loads(stripped)
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            value = json.loads(stripped[start:end + 1])
+        except json.JSONDecodeError:
+            return None
+    return value if isinstance(value, dict) else None
+
+
+def _unsafe_structured_edit_path(path: str) -> bool:
+    candidate = Path(path)
+    parts = candidate.parts
+    return (
+        not path
+        or candidate.is_absolute()
+        or ".." in parts
+        or (bool(parts) and parts[0] == ".git")
+    )
+
+
+def _full_file_edit_to_patch(
+    *,
+    path: str,
+    content: str,
+    workspace_root: Path,
+) -> str:
+    file_path = workspace_root / path
+    old_text = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+    old_lines = old_text.splitlines(keepends=True)
+    new_text = content if content.endswith("\n") else f"{content}\n"
+    new_lines = new_text.splitlines(keepends=True)
+    from_file = f"a/{path}" if file_path.exists() else "/dev/null"
+    diff_lines = list(
+        unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=from_file,
+            tofile=f"b/{path}",
+            lineterm="",
+        )
+    )
+    normalized = [
+        line if line.endswith("\n") else f"{line}\n"
+        for line in diff_lines
+    ]
+    header = f"diff --git a/{path} b/{path}\n"
+    if not file_path.exists():
+        header += "new file mode 100644\n"
+    return header + "".join(normalized)
 
 
 def _strip_code_fences(text: str) -> str:
@@ -189,6 +299,10 @@ class PatchActor:
         events: list[str] = ["actor.started"]
         input_tokens = 0
         output_tokens = 0
+        attempt_no = previous_patch_attempts + 1
+        artifact_paths: list[str] = []
+        raw_model_output_sha: str | None = None
+        extracted_patch_sha: str | None = None
 
         try:
             task_spec = create_task_spec(
@@ -216,11 +330,40 @@ class PatchActor:
                 task=task_spec,
                 plan=plan,
                 context=context,
+                workspace_root=workspace_root,
                 failure_summary=failure_summary,
             )
             events.append("patch.generated")
             input_tokens += getattr(self._patch_generator, "last_input_tokens", 0)
             output_tokens += getattr(self._patch_generator, "last_output_tokens", 0)
+            raw_model_output = getattr(self._patch_generator, "last_raw_output", None)
+            extracted_patch = getattr(
+                self._patch_generator,
+                "last_extracted_patch",
+                patch,
+            )
+            if raw_model_output is not None:
+                raw_model_output_sha = _sha256_text(raw_model_output)
+                artifact_paths.append(
+                    _write_artifact(
+                        workspace_root=workspace_root,
+                        task_id=task.task_id,
+                        attempt_no=attempt_no,
+                        name="raw_model_output.txt",
+                        content=raw_model_output,
+                    )
+                )
+            if extracted_patch is not None:
+                extracted_patch_sha = _sha256_text(extracted_patch)
+                artifact_paths.append(
+                    _write_artifact(
+                        workspace_root=workspace_root,
+                        task_id=task.task_id,
+                        attempt_no=attempt_no,
+                        name="extracted_patch.diff",
+                        content=extracted_patch,
+                    )
+                )
         except Exception as error:  # noqa: BLE001
             return PatchActorResult(
                 task_id=task.task_id,
@@ -233,6 +376,9 @@ class PatchActor:
                 repair_attempts=previous_repair_attempts,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                artifact_paths=tuple(artifact_paths),
+                raw_model_output_sha256=raw_model_output_sha,
+                extracted_patch_sha256=extracted_patch_sha,
                 error=f"{type(error).__name__}: {error}",
                 events=(*events, "actor.provider_blocked"),
             )
@@ -249,6 +395,9 @@ class PatchActor:
                 repair_attempts=previous_repair_attempts,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                artifact_paths=tuple(artifact_paths),
+                raw_model_output_sha256=raw_model_output_sha,
+                extracted_patch_sha256=extracted_patch_sha,
                 error="Patch generator returned an empty patch.",
                 events=(*events, "actor.no_patch"),
             )
@@ -257,6 +406,26 @@ class PatchActor:
         workspace = GitWorkspace(workspace_root)
         patch_result = workspace.apply_patch(patch)
         if not patch_result.applied:
+            if patch_result.stdout:
+                artifact_paths.append(
+                    _write_artifact(
+                        workspace_root=workspace_root,
+                        task_id=task.task_id,
+                        attempt_no=attempt_no,
+                        name="git_apply_stdout.txt",
+                        content=patch_result.stdout,
+                    )
+                )
+            if patch_result.stderr or patch_result.failure_reason:
+                artifact_paths.append(
+                    _write_artifact(
+                        workspace_root=workspace_root,
+                        task_id=task.task_id,
+                        attempt_no=attempt_no,
+                        name="git_apply_stderr.txt",
+                        content=patch_result.stderr or patch_result.failure_reason or "",
+                    )
+                )
             return PatchActorResult(
                 task_id=task.task_id,
                 status=PatchActorStatus.PATCH_FAILED,
@@ -269,11 +438,16 @@ class PatchActor:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 generated_patch_sha256=patch_sha,
-                error=patch_result.failure_reason,
+                raw_model_output_sha256=raw_model_output_sha,
+                extracted_patch_sha256=extracted_patch_sha,
+                artifact_paths=tuple(artifact_paths),
+                patch_apply_stdout=patch_result.stdout,
+                patch_apply_stderr=patch_result.stderr,
+                error=_patch_failure_message(patch_result.failure_reason, patch_result.stderr),
                 events=(*events, "patch.apply_failed"),
             )
 
-        changed_files = tuple(change.path for change in workspace.changed_files())
+        changed_files = tuple(dict.fromkeys(patch_result.affected_paths))
         return PatchActorResult(
             task_id=task.task_id,
             status=PatchActorStatus.COMPLETED,
@@ -289,6 +463,11 @@ class PatchActor:
             changed_files=changed_files,
             applied_patch=True,
             generated_patch_sha256=patch_sha,
+            raw_model_output_sha256=raw_model_output_sha,
+            extracted_patch_sha256=extracted_patch_sha,
+            artifact_paths=tuple(artifact_paths),
+            patch_apply_stdout=patch_result.stdout,
+            patch_apply_stderr=patch_result.stderr,
             events=(*events, "patch.applied", "actor.completed"),
         )
 
@@ -333,3 +512,38 @@ class PatchActor:
 
 def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _write_artifact(
+    *,
+    workspace_root: Path,
+    task_id: str,
+    attempt_no: int,
+    name: str,
+    content: str,
+) -> str:
+    relative = (
+        Path("_artifacts")
+        / _safe_artifact_name(task_id)
+        / f"attempt-{attempt_no:02d}"
+        / name
+    )
+    target = workspace_root.parent / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return relative.as_posix()
+
+
+def _safe_artifact_name(value: str) -> str:
+    return "".join(char if char.isalnum() or char in "-_" else "-" for char in value)
+
+
+def _patch_failure_message(reason: str | None, stderr: str) -> str:
+    parts = [reason or "patch apply failed"]
+    if stderr:
+        parts.append(stderr[-2000:])
+    return "\n".join(parts)

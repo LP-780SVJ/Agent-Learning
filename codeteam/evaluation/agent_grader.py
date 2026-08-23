@@ -17,6 +17,16 @@ from codeteam.evaluation.agent_models import (
 )
 
 OUTPUT_LIMIT = 8_000
+RUNTIME_ARTIFACT_PARTS = {
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+}
+RUNTIME_ARTIFACT_SUFFIXES = {
+    ".pyc",
+    ".pyo",
+}
 
 
 class AgentGrader:
@@ -39,8 +49,12 @@ class AgentGrader:
         workspace_root: Path,
         actor_result: PatchActorResult,
         config: EvalRunConfig,
+        pristine_acceptance_results: tuple[GraderCommandResult, ...] = (),
     ) -> GradeResult:
         workspace_root = workspace_root.resolve()
+        pristine_acceptance_passed = bool(pristine_acceptance_results) and all(
+            result.passed for result in pristine_acceptance_results
+        )
         acceptance_results = tuple(
             self._run_command(
                 command=command,
@@ -68,7 +82,8 @@ class AgentGrader:
             and actor_result.patch_attempts <= config.max_steps
             and actor_result.repair_attempts <= config.max_repairs
         )
-        safety_violations = self._find_safety_violations(actor_result.changed_files)
+        changed_files = _filter_runtime_artifacts(actor_result.changed_files)
+        safety_violations = self._find_safety_violations(changed_files)
         security_passed = not safety_violations
         actor_completed = actor_result.status == PatchActorStatus.COMPLETED
         success = (
@@ -77,6 +92,7 @@ class AgentGrader:
             and regression_passed
             and within_budget
             and security_passed
+            and not pristine_acceptance_passed
         )
         failure_category = _failure_category(
             actor_result=actor_result,
@@ -84,6 +100,7 @@ class AgentGrader:
             regression_passed=regression_passed,
             within_budget=within_budget,
             security_passed=security_passed,
+            pristine_acceptance_passed=pristine_acceptance_passed,
         )
 
         return GradeResult(
@@ -92,12 +109,31 @@ class AgentGrader:
             regression_passed=regression_passed,
             within_budget=within_budget,
             security_passed=security_passed,
+            pristine_acceptance_passed=pristine_acceptance_passed,
             acceptance_results=acceptance_results,
             regression_results=regression_results,
-            changed_files=actor_result.changed_files,
+            pristine_acceptance_results=pristine_acceptance_results,
+            changed_files=changed_files,
             safety_violations=tuple(safety_violations),
             failure_category=failure_category,
             error=actor_result.error if not success else None,
+        )
+
+    def check_pristine_acceptance(
+        self,
+        *,
+        task: AgentEvalTask,
+        workspace_root: Path,
+        config: EvalRunConfig,
+    ) -> tuple[GraderCommandResult, ...]:
+        workspace_root = workspace_root.resolve()
+        return tuple(
+            self._run_command(
+                command=command,
+                workspace_root=workspace_root,
+                timeout_seconds=min(task.budget.timeout_seconds, config.task_timeout_seconds),
+            )
+            for command in task.acceptance_commands
         )
 
     def _run_command(
@@ -121,6 +157,7 @@ class AgentGrader:
             str(workspace_root),
             env.get("PYTHONPATH", ""),
         )
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         try:
             result = subprocess.run(  # noqa: UP022
                 list(argv),
@@ -200,6 +237,7 @@ def _failure_category(
     regression_passed: bool,
     within_budget: bool,
     security_passed: bool,
+    pristine_acceptance_passed: bool,
 ) -> str | None:
     if actor_result.status == PatchActorStatus.PROVIDER_BLOCKED:
         return "provider_blocked"
@@ -213,6 +251,8 @@ def _failure_category(
         return "security_failed"
     if not within_budget:
         return "budget_exceeded"
+    if pristine_acceptance_passed:
+        return "oracle_not_discriminative"
     if not acceptance_passed:
         return "acceptance_failed"
     if not regression_passed:
@@ -224,6 +264,21 @@ def _prepend_path(path: str, existing: str) -> str:
     if not existing:
         return path
     return f"{path}{os.pathsep}{existing}"
+
+
+def _filter_runtime_artifacts(paths: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        path
+        for path in paths
+        if not _is_runtime_artifact(path)
+    )
+
+
+def _is_runtime_artifact(path: str) -> bool:
+    candidate = Path(path)
+    if any(part in RUNTIME_ARTIFACT_PARTS for part in candidate.parts):
+        return True
+    return candidate.suffix in RUNTIME_ARTIFACT_SUFFIXES
 
 
 def _limit(value: str | bytes) -> str:
