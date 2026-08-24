@@ -9,3 +9,6 @@ dependencies = [
 
 [project.scripts]
 codeteam = "codeteam.cli.app:main"
+
+[tool.setuptools.packages.find]
+include = ["codeteam*"]
