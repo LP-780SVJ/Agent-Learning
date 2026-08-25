@@ -14,6 +14,7 @@ Durable（本文件模型）：
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -24,13 +25,14 @@ from codeteam.context.compaction import ContextSummary
 from codeteam.events import AgentEventType
 from codeteam.failures.models import AgentFailure
 from codeteam.planning.models import Plan
+from codeteam.schemas.messages import Message
 from codeteam.task.models import TaskSpec
 from codeteam.task.state import TaskStatus
 
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2})
 """Loader 允许加载的 schema 代数。旧版本 ≠ 损坏（未来走 Migration）。"""
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 _SENSITIVE_METADATA_KEY_MARKERS = frozenset(
     {
@@ -72,6 +74,14 @@ def _redact_metadata(value: Any) -> Any:
         return tuple(_redact_metadata(item) for item in value)
     if isinstance(value, set):
         return {_redact_metadata(item) for item in value}
+    if isinstance(value, str):
+        value = re.sub(
+            r"(?i)(api[_-]?key|authorization|bearer|password|secret|token)"
+            r"\s*[:=]\s*[^\s,;]+",
+            r"\1=<redacted>",
+            value,
+        )
+        return re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "<redacted>", value)
     return value
 
 
@@ -183,6 +193,24 @@ class SessionUsage(BaseModel):
     retry_count: int = 0
 
 
+class AgentRuntimeState(BaseModel):
+    """Durable continuation boundary for the provider-neutral agent loop."""
+
+    step_count: int = 0
+    tool_call_count: int = 0
+    repair_attempts: int = 0
+    workspace_version: int = 0
+    recent_messages: tuple[Message, ...] = ()
+    retrieved_files: tuple[str, ...] = ()
+    last_verification: dict[str, Any] | None = None
+    compaction_mode: str = "structured"
+    context_budget: int = 4096
+    max_steps: int = 20
+    max_tool_calls: int = 40
+    max_repairs: int = 3
+    verification_commands: tuple[tuple[str, ...], ...] = ()
+
+
 class SessionEvent(BaseModel):
     """events.jsonl 的一行：append-only 审计事实。
 
@@ -237,6 +265,7 @@ class Session(BaseModel):
     current_checkpoint_id: str | None = None
     active_operation: ActiveOperation | None = None
     last_failure: AgentFailure | None = None
+    runtime_state: AgentRuntimeState = Field(default_factory=AgentRuntimeState)
 
     @field_validator("provider_id", "model_id")
     @classmethod
@@ -263,6 +292,13 @@ class Session(BaseModel):
             data["source_message"] = "<redacted>"
         data["metadata"] = _redact_metadata(data.get("metadata", {}))
         return data
+
+    @field_serializer("runtime_state")
+    def _sanitize_runtime_state(
+        self,
+        value: AgentRuntimeState,
+    ) -> dict[str, Any]:
+        return _redact_metadata(value.model_dump(mode="json"))
 
 
 class ReconciliationVerdict(str, Enum):

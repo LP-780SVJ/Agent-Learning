@@ -18,7 +18,7 @@ import json
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,7 @@ from codeteam.session.errors import (
     SessionSchemaUnsupportedError,
 )
 from codeteam.session.models import (
+    CURRENT_SCHEMA_VERSION,
     SUPPORTED_SCHEMA_VERSIONS,
     ContextMetadata,
     Session,
@@ -50,7 +51,7 @@ _CONTEXT_NAME = "context.json"
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _atomic_write_bytes(target: Path, payload: bytes) -> None:
@@ -174,7 +175,16 @@ class JsonSessionStore:
             )
 
         try:
-            return Session.model_validate(raw)
+            session = Session.model_validate(raw)
+            if schema_version < CURRENT_SCHEMA_VERSION:
+                session = session.model_copy(
+                    update={
+                        "manifest": session.manifest.model_copy(
+                            update={"schema_version": CURRENT_SCHEMA_VERSION}
+                        )
+                    }
+                )
+            return session
         except ValidationError as error:
             raise SessionCorruptedError(
                 f"session.json 字段非法: {session_id}"

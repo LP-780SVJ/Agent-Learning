@@ -1,14 +1,16 @@
 """Week4 Day4 durable session model contract tests."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
 
 from codeteam.events import AgentEventType
+from codeteam.schemas.messages import Message
 from codeteam.session.models import (
+    AgentRuntimeState,
     Session,
     SessionEvent,
     SessionManifest,
@@ -38,19 +40,19 @@ def test_provider_and_model_ids_must_not_be_blank(git_repo, field: str) -> None:
 
 
 def test_manifest_requires_timezone_aware_datetimes() -> None:
-    naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    naive = datetime.now(UTC).replace(tzinfo=None)
 
     with pytest.raises(ValidationError):
         SessionManifest(
             session_id="ses_naive",
             repo_id="repo-1",
             created_at=naive,
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
         )
 
 
 def test_session_event_requires_timezone_aware_timestamp() -> None:
-    naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    naive = datetime.now(UTC).replace(tzinfo=None)
 
     with pytest.raises(ValidationError):
         SessionEvent(
@@ -96,3 +98,22 @@ def test_ephemeral_objects_are_rejected_from_durable_snapshot(git_repo) -> None:
 
     with pytest.raises(ValidationError):
         make_session(git_repo, usage=runtime_object)
+
+
+def test_runtime_state_messages_are_redacted_at_serialization_boundary(
+    git_repo,
+) -> None:
+    session = make_session(git_repo).model_copy(
+        update={
+            "runtime_state": AgentRuntimeState(
+                recent_messages=(
+                    Message(role="assistant", content="api_key=sk-abcdefghijk"),
+                )
+            )
+        }
+    )
+
+    payload = session.model_dump_json()
+
+    assert "sk-abcdefghijk" not in payload
+    assert "<redacted>" in payload

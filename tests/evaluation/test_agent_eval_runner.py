@@ -9,7 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from codeteam.cli import agent_eval_command
+from codeteam.agent.runtime import CodingAgentRuntime
+from codeteam.agent.runtime_models import (
+    CodingAgentRunRequest,
+    CodingAgentRunResult,
+    RuntimeStatus,
+)
+from codeteam.cli import agent_eval_command, run_command
 from codeteam.evaluation.agent_grader import AgentGrader
 from codeteam.evaluation.agent_models import (
     AgentEvalSplit,
@@ -26,23 +32,40 @@ from codeteam.evaluation.agent_runner import (
 )
 from codeteam.evaluation.patch_actor import (
     LLMPatchGenerator,
-    NullPatchGenerator,
-    PatchActor,
     extract_unified_diff,
     patch_from_structured_file_edits,
 )
+from codeteam.git.workspace import GitWorkspace
+from codeteam.schemas.messages import Message
 from codeteam.task.models import create_task_spec
 
 
-class StaticPatchGenerator:
-    last_input_tokens = 3
-    last_output_tokens = 4
-
-    def __init__(self, patch: str) -> None:
+class FakeRuntime:
+    def __init__(self, patch: str | None = None) -> None:
         self.patch = patch
+        self.requests: list[CodingAgentRunRequest] = []
 
-    def generate_patch(self, **kwargs) -> str:
-        return self.patch
+    def run(self, request) -> CodingAgentRunResult:
+        self.requests.append(request)
+        if self.patch is None:
+            return CodingAgentRunResult(
+                task_id=request.task_id,
+                status=RuntimeStatus.FAILED,
+                summary="no patch",
+                workspace_root=request.workspace_root,
+                failure_category="no_patch",
+                error="no patch",
+            )
+        applied = GitWorkspace(request.workspace_root).apply_patch(self.patch)
+        assert applied.applied
+        return CodingAgentRunResult(
+            task_id=request.task_id,
+            status=RuntimeStatus.COMPLETED,
+            summary="done",
+            workspace_root=request.workspace_root,
+            diff=self.patch,
+            changed_files=tuple(applied.affected_paths),
+        )
 
 
 def test_prepare_workspace_applies_verified_setup_patch(tmp_path: Path) -> None:
@@ -73,7 +96,7 @@ def test_prepare_workspace_applies_verified_setup_patch(tmp_path: Path) -> None:
     )
     runner = AgentEvalRunner(
         project_root=tmp_path,
-        actor=PatchActor(patch_generator=NullPatchGenerator()),
+        runtime=FakeRuntime(),
         keep_workspaces=True,
     )
     destination = tmp_path / "workspace"
@@ -109,7 +132,7 @@ def test_prepare_workspace_fails_closed_for_missing_base_commit(
     )
     runner = AgentEvalRunner(
         project_root=tmp_path,
-        actor=PatchActor(patch_generator=NullPatchGenerator()),
+        runtime=FakeRuntime(),
         keep_workspaces=True,
     )
 
@@ -186,7 +209,9 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
                 "base_commit": "",
                 "prompt": "change VALUE to 2",
                 "acceptance_commands": ["{python} -m pytest {hidden_root}/T01 -q"],
-                "regression_commands": [],
+                "verification_commands": [
+                    "{python} -c 'import app; assert app.VALUE == 2'"
+                ],
                 "oracle_review_status": "test",
             }
         )
@@ -200,8 +225,9 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
 -VALUE = 1
 +VALUE = 2
 """
+    runtime = FakeRuntime(patch)
     runner = AgentEvalRunner(
-        actor=PatchActor(patch_generator=StaticPatchGenerator(patch)),
+        runtime=runtime,
         grader=AgentGrader(hidden_root=tmp_path / "hidden"),
         keep_workspaces=True,
     )
@@ -217,7 +243,9 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
     assert results[0].pristine_acceptance_passed is False
     assert results[0].changed_files == ("app.py",)
     assert results[0].artifact_paths == (
-        "_artifacts/T01/attempt-01/extracted_patch.diff",
+        "_artifacts/T01/runtime_messages.json",
+        "_artifacts/T01/final.diff",
+        "_artifacts/T01/verification.json",
     )
     summary = json.loads((tmp_path / "out" / "summary.json").read_text())
     assert summary["success_count"] == 1
@@ -233,6 +261,16 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
             "oracle_review_status": "test",
         }
     ]
+    runtime_request = runtime.requests[0]
+    assert runtime_request.verification_commands == (
+        ("python", "-c", "import app; assert app.VALUE == 2"),
+    )
+    assert "hidden" not in runtime_request.task.lower()
+    assert all(
+        "hidden" not in part.lower()
+        for command in runtime_request.verification_commands
+        for part in command
+    )
 
 
 def test_null_patch_actor_cannot_pass_even_if_oracle_would_pass(
@@ -261,7 +299,7 @@ def test_null_patch_actor_cannot_pass_even_if_oracle_would_pass(
         oracle_review_status="test",
     )
     runner = AgentEvalRunner(
-        actor=PatchActor(patch_generator=NullPatchGenerator()),
+        runtime=FakeRuntime(),
         grader=AgentGrader(hidden_root=tmp_path / "hidden"),
         keep_workspaces=True,
     )
@@ -318,7 +356,7 @@ def test_pristine_oracle_pass_blocks_completed_actor_success(
     )
     assert patch is not None
     runner = AgentEvalRunner(
-        actor=PatchActor(patch_generator=StaticPatchGenerator(patch)),
+        runtime=FakeRuntime(patch),
         grader=AgentGrader(hidden_root=tmp_path / "hidden"),
         keep_workspaces=True,
     )
@@ -337,6 +375,29 @@ def test_pristine_oracle_pass_blocks_completed_actor_success(
 
 
 def test_grader_filters_runtime_artifacts_from_changed_files(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Eval Test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "eval@example.com"],
+        cwd=tmp_path,
+        check=True,
+    )
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "baseline"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    cache = tmp_path / "src" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "app.cpython-311.pyc").write_bytes(b"cache")
     task = AgentEvalTask(
         task_id="T01",
         split=AgentEvalSplit.DEV,
@@ -353,11 +414,7 @@ def test_grader_filters_runtime_artifacts_from_changed_files(tmp_path: Path) -> 
         planning_enabled=True,
         repair_enabled=True,
         compaction_mode="structured",
-        changed_files=(
-            "app.py",
-            "src/__pycache__/app.cpython-311.pyc",
-            ".pytest_cache/v/cache/nodeids",
-        ),
+        changed_files=("untrusted-actor-report.py",),
     )
 
     grade = AgentGrader(hidden_root=tmp_path / "hidden").grade(
@@ -434,6 +491,30 @@ def test_provider_request_retries_retryable_http_errors(monkeypatch) -> None:
     assert calls["count"] == 2
 
 
+def test_provider_response_preserves_token_usage(monkeypatch) -> None:
+    monkeypatch.setattr(
+        agent_eval_command.urllib.request,
+        "urlopen",
+        lambda request, timeout: _FakeResponse(
+            b'{"model":"provider-model","choices":[{"message":{"content":"{}"}}],'
+            b'"usage":{"prompt_tokens":12,"completion_tokens":7}}'
+        ),
+    )
+
+    response = agent_eval_command._chat_completion_model_response(
+        {
+            "CODETEAM_LLM_BASE_URL": "https://example.test",
+            "CODETEAM_LLM_API_KEY": "key",
+            "CODETEAM_LLM_MODEL": "model",
+        },
+        [],
+    )
+
+    assert response.model == "provider-model"
+    assert response.input_tokens == 12
+    assert response.output_tokens == 7
+
+
 def test_provider_request_records_non_retryable_auth_error(monkeypatch) -> None:
     def fake_urlopen(request, timeout):
         raise urllib.error.HTTPError(
@@ -464,6 +545,32 @@ def test_provider_request_records_non_retryable_auth_error(monkeypatch) -> None:
         assert "attempt 1: auth status=401" in str(error)
     else:
         raise AssertionError("expected ProviderRequestError")
+
+
+def test_provider_serializes_custom_tool_observation_as_user_message() -> None:
+    payload = agent_eval_command._provider_message(
+        Message(role="tool", content="tests passed", tool_call_id="call-7")
+    )
+
+    assert payload["role"] == "user"
+    assert "call-7" in (payload["content"] or "")
+    assert "tests passed" in (payload["content"] or "")
+
+
+def test_week4_development_suite_has_no_claimed_heldout_tasks() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    tasks = load_agent_eval_tasks(
+        project_root / "evals" / "week4" / "agent_task_suite_v1.jsonl"
+    )
+
+    assert len(tasks) == 11
+    assert {task.split for task in tasks} == {AgentEvalSplit.DEV}
+    assert all(task.verification_commands for task in tasks)
+
+
+def test_product_cli_and_evaluator_import_the_same_runtime() -> None:
+    assert run_command.CodingAgentRuntime is CodingAgentRuntime
+    assert agent_eval_command.CodingAgentRuntime is CodingAgentRuntime
 
 
 class _FakeResponse:

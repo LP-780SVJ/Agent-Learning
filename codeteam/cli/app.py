@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Annotated, cast
 
 import typer
+from pydantic import ValidationError
 
 from codeteam.cli.requests import OutputFormat
 
@@ -38,6 +39,12 @@ class AgentEvalMode(str, Enum):
 class AgentEvalSplitOption(str, Enum):
     DEV = "dev"
     HELDOUT = "heldout"
+
+
+class AgentCompactionMode(str, Enum):
+    STRUCTURED = "structured"
+    NONE = "none"
+    NAIVE = "naive"
 
 
 @app.command("inspect-repo")
@@ -137,7 +144,7 @@ def agent_eval(
     ] = Path("evals/week4/agent_runs/latest"),
     actor: Annotated[
         AgentEvalActor,
-        typer.Option("--actor", help="patch actor: llm 或 null"),
+        typer.Option("--actor", help="runtime model: llm 或 null"),
     ] = AgentEvalActor.LLM,
     mode: Annotated[
         AgentEvalMode,
@@ -157,7 +164,7 @@ def agent_eval(
     ] = None,
     context_budget: Annotated[
         int,
-        typer.Option("--context-budget", help="Patch actor context token budget"),
+        typer.Option("--context-budget", help="Runtime context token budget"),
     ] = 4096,
     keep_workspaces: Annotated[
         bool,
@@ -188,15 +195,52 @@ def run(
         Path,
         typer.Option("--repo", help="仓库路径（默认当前目录）"),
     ] = Path("."),
+    provider_id: Annotated[
+        str | None,
+        typer.Option("--provider", help="LLM provider id"),
+    ] = None,
+    model_id: Annotated[
+        str | None,
+        typer.Option("--model", help="LLM model id"),
+    ] = None,
+    context_budget: Annotated[
+        int,
+        typer.Option("--context-budget", min=1),
+    ] = 4096,
+    max_steps: Annotated[int, typer.Option("--max-steps", min=1)] = 20,
+    max_tool_calls: Annotated[
+        int,
+        typer.Option("--max-tool-calls", min=1),
+    ] = 40,
+    max_repairs: Annotated[int, typer.Option("--max-repairs", min=0)] = 3,
+    compaction_mode: Annotated[
+        AgentCompactionMode,
+        typer.Option("--compaction", help="structured, none, or naive"),
+    ] = AgentCompactionMode.STRUCTURED,
+    output_format: Annotated[
+        CliOutputFormat,
+        typer.Option("--format", help="输出格式：text 或 json"),
+    ] = CliOutputFormat.TEXT,
 ) -> None:
     """启动一个新的 Agent 任务。"""
     from codeteam.cli.requests import RunRequest
     from codeteam.cli.run_command import run_agent_task
 
-    request = RunRequest(
-        task=task,
-        repo=repo,
-    )
+    try:
+        request = RunRequest(
+            task=task,
+            repo=repo,
+            provider_id=provider_id,
+            model_id=model_id,
+            context_budget=context_budget,
+            max_steps=max_steps,
+            max_tool_calls=max_tool_calls,
+            max_repairs=max_repairs,
+            compaction_mode=compaction_mode.value,
+            output_format=cast(OutputFormat, output_format.value),
+        )
+    except ValidationError as error:
+        raise typer.BadParameter(str(error)) from error
     run_agent_task(request)
 
 
@@ -220,12 +264,15 @@ def resume(
     from codeteam.cli.requests import ResumeRequest
     from codeteam.cli.run_command import resume_agent_session
 
-    request = ResumeRequest(
-        session_id=session_id,
-        repo=repo,
-        provider_id=provider_id,
-        model_id=model_id,
-    )
+    try:
+        request = ResumeRequest(
+            session_id=session_id,
+            repo=repo,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+    except ValidationError as error:
+        raise typer.BadParameter(str(error)) from error
     resume_agent_session(request)
 
 

@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from codeteam.session.models import SessionStatus
+from codeteam.session.models import OperationStatus, SessionStatus
 from codeteam.session.store import JsonSessionStore
 
 
@@ -213,8 +213,17 @@ def test_run_sigint_pauses_session_and_resume_uses_new_process(
         env={"PYTHONUNBUFFERED": "1"},
     )
 
-    assert resumed.returncode == 0
+    assert resumed.returncode == 130
     assert f"Session: {session_id}" in resumed.stdout
-    assert "Status: running" in resumed.stdout
+    assert "Runtime: rebuilt" in resumed.stdout
+    assert "Status: paused" in resumed.stdout
     assert "Traceback" not in resumed.stdout
     assert "Traceback" not in resumed.stderr
+    after_resume = _session_store(repo).load(session_id)
+    assert after_resume.active_operation is not None
+    assert after_resume.active_operation.kind == "model"
+    assert after_resume.active_operation.status is OperationStatus.COMPLETED
+    events, dropped = _session_store(repo).load_events(session_id)
+    assert dropped == 0
+    assert any(event.type.value == "turn.started" for event in events)
+    assert any(event.type.value == "turn.completed" for event in events)

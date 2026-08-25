@@ -3,14 +3,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import shutil
 import subprocess
 import time
 import uuid
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import ValidationError
 
+from codeteam.agent.runtime_models import (
+    CodingAgentRunRequest,
+    CodingAgentRunResult,
+    CompactionMode,
+    RuntimeStatus,
+)
 from codeteam.evaluation.agent_grader import AgentGrader
 from codeteam.evaluation.agent_models import (
     AgentEvalRunSummary,
@@ -18,11 +26,10 @@ from codeteam.evaluation.agent_models import (
     AgentEvalTask,
     AgentEvalTaskResult,
     EvalRunConfig,
-    GradeResult,
     PatchActorResult,
     PatchActorStatus,
 )
-from codeteam.evaluation.patch_actor import PatchActor
+from codeteam.git.worktree import WorktreeManager
 
 IGNORED_NAMES = {
     ".git",
@@ -33,6 +40,10 @@ IGNORED_NAMES = {
     "__pycache__",
     "eval_hidden",
 }
+
+
+class CodingRuntime(Protocol):
+    def run(self, request: CodingAgentRunRequest) -> CodingAgentRunResult: ...
 
 
 class AgentEvalDatasetError(ValueError):
@@ -46,12 +57,12 @@ class AgentEvalRunner:
         self,
         *,
         project_root: Path | None = None,
-        actor: PatchActor,
+        runtime: CodingRuntime,
         grader: AgentGrader | None = None,
         keep_workspaces: bool = False,
     ) -> None:
         self.project_root = (project_root or _default_project_root()).resolve()
-        self.actor = actor
+        self.runtime = runtime
         self.grader = grader or AgentGrader(project_root=self.project_root)
         self.keep_workspaces = keep_workspaces
 
@@ -68,7 +79,8 @@ class AgentEvalRunner:
 
         results: list[AgentEvalTaskResult] = []
         for task in tasks:
-            task_workspace = workspace_root / _safe_name(task.task_id)
+            task_repo = workspace_root / "_repos" / _safe_name(task.task_id)
+            task_workspace = workspace_root / "tasks" / _safe_name(task.task_id)
             pristine_workspace = workspace_root / "_pristine" / _safe_name(task.task_id)
             self._prepare_workspace(task=task, destination=pristine_workspace)
             pristine_acceptance_results = self.grader.check_pristine_acceptance(
@@ -79,48 +91,47 @@ class AgentEvalRunner:
             if not self.keep_workspaces:
                 shutil.rmtree(pristine_workspace, ignore_errors=True)
 
-            self._prepare_workspace(task=task, destination=task_workspace)
+            self._prepare_workspace(task=task, destination=task_repo)
+            worktree = WorktreeManager(
+                task_repo,
+                worktree_root=task_workspace.parent,
+            ).create(_safe_name(task.task_id), base_ref="HEAD")
             started = time.monotonic()
-            actor_result = self.actor.run(
-                task=task,
-                workspace_root=task_workspace,
-                config=config,
+            runtime_result = self.runtime.run(
+                CodingAgentRunRequest(
+                    task_id=task.task_id,
+                    task=task.prompt,
+                    workspace_root=worktree.path,
+                    provider_id=config.provider_id,
+                    model_id=config.model_id,
+                    context_budget=config.context_budget,
+                    max_steps=min(task.budget.max_steps, config.max_steps),
+                    max_tool_calls=max(1, min(task.budget.max_steps, config.max_steps) * 3),
+                    max_repairs=min(task.budget.max_repairs, config.max_repairs),
+                    compaction_mode=CompactionMode(config.compaction_mode),
+                    planning_enabled=config.planning_enabled,
+                    verification_commands=_visible_verification_argv(task),
+                    checkpoint_state_root=(
+                        task_repo.parent / "checkpoints" / _safe_name(task.task_id)
+                    ),
+                )
+            )
+            actor_result = _runtime_to_actor_result(runtime_result, config)
+            actor_result = actor_result.model_copy(
+                update={
+                    "artifact_paths": _save_runtime_artifacts(
+                        output_dir=output_dir,
+                        result=runtime_result,
+                    )
+                }
             )
             grade = self.grader.grade(
                 task=task,
-                workspace_root=task_workspace,
+                workspace_root=worktree.path,
                 actor_result=actor_result,
                 config=config,
                 pristine_acceptance_results=pristine_acceptance_results,
             )
-            repair_attempts = 0
-            while (
-                config.repair_enabled
-                and not grade.success
-                and grade.failure_category != "oracle_not_discriminative"
-                and actor_result.status in {
-                    PatchActorStatus.COMPLETED,
-                    PatchActorStatus.PATCH_FAILED,
-                }
-                and repair_attempts < min(task.budget.max_repairs, config.max_repairs)
-            ):
-                repair_attempts += 1
-                repair_result = self.actor.run(
-                    task=task,
-                    workspace_root=task_workspace,
-                    config=config,
-                    failure_summary=_summarize_grade_failure(grade),
-                    previous_patch_attempts=actor_result.patch_attempts,
-                    previous_repair_attempts=repair_attempts,
-                )
-                actor_result = _merge_actor_results(actor_result, repair_result)
-                grade = self.grader.grade(
-                    task=task,
-                    workspace_root=task_workspace,
-                    actor_result=actor_result,
-                    config=config,
-                    pristine_acceptance_results=pristine_acceptance_results,
-                )
             duration_ms = int((time.monotonic() - started) * 1000)
             results.append(
                 AgentEvalTaskResult(
@@ -143,6 +154,10 @@ class AgentEvalRunner:
                     regression_results=grade.regression_results,
                     pristine_acceptance_results=grade.pristine_acceptance_results,
                     duration_ms=duration_ms,
+                    steps=actor_result.steps,
+                    model_duration_ms=actor_result.model_duration_ms,
+                    tool_duration_ms=actor_result.tool_duration_ms,
+                    repair_duration_ms=actor_result.repair_duration_ms,
                     changed_files=grade.changed_files,
                     patch_attempts=actor_result.patch_attempts,
                     repair_attempts=actor_result.repair_attempts,
@@ -429,47 +444,96 @@ def make_run_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
-def _summarize_grade_failure(grade: GradeResult) -> str:
-    lines: list[str] = []
-    if grade.failure_category:
-        lines.append(f"failure_category: {grade.failure_category}")
-    if grade.error:
-        lines.append("actor_error:")
-        lines.append(grade.error[-2000:])
-    for result in (*grade.acceptance_results, *grade.regression_results):
-        if result.passed:
-            continue
-        lines.append(f"command: {result.command}")
-        lines.append(f"exit_code: {result.exit_code}")
-        if result.stdout:
-            lines.append("stdout:")
-            lines.append(result.stdout[-2000:])
-        if result.stderr:
-            lines.append("stderr:")
-            lines.append(result.stderr[-2000:])
-    return "\n".join(lines) or "grader failed without command output"
+def _visible_verification_argv(
+    task: AgentEvalTask,
+) -> tuple[tuple[str, ...], ...]:
+    commands: list[tuple[str, ...]] = []
+    for command in task.verification_commands:
+        formatted = command.format(
+            python="python",
+            workspace="/workspace",
+            project_root="/workspace",
+            hidden_root="<hidden-not-visible>",
+        )
+        commands.append(tuple(shlex.split(formatted)))
+    return tuple(commands)
 
 
-def _merge_actor_results(
-    previous: PatchActorResult,
-    current: PatchActorResult,
+def _runtime_to_actor_result(
+    result: CodingAgentRunResult,
+    config: EvalRunConfig,
 ) -> PatchActorResult:
-    return current.model_copy(
-        update={
-            "patch_attempts": max(current.patch_attempts, previous.patch_attempts),
-            "repair_attempts": max(current.repair_attempts, previous.repair_attempts),
-            "tool_calls": previous.tool_calls + current.tool_calls,
-            "input_tokens": previous.input_tokens + current.input_tokens,
-            "output_tokens": previous.output_tokens + current.output_tokens,
-            "cost_usd": previous.cost_usd + current.cost_usd,
-            "changed_files": tuple(
-                dict.fromkeys((*previous.changed_files, *current.changed_files))
-            ),
-            "artifact_paths": tuple(
-                dict.fromkeys((*previous.artifact_paths, *current.artifact_paths))
-            ),
-            "events": (*previous.events, *current.events),
-        },
+    if result.status is RuntimeStatus.COMPLETED:
+        status = PatchActorStatus.COMPLETED
+    elif result.failure_category == "provider_blocked":
+        status = PatchActorStatus.PROVIDER_BLOCKED
+    elif result.failure_category == "no_patch":
+        status = PatchActorStatus.NO_PATCH
+    elif result.failure_category in {"patch_failed", "security_failure"}:
+        status = PatchActorStatus.PATCH_FAILED
+    else:
+        status = PatchActorStatus.FAILED
+    return PatchActorResult(
+        task_id=result.task_id,
+        status=status,
+        planning_enabled=config.planning_enabled,
+        repair_enabled=config.repair_enabled,
+        compaction_mode=config.compaction_mode,
+        patch_attempts=1 if result.changed_files else 0,
+        repair_attempts=result.repair_attempts,
+        tool_calls=result.tool_calls_used,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        cost_usd=result.cost_usd,
+        duration_ms=result.duration_ms,
+        steps=result.steps_used,
+        model_duration_ms=result.model_duration_ms,
+        tool_duration_ms=result.tool_duration_ms,
+        repair_duration_ms=result.repair_duration_ms,
+        changed_files=result.changed_files,
+        applied_patch=bool(result.changed_files),
+        error=result.error,
+        events=result.events,
+    )
+
+
+def _save_runtime_artifacts(
+    *,
+    output_dir: Path,
+    result: CodingAgentRunResult,
+) -> tuple[str, ...]:
+    relative_root = Path("_artifacts") / _safe_name(result.task_id)
+    root = output_dir / relative_root
+    root.mkdir(parents=True, exist_ok=True)
+    messages_path = root / "runtime_messages.json"
+    messages_path.write_text(
+        json.dumps(
+            [message.model_dump(mode="json") for message in result.messages],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    diff_path = root / "final.diff"
+    diff_path.write_text(result.diff, encoding="utf-8")
+    verification_path = root / "verification.json"
+    verification_path.write_text(
+        json.dumps(
+            [item.model_dump(mode="json") for item in result.verification],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return tuple(
+        path.as_posix()
+        for path in (
+            relative_root / messages_path.name,
+            relative_root / diff_path.name,
+            relative_root / verification_path.name,
+        )
     )
 
 

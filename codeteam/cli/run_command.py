@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
 
-from codeteam.agent.inspection import RepositoryInspector
-from codeteam.agent.orchestrator import SingleAgentOrchestrator
-from codeteam.application.build_context import ContextApplicationService
+from codeteam.agent.runtime import CodingAgentRuntime
+from codeteam.agent.runtime_models import (
+    CodingAgentRunRequest,
+    CompactionMode,
+    RuntimeStatus,
+)
+from codeteam.agent.runtime_tools import render_workspace_diff
+from codeteam.cli.agent_eval_command import (
+    _resolve_llm_config,
+    make_runtime_model_client,
+)
 from codeteam.cli.render import render_error, render_json, render_text
 from codeteam.cli.requests import (
     DiffRequest,
@@ -18,6 +28,7 @@ from codeteam.cli.requests import (
     RollbackRequest,
     RunRequest,
 )
+from codeteam.events import AgentEventType
 from codeteam.git.checkpoint import CheckpointManager
 from codeteam.git.errors import CheckpointError, GitWorkspaceError
 from codeteam.git.models import (
@@ -27,8 +38,8 @@ from codeteam.git.models import (
     RollbackStatus,
 )
 from codeteam.git.workspace import GitWorkspace
-from codeteam.planning.models import PlanStep, create_plan
-from codeteam.planning.planner import MockPlanner
+from codeteam.git.worktree import WorktreeManager
+from codeteam.llm.mock import MockModelClient
 from codeteam.session.errors import (
     RepositoryMismatchError,
     SessionAlreadyActiveError,
@@ -36,7 +47,16 @@ from codeteam.session.errors import (
     SessionRecoveryRequiredError,
     SessionTerminalError,
 )
-from codeteam.session.models import RepositoryRef, Session
+from codeteam.session.models import (
+    ActiveOperation,
+    AgentRuntimeState,
+    OperationStatus,
+    RepositoryRef,
+    Session,
+    SessionStatus,
+    SessionUsage,
+    WorktreeRef,
+)
 from codeteam.session.service import SessionService
 from codeteam.session.store import JsonSessionStore
 from codeteam.task.models import create_task_spec
@@ -46,6 +66,17 @@ from codeteam.task.state import TaskStatus
 def run_agent_task(request: RunRequest) -> None:
     repo_root = request.repo.resolve()
     task_id = f"task-{uuid.uuid4().hex[:8]}"
+
+    try:
+        test_wait = os.environ.get("CODETEAM_CLI_TEST_WAIT_AFTER_SESSION") == "1"
+        provider_id, model_id, model_client = _build_model_client(
+            "mock" if test_wait else request.provider_id,
+            "mock-model" if test_wait else request.model_id,
+        )
+        worktree = WorktreeManager(repo_root).create(task_id, base_ref="HEAD")
+    except (OSError, ValueError, RuntimeError) as error:
+        render_error(str(error))
+        raise typer.Exit(2) from error
 
     task = create_task_spec(
         task_id=task_id,
@@ -59,13 +90,22 @@ def run_agent_task(request: RunRequest) -> None:
     session = session_service.create_session(
         task=task,
         repo=repo_ref,
-        provider_id="mock",
-        model_id="mock-model",
+        provider_id=provider_id,
+        model_id=model_id,
+        worktree=WorktreeRef(
+            task_id=task_id,
+            branch_name=worktree.branch_name,
+            path=str(worktree.path),
+            base_sha=worktree.base_sha,
+            head_sha=worktree.head_sha,
+            last_known_head_sha=worktree.head_sha,
+        ),
     )
 
-    render_text(f"Session: {session.manifest.session_id}")
+    if request.output_format == "text":
+        render_text(f"Session: {session.manifest.session_id}")
 
-    if os.environ.get("CODETEAM_CLI_TEST_WAIT_AFTER_SESSION") == "1":
+    if test_wait:
         try:
             signal.pause()
         except KeyboardInterrupt as error:
@@ -73,44 +113,236 @@ def run_agent_task(request: RunRequest) -> None:
             render_text(f"Status: {TaskStatus.PAUSED.value}")
             raise typer.Exit(130) from error
 
-    planner = MockPlanner(
-        plan=create_plan(
-            plan_id=f"{task_id}-plan-v1",
-            task_id=task_id,
-            steps=(
-                PlanStep(
-                    step_id="P1",
-                    title="Inspect task",
-                    description="Inspect repository context and prepare plan.",
+    session = store.save(
+        session.model_copy(
+            update={
+                "status": SessionStatus.RUNNING,
+                "task_status": TaskStatus.IMPLEMENTING,
+                "runtime_state": AgentRuntimeState(
+                    context_budget=request.context_budget,
+                    max_steps=request.max_steps,
+                    max_tool_calls=request.max_tool_calls,
+                    max_repairs=request.max_repairs,
+                    compaction_mode=request.compaction_mode,
                 ),
-            ),
+            }
         )
     )
 
-    def persist_pause(reason: str) -> None:
-        session_service.pause(session, reason=reason)
+    def persist_state(state, evidence) -> None:
+        nonlocal session
+        last_verification = (
+            evidence.verification[-1].model_dump(mode="json")
+            if evidence.verification
+            else None
+        )
+        session = store.save(
+            session.model_copy(
+                update={
+                    "runtime_state": session.runtime_state.model_copy(
+                        update={
+                            "step_count": state.step_count,
+                            "tool_call_count": state.tool_call_count,
+                            "repair_attempts": evidence.repair_attempts,
+                            "workspace_version": evidence.workspace_version,
+                            "recent_messages": tuple(state.messages[-24:]),
+                            "last_verification": last_verification,
+                        }
+                    ),
+                    "checkpoint_ids": tuple(
+                        dict.fromkeys(
+                            (*session.checkpoint_ids, *evidence.checkpoint_ids)
+                        )
+                    ),
+                    "current_checkpoint_id": (
+                        evidence.checkpoint_ids[-1]
+                        if evidence.checkpoint_ids
+                        else session.current_checkpoint_id
+                    ),
+                }
+            )
+        )
+        event = store.append_event(
+            session.manifest.session_id,
+            event_type=AgentEventType.TURN_COMPLETED,
+            state_version=session.manifest.state_version,
+            payload={
+                "step_count": state.step_count,
+                "tool_call_count": state.tool_call_count,
+                "workspace_version": evidence.workspace_version,
+                "last_role": state.messages[-1].role if state.messages else None,
+            },
+        )
+        session.manifest.last_event_seq = event.seq
 
-    orchestrator = SingleAgentOrchestrator(
-        inspector=RepositoryInspector(ContextApplicationService()),
-        planner=planner,
-        repository_root=repo_root,
-        pause_persister=persist_pause,
+    def persist_operation(phase, state, evidence, data) -> None:
+        del state, evidence
+        nonlocal session
+        completed = phase.endswith(".completed")
+        operation_id = str(
+            data.get("call_id") or f"model-step-{data.get('step_index', 0)}"
+        )
+        operation_kind = (
+            f"tool:{data['tool_name']}"
+            if data.get("tool_name")
+            else phase.split(".", 1)[0]
+        )
+        session = store.save(
+            session.model_copy(
+                update={
+                    "active_operation": ActiveOperation(
+                        operation_id=operation_id,
+                        kind=operation_kind,
+                        status=(
+                            OperationStatus.COMPLETED
+                            if completed
+                            else OperationStatus.STARTED
+                        ),
+                        checkpoint_before=session.current_checkpoint_id,
+                        started_at=datetime.now(UTC),
+                    )
+                }
+            )
+        )
+        event = store.append_event(
+            session.manifest.session_id,
+            event_type=(
+                AgentEventType.TURN_COMPLETED
+                if completed
+                else AgentEventType.TURN_STARTED
+            ),
+            state_version=session.manifest.state_version,
+            payload={
+                "phase": phase,
+                "operation_id": operation_id,
+                "tool_name": data.get("tool_name"),
+                "success": data.get("success"),
+            },
+        )
+        session.manifest.last_event_seq = event.seq
+
+    runtime = CodingAgentRuntime(
+        model_client=model_client,
+        state_callback=persist_state,
+        operation_callback=persist_operation,
     )
-
-    result = orchestrator.run(
-        request=request.task,
+    runtime_request = CodingAgentRunRequest(
         task_id=task_id,
+        task=request.task,
+        workspace_root=worktree.path,
+        provider_id=provider_id,
+        model_id=model_id,
+        context_budget=request.context_budget,
+        max_steps=request.max_steps,
+        max_tool_calls=request.max_tool_calls,
+        max_repairs=request.max_repairs,
+        compaction_mode=CompactionMode(request.compaction_mode),
+        checkpoint_state_root=_checkpoint_state_root_for_repo(repo_root),
+    )
+    try:
+        result = runtime.run(runtime_request)
+    except KeyboardInterrupt as error:
+        session_service.pause(session, reason="user_interrupt")
+        render_text(f"Status: {TaskStatus.PAUSED.value}")
+        raise typer.Exit(130) from error
+
+    terminal_status = {
+        RuntimeStatus.COMPLETED: SessionStatus.COMPLETED,
+        RuntimeStatus.FAILED: SessionStatus.FAILED,
+        RuntimeStatus.PAUSED: SessionStatus.PAUSED,
+    }[result.status]
+    task_status = {
+        RuntimeStatus.COMPLETED: TaskStatus.COMPLETED,
+        RuntimeStatus.FAILED: TaskStatus.FAILED,
+        RuntimeStatus.PAUSED: TaskStatus.PAUSED,
+    }[result.status]
+    session = store.save(
+        session.model_copy(
+            update={
+                "status": terminal_status,
+                "task_status": task_status,
+                "usage": SessionUsage(
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                    cost_usd=result.cost_usd,
+                    tool_calls=result.tool_calls_used,
+                    repair_attempts=result.repair_attempts,
+                ),
+                "checkpoint_ids": tuple(
+                    dict.fromkeys((*session.checkpoint_ids, *result.checkpoint_ids))
+                ),
+                "current_checkpoint_id": (
+                    result.checkpoint_ids[-1]
+                    if result.checkpoint_ids
+                    else session.current_checkpoint_id
+                ),
+            }
+        )
     )
 
-    render_text(f"Status: {result.status.value}")
+    payload = result.model_dump(mode="json", exclude={"messages"})
+    payload.update(
+        {
+            "session_id": session.manifest.session_id,
+            "branch": worktree.branch_name,
+            "worktree": str(worktree.path),
+        }
+    )
+    if request.output_format == "json":
+        render_json(payload)
+    else:
+        render_text(f"Status: {result.status.value}")
+        render_text(f"Worktree: {worktree.path}")
+        render_text(f"Branch: {worktree.branch_name}")
+        if result.error:
+            render_error(result.error)
+        if result.diff:
+            render_text(result.diff)
+    raise typer.Exit(_exit_code_for_runtime_status(result.status))
 
-    if result.error:
-        render_error(result.error)
 
-    for event in result.events:
-        render_text(f"[{event.event_type.value}] {event.message}")
+def _build_model_client(
+    provider_id: str | None,
+    model_id: str | None,
+):
+    if provider_id == "mock":
+        return (
+            "mock",
+            model_id or "mock-model",
+            MockModelClient(
+                [
+                    json.dumps(
+                        {
+                            "status": "needs_user_input",
+                            "summary": "paused",
+                            "tests_passed": False,
+                            "user_input_request": (
+                                "mock provider has no scripted actions"
+                            ),
+                        }
+                    )
+                ]
+            ),
+        )
+    effective_provider = provider_id or "openai-compatible"
+    if effective_provider != "openai-compatible":
+        raise ValueError(f"Unsupported provider: {effective_provider}")
+    try:
+        config = _resolve_llm_config()
+    except SystemExit as error:
+        raise ValueError(str(error)) from error
+    if model_id is not None:
+        config["CODETEAM_LLM_MODEL"] = model_id
+    client = make_runtime_model_client(config)
+    return effective_provider, config["CODETEAM_LLM_MODEL"], client
 
-    raise typer.Exit(_exit_code_for_status(result.status))
+
+def _exit_code_for_runtime_status(status: RuntimeStatus) -> int:
+    if status is RuntimeStatus.COMPLETED:
+        return 0
+    if status is RuntimeStatus.PAUSED:
+        return 130
+    return 1
 
 
 def _exit_code_for_status(status: TaskStatus) -> int:
@@ -171,15 +403,11 @@ def _session_store_for_existing_session(
 def resume_agent_session(request: ResumeRequest) -> None:
     repo_root = request.repo.resolve()
 
-    if request.provider_id is not None or request.model_id is not None:
-        render_error("Model override is not wired for CLI resume yet.")
-        raise typer.Exit(2)
-
     try:
         store = _session_store_for_existing_session(repo_root, request.session_id)
         service = SessionService(
             store,
-            runtime_factory=_rebuild_runtime,
+            runtime_factory=lambda session: session.manifest.session_id,
         )
         outcome = service.resume(
             request.session_id,
@@ -208,16 +436,200 @@ def resume_agent_session(request: ResumeRequest) -> None:
     if outcome.runtime is not None:
         render_text("Runtime: rebuilt")
 
-    raise typer.Exit(0)
+    state = outcome.session.runtime_state
+    try:
+        provider_id, model_id, model_client = _build_model_client(
+            request.provider_id or outcome.session.provider_id,
+            request.model_id or outcome.session.model_id,
+        )
+    except (OSError, ValueError, RuntimeError) as error:
+        service.pause(outcome.session, reason="provider_unavailable")
+        render_error(str(error))
+        raise typer.Exit(2) from error
 
+    session = store.save(
+        outcome.session.model_copy(
+            update={"provider_id": provider_id, "model_id": model_id}
+        )
+    )
 
-def _rebuild_runtime(session: Session) -> dict[str, str]:
-    return {
-        "session_id": session.manifest.session_id,
-        "task_id": session.task.task_id,
-        "provider_id": session.provider_id,
-        "model_id": session.model_id,
-    }
+    def persist_state(loop_state, evidence) -> None:
+        nonlocal session
+        session = store.save(
+            session.model_copy(
+                update={
+                    "runtime_state": session.runtime_state.model_copy(
+                        update={
+                            "step_count": state.step_count + loop_state.step_count,
+                            "tool_call_count": (
+                                state.tool_call_count + loop_state.tool_call_count
+                            ),
+                            "repair_attempts": (
+                                state.repair_attempts + evidence.repair_attempts
+                            ),
+                            "workspace_version": (
+                                state.workspace_version + evidence.workspace_version
+                            ),
+                            "recent_messages": tuple(loop_state.messages[-24:]),
+                            "last_verification": (
+                                evidence.verification[-1].model_dump(mode="json")
+                                if evidence.verification
+                                else state.last_verification
+                            ),
+                        }
+                    ),
+                    "checkpoint_ids": tuple(
+                        dict.fromkeys(
+                            (*session.checkpoint_ids, *evidence.checkpoint_ids)
+                        )
+                    ),
+                    "current_checkpoint_id": (
+                        evidence.checkpoint_ids[-1]
+                        if evidence.checkpoint_ids
+                        else session.current_checkpoint_id
+                    ),
+                }
+            )
+        )
+        event = store.append_event(
+            session.manifest.session_id,
+            event_type=AgentEventType.TURN_COMPLETED,
+            state_version=session.manifest.state_version,
+            payload={
+                "resumed": True,
+                "step_count": loop_state.step_count,
+                "tool_call_count": loop_state.tool_call_count,
+                "workspace_version": evidence.workspace_version,
+            },
+        )
+        session.manifest.last_event_seq = event.seq
+
+    def persist_operation(phase, loop_state, evidence, data) -> None:
+        del loop_state, evidence
+        nonlocal session
+        completed = phase.endswith(".completed")
+        operation_id = str(
+            data.get("call_id") or f"model-step-{data.get('step_index', 0)}"
+        )
+        operation_kind = (
+            f"tool:{data['tool_name']}"
+            if data.get("tool_name")
+            else phase.split(".", 1)[0]
+        )
+        session = store.save(
+            session.model_copy(
+                update={
+                    "active_operation": ActiveOperation(
+                        operation_id=operation_id,
+                        kind=operation_kind,
+                        status=(
+                            OperationStatus.COMPLETED
+                            if completed
+                            else OperationStatus.STARTED
+                        ),
+                        checkpoint_before=session.current_checkpoint_id,
+                        started_at=datetime.now(UTC),
+                    )
+                }
+            )
+        )
+        event = store.append_event(
+            session.manifest.session_id,
+            event_type=(
+                AgentEventType.TURN_COMPLETED
+                if completed
+                else AgentEventType.TURN_STARTED
+            ),
+            state_version=session.manifest.state_version,
+            payload={
+                "phase": phase,
+                "operation_id": operation_id,
+                "tool_name": data.get("tool_name"),
+                "success": data.get("success"),
+                "resumed": True,
+            },
+        )
+        session.manifest.last_event_seq = event.seq
+
+    workspace_root = _workspace_path_for_session(session, repo_root)
+    remaining_steps = state.max_steps - state.step_count
+    remaining_tool_calls = state.max_tool_calls - state.tool_call_count
+    remaining_repairs = state.max_repairs - state.repair_attempts
+    if remaining_steps <= 0 or remaining_tool_calls <= 0:
+        store.save(
+            session.model_copy(
+                update={
+                    "status": SessionStatus.FAILED,
+                    "task_status": TaskStatus.FAILED,
+                }
+            )
+        )
+        render_error("Session runtime budget is exhausted; resume is not allowed.")
+        raise typer.Exit(1)
+    runtime = CodingAgentRuntime(
+        model_client=model_client,
+        state_callback=persist_state,
+        operation_callback=persist_operation,
+    )
+    result = runtime.run(
+        CodingAgentRunRequest(
+            task_id=session.task.task_id,
+            task=session.task.original_request,
+            workspace_root=workspace_root,
+            provider_id=provider_id,
+            model_id=model_id,
+            context_budget=state.context_budget,
+            max_steps=remaining_steps,
+            max_tool_calls=remaining_tool_calls,
+            max_repairs=max(0, remaining_repairs),
+            compaction_mode=CompactionMode(state.compaction_mode),
+            verification_commands=state.verification_commands,
+            checkpoint_state_root=_checkpoint_state_root_for_repo(repo_root),
+            initial_messages=state.recent_messages,
+        )
+    )
+    status = {
+        RuntimeStatus.COMPLETED: SessionStatus.COMPLETED,
+        RuntimeStatus.FAILED: SessionStatus.FAILED,
+        RuntimeStatus.PAUSED: SessionStatus.PAUSED,
+    }[result.status]
+    resumed_task_status = {
+        RuntimeStatus.COMPLETED: TaskStatus.COMPLETED,
+        RuntimeStatus.FAILED: TaskStatus.FAILED,
+        RuntimeStatus.PAUSED: TaskStatus.PAUSED,
+    }[result.status]
+    store.save(
+        session.model_copy(
+            update={
+                "status": status,
+                "task_status": resumed_task_status,
+                "usage": session.usage.model_copy(
+                    update={
+                        "input_tokens": (
+                            session.usage.input_tokens + result.input_tokens
+                        ),
+                        "output_tokens": (
+                            session.usage.output_tokens + result.output_tokens
+                        ),
+                        "cost_usd": session.usage.cost_usd + result.cost_usd,
+                        "tool_calls": (
+                            session.usage.tool_calls + result.tool_calls_used
+                        ),
+                        "repair_attempts": (
+                            session.usage.repair_attempts + result.repair_attempts
+                        ),
+                    }
+                ),
+                "checkpoint_ids": tuple(
+                    dict.fromkeys((*session.checkpoint_ids, *result.checkpoint_ids))
+                ),
+            }
+        )
+    )
+    render_text(f"Status: {result.status.value}")
+    if result.error:
+        render_error(result.error)
+    raise typer.Exit(_exit_code_for_runtime_status(result.status))
 
 
 def diff_agent_session(request: DiffRequest) -> None:
@@ -228,6 +640,11 @@ def diff_agent_session(request: DiffRequest) -> None:
         session = store.load(request.session_id)
         workspace_root = _workspace_path_for_session(session, repo_root)
         diff = GitWorkspace(workspace_root).diff(base_ref=request.base_ref)
+        if request.base_ref == "HEAD":
+            patch = render_workspace_diff(workspace_root)
+            diff = diff.model_copy(
+                update={"patch": patch, "patch_bytes": len(patch.encode("utf-8"))}
+            )
     except SessionError as error:
         render_error(str(error))
         raise typer.Exit(2) from error

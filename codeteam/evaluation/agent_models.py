@@ -57,6 +57,7 @@ class AgentEvalTask(BaseModel):
     setup_patch_sha256: str | None = None
     prompt: str
     acceptance_commands: tuple[str, ...] = ()
+    verification_commands: tuple[str, ...] = ()
     regression_commands: tuple[str, ...] = ()
     budget: EvalBudget = Field(default_factory=EvalBudget)
     safety_invariants: tuple[str, ...] = ()
@@ -68,6 +69,8 @@ class AgentEvalTask(BaseModel):
             raise ValueError(
                 "setup_patch and setup_patch_sha256 must be provided together"
             )
+        if not self.verification_commands and self.regression_commands:
+            self.verification_commands = self.regression_commands
         return self
 
 
@@ -98,6 +101,10 @@ class PatchActorResult(BaseModel):
     output_tokens: int = 0
     cost_usd: float = 0.0
     duration_ms: int = 0
+    steps: int = 0
+    model_duration_ms: int = 0
+    tool_duration_ms: int = 0
+    repair_duration_ms: int = 0
     changed_files: tuple[str, ...] = ()
     applied_patch: bool = False
     generated_patch_sha256: str | None = None
@@ -161,6 +168,10 @@ class AgentEvalTaskResult(BaseModel):
     regression_results: tuple[GraderCommandResult, ...] = ()
     pristine_acceptance_results: tuple[GraderCommandResult, ...] = ()
     duration_ms: int
+    steps: int = 0
+    model_duration_ms: int = 0
+    tool_duration_ms: int = 0
+    repair_duration_ms: int = 0
     changed_files: tuple[str, ...] = ()
     patch_attempts: int = 0
     repair_attempts: int = 0

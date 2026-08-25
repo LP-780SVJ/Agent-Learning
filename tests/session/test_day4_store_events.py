@@ -1,7 +1,8 @@
 """Week4 Day4 JsonSessionStore, atomic write, and event log tests."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -84,6 +85,25 @@ def test_store_load_unsupported_schema_version_raises(tmp_path: Path) -> None:
 
     with pytest.raises(SessionSchemaUnsupportedError):
         store.load("ses_old")
+
+
+def test_store_migrates_schema_v1_with_runtime_defaults(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    store = JsonSessionStore(tmp_path / "sessions")
+    session = store.create(make_session(git_repo))
+    snapshot = store.session_dir(session.manifest.session_id) / "session.json"
+    payload = json.loads(snapshot.read_text(encoding="utf-8"))
+    payload["manifest"]["schema_version"] = 1
+    payload.pop("runtime_state", None)
+    snapshot.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = store.load(session.manifest.session_id)
+
+    assert migrated.manifest.schema_version == 2
+    assert migrated.runtime_state.step_count == 0
+    assert migrated.runtime_state.recent_messages == ()
 
 
 @pytest.mark.parametrize(
@@ -227,6 +247,6 @@ def _event(session_id: str, seq: int) -> SessionEvent:
         seq=seq,
         state_version=max(seq, 1),
         type=AgentEventType.SESSION_CREATED,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         payload={},
     )

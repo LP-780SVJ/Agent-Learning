@@ -12,6 +12,7 @@ from argparse import Namespace
 from dataclasses import dataclass
 from pathlib import Path
 
+from codeteam.agent.runtime import CodingAgentRuntime
 from codeteam.evaluation.agent_grader import AgentGrader
 from codeteam.evaluation.agent_models import AgentEvalSplit, EvalRunConfig, EvalRunMode
 from codeteam.evaluation.agent_runner import (
@@ -21,12 +22,7 @@ from codeteam.evaluation.agent_runner import (
     make_run_id,
     summarize_agent_eval_results,
 )
-from codeteam.evaluation.patch_actor import (
-    LLMPatchGenerator,
-    NullPatchGenerator,
-    PatchActor,
-    PatchGenerator,
-)
+from codeteam.llm.base import ModelClient, ModelResponse
 from codeteam.llm.openai_compatible import OpenAICompatibleClient
 from codeteam.schemas.messages import Message
 
@@ -62,6 +58,29 @@ class ProviderRequestError(RuntimeError):
         )
 
 
+class _NullModelClient:
+    def complete(self, messages: list[Message]) -> str:
+        del messages
+        return json.dumps(
+            {
+                "status": "failed",
+                "summary": "Null runtime intentionally performs no work.",
+                "tests_passed": False,
+                "error": "null_actor",
+            }
+        )
+
+
+def make_runtime_model_client(config: dict[str, str]) -> OpenAICompatibleClient:
+    return OpenAICompatibleClient(
+        model=config["CODETEAM_LLM_MODEL"],
+        request_func=lambda messages: _chat_completion_model_response(
+            config,
+            messages,
+        ),
+    )
+
+
 def run_agent_eval(args: Namespace) -> None:
     tasks = load_agent_eval_tasks(Path(args.suite))
     split = AgentEvalSplit(args.split) if args.split else None
@@ -77,31 +96,22 @@ def run_agent_eval(args: Namespace) -> None:
 
     provider_id = "openai-compatible"
     model_id = "null"
-    planner_complete = None
-    patch_generator: PatchGenerator
+    model_client: ModelClient
     if args.actor == "llm":
         llm_config = _resolve_llm_config()
         provider_id = "openai-compatible"
         model_id = llm_config["CODETEAM_LLM_MODEL"]
-        complete = _make_complete(llm_config)
-        patch_generator = LLMPatchGenerator(
-            complete=complete,
-            model_id=model_id,
-        )
-        planner_complete = complete
+        model_client = make_runtime_model_client(llm_config)
     elif args.actor == "null":
-        patch_generator = NullPatchGenerator()
+        model_client = _NullModelClient()
     else:
         raise SystemExit(f"Unknown actor: {args.actor}")
 
-    actor = PatchActor(
-        patch_generator=patch_generator,
-        planner_complete=planner_complete,
-    )
+    runtime = CodingAgentRuntime(model_client=model_client)
     grader = AgentGrader(project_root=PROJECT_ROOT)
     runner = AgentEvalRunner(
         project_root=PROJECT_ROOT,
-        actor=actor,
+        runtime=runtime,
         grader=grader,
         keep_workspaces=args.keep_workspaces,
     )
@@ -261,7 +271,8 @@ def _make_complete(config: dict[str, str]):
     )
 
     def complete(messages: list[Message]) -> str:
-        return client.complete(messages)
+        response = client.complete(messages)
+        return response.content if isinstance(response, ModelResponse) else response
 
     return complete
 
@@ -272,13 +283,23 @@ def _chat_completion_request(
     *,
     sleep_func=time.sleep,
 ) -> str:
+    return _chat_completion_model_response(
+        config,
+        messages,
+        sleep_func=sleep_func,
+    ).content
+
+
+def _chat_completion_model_response(
+    config: dict[str, str],
+    messages: list[Message],
+    *,
+    sleep_func=time.sleep,
+) -> ModelResponse:
     body = json.dumps(
         {
             "model": config["CODETEAM_LLM_MODEL"],
-            "messages": [
-                {"role": message.role, "content": message.content}
-                for message in messages
-            ],
+            "messages": [_provider_message(message) for message in messages],
         }
     ).encode("utf-8")
     max_attempts = _positive_int(
@@ -307,7 +328,13 @@ def _chat_completion_request(
         try:
             with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                 data = json.loads(response.read())
-            return data["choices"][0]["message"]["content"]
+            usage = data.get("usage") or {}
+            return ModelResponse(
+                content=data["choices"][0]["message"]["content"],
+                model=str(data.get("model") or config["CODETEAM_LLM_MODEL"]),
+                input_tokens=int(usage.get("prompt_tokens") or 0),
+                output_tokens=int(usage.get("completion_tokens") or 0),
+            )
         except Exception as error:
             failure = _classify_provider_failure(error, attempt=attempt)
             failures.append(failure)
@@ -316,6 +343,22 @@ def _chat_completion_request(
             sleep_func(backoff_seconds * (2 ** (attempt - 1)))
 
     raise ProviderRequestError(failures)
+
+
+def _provider_message(message: Message) -> dict[str, str | None]:
+    """Serialize the custom JSON protocol without native tool-call coupling."""
+    if message.role == "tool":
+        observation = {
+            "tool_observation": {
+                "call_id": message.tool_call_id,
+                "content": message.content,
+            }
+        }
+        return {
+            "role": "user",
+            "content": json.dumps(observation, ensure_ascii=False),
+        }
+    return {"role": message.role, "content": message.content}
 
 
 def _classify_provider_failure(

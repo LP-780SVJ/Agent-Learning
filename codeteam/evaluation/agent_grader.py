@@ -15,6 +15,7 @@ from codeteam.evaluation.agent_models import (
     PatchActorResult,
     PatchActorStatus,
 )
+from codeteam.git.workspace import GitWorkspace
 
 OUTPUT_LIMIT = 8_000
 RUNTIME_ARTIFACT_PARTS = {
@@ -69,7 +70,7 @@ class AgentGrader:
                 workspace_root=workspace_root,
                 timeout_seconds=min(task.budget.timeout_seconds, config.task_timeout_seconds),
             )
-            for command in task.regression_commands
+            for command in task.verification_commands
         )
 
         acceptance_passed = bool(acceptance_results) and all(
@@ -79,10 +80,12 @@ class AgentGrader:
         within_budget = (
             actor_result.duration_ms
             <= min(task.budget.timeout_seconds, config.task_timeout_seconds) * 1000
-            and actor_result.patch_attempts <= config.max_steps
+            and actor_result.steps <= min(task.budget.max_steps, config.max_steps)
             and actor_result.repair_attempts <= config.max_repairs
         )
-        changed_files = _filter_runtime_artifacts(actor_result.changed_files)
+        changed_files = _filter_runtime_artifacts(
+            tuple(change.path for change in GitWorkspace(workspace_root).changed_files())
+        )
         safety_violations = self._find_safety_violations(changed_files)
         security_passed = not safety_violations
         actor_completed = actor_result.status == PatchActorStatus.COMPLETED

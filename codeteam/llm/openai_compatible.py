@@ -15,11 +15,13 @@ delay = base_delay_seconds * (2 ** retry_index)
 '''
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from codeteam.errors import classify_exception, should_retry
+from codeteam.llm.base import ModelResponse
 from codeteam.schemas.messages import Message
+
 
 @dataclass(frozen=True)
 class RetryConfig:
@@ -31,7 +33,7 @@ class OpenAICompatibleClient:
     def __init__(
         self,
         model: str,# 模型名
-        request_func: Callable[[list[Message]], str],# 真正发送请求的函数
+        request_func: Callable[[list[Message]], str | ModelResponse],# 真正发送请求的函数
         retry_config: RetryConfig | None = None,# 重试配置
         sleep_func: Callable[[float], None] = time.sleep,# 等待函数
     ) -> None:
@@ -40,7 +42,7 @@ class OpenAICompatibleClient:
         self.retry_config = retry_config or RetryConfig()
         self.sleep_func = sleep_func
 
-    def complete(self, messages: list[Message]) -> str:
+    def complete(self, messages: list[Message]) -> str | ModelResponse:
         retry_index = 0
 
         while True:
@@ -50,10 +52,10 @@ class OpenAICompatibleClient:
                 agent_error = classify_exception(error)
 
                 if not should_retry(agent_error):
-                    raise error
+                    raise
 
                 if retry_index >= self.retry_config.max_retries:
-                    raise error
+                    raise
 
                 delay = self.retry_config.base_delay_seconds * (2 ** retry_index)
                 self.sleep_func(delay)

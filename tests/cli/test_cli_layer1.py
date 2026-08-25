@@ -42,6 +42,14 @@ def test_run_argv_builds_run_request(monkeypatch) -> None:
     assert captured["request"].repo == Path(".")
 
 
+def test_run_rejects_unpaired_provider_without_traceback() -> None:
+    result = runner.invoke(app, ["run", "fix login", "--provider", "mock"])
+
+    assert result.exit_code == 2
+    assert "provider_id 和 model_id" in result.stderr
+    assert "Traceback" not in result.output
+
+
 def test_resume_argv_builds_resume_request(monkeypatch) -> None:
     captured: dict[str, ResumeRequest] = {}
 

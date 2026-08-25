@@ -19,6 +19,7 @@ dist/
 # Codeteam runtime artifacts
 .codeteam/backups/
 .codeteam/sessions/
+.codeteam/worktrees/
 .claude/worktrees/
 evals/week4/agent_runs/**/workspaces/
 

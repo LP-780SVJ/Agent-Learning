@@ -5,7 +5,7 @@ import importlib
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -57,7 +57,7 @@ class RecordingStore:
         self.calls.append("save")
         persisted = session.model_copy(deep=True)
         persisted.manifest.state_version += 1
-        persisted.manifest.updated_at = datetime.now(timezone.utc)
+        persisted.manifest.updated_at = datetime.now(UTC)
         self.saved.append(persisted)
         return persisted
 
@@ -76,7 +76,7 @@ class RecordingStore:
             seq=len(self.events) + 1,
             state_version=state_version,
             type=event_type,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             payload=payload or {},
         )
         self.events.append(event)
@@ -329,7 +329,7 @@ def test_reconciler_started_active_operation_requires_recovery(git_repo) -> None
         operation_id="op-1",
         kind="verification",
         status=OperationStatus.STARTED,
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
     )
     session = make_session(
         git_repo,
@@ -345,6 +345,29 @@ def test_reconciler_started_active_operation_requires_recovery(git_repo) -> None
 
     assert report.verdict is ReconciliationVerdict.RECOVERY_REQUIRED
     assert any("inflight_operation" in issue for issue in report.issues)
+
+
+def test_reconciler_allows_replay_of_interrupted_model_call(git_repo) -> None:
+    operation = ActiveOperation(
+        operation_id="model-step-2",
+        kind="model",
+        status=OperationStatus.STARTED,
+        started_at=datetime.now(UTC),
+    )
+    session = make_session(
+        git_repo,
+        status=SessionStatus.PAUSED,
+        active_operation=operation,
+    )
+
+    report = _service_module().SessionReconciler().reconcile(
+        session,
+        current_repo=git_repo,
+    )
+
+    assert report.verdict is ReconciliationVerdict.RESUMABLE
+    assert report.session.active_operation is not None
+    assert report.session.active_operation.status is OperationStatus.COMPLETED
 
 
 def test_session_service_resume_exists_on_service_not_outcome() -> None:

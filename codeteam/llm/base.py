@@ -20,6 +20,6 @@ class ModelClient(Protocol):
     静态检查器可捕获签名漂移（运行时行为零变化）。
     """
 
-    def complete(self, messages: list[Message]) -> str:
+    def complete(self, messages: list[Message]) -> str | ModelResponse:
         """发送消息序列，返回模型的原始文本响应。"""
         ...

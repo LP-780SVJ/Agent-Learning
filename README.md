@@ -24,17 +24,18 @@ The first four weeks are now at a closeout baseline.
 | Repair and failure recovery | Implemented foundation | `tests/repair/`, `tests/failures/`, `tests/agent/` |
 | Durable session and resume | Implemented | `tests/session/` |
 | CLI product layer | Implemented | `tests/cli/`, subprocess E2E |
-| Agent EvalRunner / Grader | Implemented V1 | `codeteam/evaluation/agent_runner.py`, `eval_hidden/week4/` |
-| 11-task coding benchmark V2 | Null preflight valid; non-blind Codex reference 11/11 | `evals/week4/agent_runs/` |
+| Unified Coding Agent Runtime | Implemented | `codeteam/agent/runtime.py`, scripted-model integration tests |
+| Agent EvalRunner / Grader | Implemented V2 | Same Runtime as `run`; hidden oracle remains grader-only |
+| 11-task coding development benchmark | Null preflight 0/11; real run pending | `evals/week4/agent_task_suite_v1.jsonl` |
 
 Latest closeout evidence:
 
 ```text
-normal sandbox:      1195 passed, 6 skipped
+normal sandbox:      1219 passed, 6 skipped
 Docker integration:  42 passed in prior elevated closeout run
 ```
 
-The current `codeteam run` command is still a productized shell around deterministic planning. It creates durable sessions and exercises orchestration, but it does not yet run a real LLM-backed patch-producing actor. The independent eval actor can call a real provider, but it remains a one-shot context-to-patch flow rather than an interactive coding loop.
+`codeteam run` now uses the real provider-neutral `CodingAgentRuntime`. It creates a linked worktree from request-time `HEAD`, builds initial context, lets the model inspect and search further, applies patches through the safe patch lane, runs visible verification in Docker, supports local repair turns, inspects the final Git state, and keeps the worktree for review. `agent-eval` is a thin batch shell over the same Runtime; hidden acceptance remains outside the Agent in `AgentGrader`.
 
 ## Quick Start
 
@@ -67,16 +68,55 @@ Core CLI commands:
 .venv/bin/python -m codeteam.cli.app context "refresh token error path" --path tests/fixtures/test_repo --top-k 5 --budget 1024 --format json
 .venv/bin/python -m codeteam.cli.app eval --dataset evals/week2/file_retrieval.jsonl --repo tests/fixtures/test_repo --methods filename,ripgrep,ripgrep_symbol,hybrid --output evals/week2
 .venv/bin/python -m codeteam.cli.app agent-eval --suite evals/week4/agent_task_suite_v1.jsonl --output evals/week4/agent_runs/null_baseline --actor null --mode baseline
-.venv/bin/python -m codeteam.cli.app run "inspect this repository task" --repo .
+.venv/bin/python -m codeteam.cli.app run "fix the failing auth test" --repo . --context-budget 4096 --max-steps 20 --max-tool-calls 40 --max-repairs 3
 ```
+
+Real-model commands read an OpenAI-compatible provider configuration from
+`secrets.local.env` or from environment variables. Environment variables take
+precedence, and the secret file is ignored by Git.
+
+```text
+CODETEAM_LLM_BASE_URL=https://provider.example/v1
+CODETEAM_LLM_API_KEY=...
+CODETEAM_LLM_MODEL=provider-model-id
+```
+
+`--provider` and `--model` must be supplied together when overriding the
+configured defaults. The currently executable production provider is
+`openai-compatible`; the model registry and switching layer remain
+provider-neutral extension points.
+
+### `run` contract
+
+- A run creates `codeteam/<task-id>` in a linked worktree from the repository's
+  request-time `HEAD`; it never edits, commits, or merges the caller's worktree.
+- The model receives an initial context snapshot and can then call
+  `list_files`, `read_file`, `search_code`, `apply_patch`, `run_tests`,
+  `git_status`, and `git_diff` within the task worktree.
+- Patch application passes through path validation, checkpoint creation, the
+  safe patch lane, and final Git-state inspection.
+- Visible verification runs through `CommandPolicy` and Docker. Docker
+  unavailability pauses verification instead of silently using the host shell.
+- `completed` requires a real source diff, a passing latest visible
+  verification, and a passing final safety check. A model final message alone
+  is not success.
+- Sessions are stored under the repository Git common directory at
+  `.git/codeteam/sessions`; the task branch and worktree are retained for human
+  inspection.
+- CLI exit codes are `0` for completed, `1` for runtime failure, `2` for an
+  invalid request, and `130` for pause, approval wait, or interruption.
 
 ## Architecture
 
 ```text
 CLI
   -> Request DTO / render
-  -> Application / Service layer
-  -> SingleAgentOrchestrator
+  -> Worktree + durable Session
+  -> CodingAgentRuntime
+       -> initial Context Engine snapshot
+       -> provider-neutral JSON action loop
+       -> list/read/search/apply_patch/run_tests/git_status/git_diff
+       -> final diff + visible verification gate
   -> Domain modules
        Task / Plan / Context / Git / Execution / Sandbox / Session / LLM
   -> Infrastructure
@@ -110,7 +150,11 @@ codeteam/
 ├── failures/                      # typed failure classification and recovery policy
 ├── session/                       # durable session, store, event log, resume
 ├── llm/                           # provider-neutral model client pieces
-├── agent/                         # repository inspection and orchestrator
+├── agent/                         # unified coding runtime, tools, edits, orchestration
+│   ├── runtime.py                 # model/action/tool/verification execution loop
+│   ├── runtime_models.py          # runtime request, status, evidence, result
+│   ├── runtime_tools.py           # seven worktree-scoped coding tools
+│   └── editing.py                 # structured file edits -> local unified diff
 ├── cli/                           # Typer CLI and commands
 └── evaluation/                    # retrieval eval + task-level agent eval
 ```
@@ -217,9 +261,10 @@ Capabilities:
 - CLI commands: `run`, `resume`, `diff`, `rollback`.
 - CLI invalid request handling with clean exit code `2`.
 - SIGINT E2E: `run` pauses a session, returns `130`, and `resume` rebuilds runtime in a new process.
-- Independent `agent-eval` path with `LLMPatchGenerator`, `PatchActor`, fresh workspace runner, hidden oracle grader, null baseline, and ablation modes.
+- One `CodingAgentRuntime` shared by `run` and `agent-eval`.
+- `agent-eval` prepares fresh repositories/worktrees and invokes the independent hidden-oracle Grader only after the Runtime stops.
 
-Important limitation: `run` is not yet a full autonomous coding task actor. The independent eval path can call a real LLM patch actor and recent provider calls succeeded, but the corrected V2 suite has not had a fresh blind real-LLM run. Null preflight proves the harness and the non-blind Codex reference proves solvability; neither is a model benchmark score.
+Important limitation: the 11 tasks are now explicitly a `dev` suite, not held-out evidence. The Runtime is a complete simple-task loop, but its real-model reliability still needs the user-run baseline and ablations below. Null preflight proves harness discrimination; the non-blind Codex reference proves task solvability, not model quality.
 
 ## Evaluation
 
@@ -267,9 +312,64 @@ Codex reference: 11/11 success (non-blind oracle-informed solvability check)
 real LLM V2:  not rerun after suite correction
 ```
 
-`LLMPatchGenerator` and `PatchActor` exist in the independent eval path. A trustworthy model success rate still requires a fresh blind real-actor run on the frozen V2 suite; the Codex reference result is not held-out evidence.
+Legacy `LLMPatchGenerator` and `PatchActor` remain only for compatibility tests
+and historical artifacts; production CLI and evaluation execution no longer
+call them. The current harness has isolated worktrees, pristine-oracle checks,
+visible verification, grader-only hidden acceptance, fixed task budgets, and
+safety invariants. A trustworthy score still requires a fresh real-model run,
+and provider failures must be reported separately from Agent failures.
 
-The project intentionally does not claim a task success rate until CodeTeam has an actor/judge evaluation harness with hidden acceptance tests, regression tests, fixed budgets, and safety invariants.
+All 11 tasks are a development benchmark. Their results measure regression and
+engineering progress, not blind held-out generalization.
+
+### Real-model benchmark commands
+
+Run one task first as a provider/runtime smoke test:
+
+```bash
+RUN_DIR="evals/week4/agent_runs/real_llm_smoke_$(date +%Y%m%d_%H%M%S)"
+.venv/bin/python -m codeteam.cli.app agent-eval \
+  --suite evals/week4/agent_task_suite_v1.jsonl \
+  --output "$RUN_DIR" \
+  --actor llm \
+  --mode baseline \
+  --task-id B01 \
+  --context-budget 4096 \
+  --keep-workspaces
+```
+
+Then run the complete 11-task baseline:
+
+```bash
+RUN_DIR="evals/week4/agent_runs/real_llm_baseline_$(date +%Y%m%d_%H%M%S)"
+.venv/bin/python -m codeteam.cli.app agent-eval \
+  --suite evals/week4/agent_task_suite_v1.jsonl \
+  --output "$RUN_DIR" \
+  --actor llm \
+  --mode baseline \
+  --context-budget 4096 \
+  --keep-workspaces
+```
+
+Run the four ablations after the baseline is provider-stable:
+
+```bash
+RUN_DIR="evals/week4/agent_runs/real_llm_ablations_$(date +%Y%m%d_%H%M%S)"
+.venv/bin/python -m codeteam.cli.app agent-eval \
+  --suite evals/week4/agent_task_suite_v1.jsonl \
+  --output "$RUN_DIR" \
+  --actor llm \
+  --mode ablations \
+  --context-budget 4096 \
+  --keep-workspaces
+```
+
+The ablation modes are direct execution without planning, single-shot without
+repair, no compaction, and naive tail-only compaction. Compare task success,
+hidden acceptance, visible verification, safety, provider-blocked count, steps,
+tool calls, repair attempts, tokens, cost, and latency. Runtime messages, final
+diffs, and verification evidence are written below each run directory for
+failure analysis.
 
 ## Testing
 
@@ -282,6 +382,8 @@ Common commands:
 .venv/bin/python -m pytest tests/sandbox -q -rs
 .venv/bin/python -m pytest tests/session -q
 .venv/bin/python -m pytest tests/cli -q
+.venv/bin/python -m pytest tests/agent/test_coding_runtime.py -q
+.venv/bin/python -m pytest tests/evaluation/test_agent_eval_runner.py -q
 ```
 
 `pytest.ini` excludes `tests/fixtures/` so fixture repository tests are not collected as project tests.
@@ -299,8 +401,8 @@ When running inside a restricted terminal sandbox, Docker tests may skip. In a u
 - Full-project mypy still has historical import-chain/stub/type debt.
 - Full-project ruff has historical style/lint findings; touched-module ruff gates pass, but repo-wide cleanup should be a separate maintenance branch.
 - Earlier real LLM runs targeted the obsolete 15-task suite; the corrected V2 suite needs a fresh run.
-- The current CLI `run` path does not yet produce patches from a real model.
-- The independent eval actor generates one patch per attempt and cannot yet inspect, search, test, diff, and repair through an adaptive tool loop.
+- The unified Runtime is implemented, but its real-model 11-task baseline and ablations have not yet been rerun.
+- Docker remains a hard execution dependency for production verification; unavailable Docker pauses instead of falling back to host shell.
 - Retrieval evaluation is still mostly Python and local fixtures, not a broad multi-language external benchmark.
 - Medium repo results show the context engine still needs better semantic retrieval and cross-module expansion.
 
@@ -321,10 +423,10 @@ Important directories:
 
 Recommended order:
 
-1. Run the four-week reviewer prompt in `code_review/four_week_reviewer_prompt.md`.
-2. Fix any P0/P1/P2 findings from that review.
-3. Replace the one-shot patch actor with an observation/action/tool loop.
-4. Connect the real LLM-backed actor to `codeteam run`.
-5. Run the frozen 11-task V2 suite and ablations: plan-first vs direct, repair vs single shot, structured compaction vs truncation.
+1. Run one real-model smoke task, then the 11-task dev baseline.
+2. Run ablations: plan-first vs direct, repair vs single shot, and structured vs none/naive compaction.
+3. Inspect Runtime artifacts and classify provider, retrieval, patch, verification, safety, and budget failures.
+4. Ask the reviewer to inspect the unified Runtime changes and the new evaluation evidence.
+5. Fix any newly confirmed P0/P1/P2 findings before using the Runtime as the Week5 multi-agent executor.
 6. Improve retrieval on medium repo business/cross-module/doc/config misses.
 7. Tackle full-project ruff and mypy as separate cleanup/type-hardening branches.

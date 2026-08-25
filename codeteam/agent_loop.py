@@ -1,13 +1,13 @@
 import json
 import time
-
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import ValidationError
 
-from codeteam.limits import AgentLoopLimits, check_step_limit, check_tool_call_limit
 from codeteam.events import AgentEvent, AgentEventType, make_event
+from codeteam.limits import AgentLoopLimits, check_step_limit, check_tool_call_limit
 from codeteam.llm.base import ModelResponse
 from codeteam.schemas.final_output import (
     AgentFinalOutput,
@@ -16,7 +16,12 @@ from codeteam.schemas.final_output import (
 )
 from codeteam.schemas.messages import Message
 from codeteam.schemas.tool_calls import ToolCall, ToolResult
-from codeteam.state import AgentLoopState, StopReason, is_repeated_action, record_tool_call
+from codeteam.state import (
+    AgentLoopState,
+    StopReason,
+    is_repeated_action,
+    record_tool_call,
+)
 from codeteam.tools.registry import ToolRegistry
 from codeteam.usage.tracker import UsageTracker
 
@@ -76,11 +81,17 @@ class ParsedModelOutput:
 
 
 def run_agent_loop(
-        model_client: Any,
-        tool_registry: ToolRegistry,
-        messages: list[Message],
-        limits: AgentLoopLimits | None = None,
-        actual_tests_passed: bool | None = None,
+    model_client: Any,
+    tool_registry: ToolRegistry,
+    messages: list[Message],
+    limits: AgentLoopLimits | None = None,
+    actual_tests_passed: bool | Callable[[], bool] | None = None,
+    message_transform: Callable[[list[Message]], list[Message]] | None = None,
+    state_version_provider: Callable[[], int] | None = None,
+    state_callback: Callable[[AgentLoopState], None] | None = None,
+    lifecycle_callback: Callable[
+        [str, AgentLoopState, dict[str, Any]], None
+    ] | None = None,
 ) -> AgentLoopResult:
     if limits is None:
         limits = AgentLoopLimits()
@@ -116,7 +127,47 @@ def run_agent_loop(
             data={"message_count": len(state.messages)},
         ))
 
-        raw_response = model_client.complete(state.messages)
+        request_messages = (
+            message_transform(list(state.messages))
+            if message_transform is not None
+            else list(state.messages)
+        )
+        if lifecycle_callback is not None:
+            lifecycle_callback(
+                "model.started",
+                state,
+                {"step_index": state.step_count},
+            )
+        try:
+            raw_response = model_client.complete(request_messages)
+        except Exception as error:  # noqa: BLE001
+            if lifecycle_callback is not None:
+                lifecycle_callback(
+                    "model.completed",
+                    state,
+                    {
+                        "step_index": state.step_count,
+                        "success": False,
+                        "error_type": type(error).__name__,
+                    },
+                )
+            stop_reason = (
+                StopReason.PROVIDER_ERROR
+                if _is_provider_error(error)
+                else StopReason.INTERNAL_ERROR
+            )
+            return _stop_with_failure(
+                state,
+                stop_reason,
+                (
+                    f"Model provider failed: {error}"
+                    if stop_reason is StopReason.PROVIDER_ERROR
+                    else f"Model client failed internally: {error}"
+                ),
+                start_time,
+                usage_tracker,
+                events,
+            )
         try:
             model_response = _normalize_model_response(raw_response)
         except TypeError as error:
@@ -135,6 +186,12 @@ def run_agent_loop(
             input_tokens=model_response.input_tokens,
             output_tokens=model_response.output_tokens,
         )
+        if lifecycle_callback is not None:
+            lifecycle_callback(
+                "model.completed",
+                state,
+                {"step_index": state.step_count},
+            )
 
         events.append(make_event(
             AgentEventType.MODEL_RESPONSE,
@@ -148,9 +205,20 @@ def run_agent_loop(
             },
         ))
 
+        state.messages.append(
+            Message(role="assistant", content=model_response.content)
+        )
+        if state_callback is not None:
+            state_callback(state)
+
+        tests_passed = (
+            actual_tests_passed()
+            if callable(actual_tests_passed)
+            else actual_tests_passed
+        )
         parsed_output = _parse_model_output(
             model_response.content,
-            actual_tests_passed=actual_tests_passed,
+            actual_tests_passed=tests_passed,
         )
 
         if parsed_output.stop_reason is not None:
@@ -172,6 +240,9 @@ def run_agent_loop(
                 start_time,
                 usage_tracker,
                 events,
+                state_version_provider=state_version_provider,
+                state_callback=state_callback,
+                lifecycle_callback=lifecycle_callback,
             )
             if stop_result is not None:
                 return stop_result
@@ -292,6 +363,12 @@ def _handle_tool_calls(
     start_time: float,
     usage_tracker: UsageTracker,
     events: list[AgentEvent],
+    *,
+    state_version_provider: Callable[[], int] | None = None,
+    state_callback: Callable[[AgentLoopState], None] | None = None,
+    lifecycle_callback: Callable[
+        [str, AgentLoopState, dict[str, Any]], None
+    ] | None = None,
 ) -> AgentLoopResult | None:
     for call in tool_calls:
         if check_tool_call_limit(state, limits):
@@ -304,7 +381,15 @@ def _handle_tool_calls(
                 events,
             )
 
-        if is_repeated_action(state, call.name, call.arguments):
+        workspace_version = (
+            state_version_provider() if state_version_provider is not None else 0
+        )
+        if is_repeated_action(
+            state,
+            call.name,
+            call.arguments,
+            workspace_version,
+        ):
             return _stop_with_failure(
                 state,
                 StopReason.REPEATED_ACTION,
@@ -321,7 +406,25 @@ def _handle_tool_calls(
             data={"call_id": call.call_id, "name": call.name, "arguments": call.arguments},
         ))
 
+        if lifecycle_callback is not None:
+            lifecycle_callback(
+                "tool.started",
+                state,
+                {"call_id": call.call_id, "tool_name": call.name},
+            )
+
         result = tool_registry.execute(call)
+
+        if lifecycle_callback is not None:
+            lifecycle_callback(
+                "tool.completed",
+                state,
+                {
+                    "call_id": call.call_id,
+                    "tool_name": call.name,
+                    "success": result.success,
+                },
+            )
 
         events.append(make_event(
             AgentEventType.TOOL_RESULT,
@@ -334,8 +437,15 @@ def _handle_tool_calls(
                 "error": result.error,
             },
         ))
-        record_tool_call(state, call.name, call.arguments)
+        record_tool_call(
+            state,
+            call.name,
+            call.arguments,
+            workspace_version,
+        )
         state.messages.append(_tool_result_to_message(result))
+        if state_callback is not None:
+            state_callback(state)
 
     return None
 
@@ -374,6 +484,17 @@ def _normalize_model_response(raw_response: str | ModelResponse) -> ModelRespons
         return raw_response
 
     raise TypeError("Model client must return str or ModelResponse.")
+
+
+def _is_provider_error(error: Exception) -> bool:
+    return (
+        isinstance(error, (TimeoutError, OSError))
+        or hasattr(error, "normalized_code")
+        or (
+            type(error).__name__ == "ProviderRequestError"
+            and hasattr(error, "failures")
+        )
+    )
 
 
 def _build_loop_result(
