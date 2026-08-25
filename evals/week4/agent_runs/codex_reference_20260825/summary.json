@@ -1,0 +1,11 @@
+{
+  "run_id": "codex-reference-20260825",
+  "mode": "baseline",
+  "task_count": 11,
+  "success_count": 11,
+  "provider_blocked_count": 0,
+  "acceptance_passed_count": 11,
+  "regression_passed_count": 11,
+  "security_passed_count": 11,
+  "pristine_acceptance_passed_count": 0
+}

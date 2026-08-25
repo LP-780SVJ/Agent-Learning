@@ -2,8 +2,9 @@
 
 Date: 2026-08-23
 
-CodeTeam state under evaluation: `101d95b` plus the current Week4 Day7
-agent-eval working-tree implementation.
+Original closeout state: `101d95b`. The task-suite correction recorded on
+2026-08-25 uses unified fixture commit
+`3956afc05d6c1ad2f3efaac9a510133436c0f700` plus verified per-task seed patches.
 
 This report is a four-week closeout evaluation, not a claim that CodeTeam is already a full autonomous coding benchmark runner. The current CLI can inspect, retrieve context, create durable sessions, pause/resume, diff/rollback, enforce command policy, execute Docker sandbox checks, and run a task-level agent-eval harness. The production `codeteam run` path still uses a deterministic `MockPlanner` shell; real patch generation now exists in the independent evaluation path as `LLMPatchGenerator` + `PatchActor`.
 
@@ -16,7 +17,7 @@ Key configuration:
 | Field | Value |
 |---|---|
 | Python command | `.venv/bin/python` |
-| Repo baseline commit | `101d95b` |
+| Agent task baseline commit | `3956afc05d6c1ad2f3efaac9a510133436c0f700` |
 | Retrieval Top K | 5 |
 | Retrieval methods | `filename,ripgrep,ripgrep_symbol,hybrid` |
 | Week2 dataset | `evals/week2/file_retrieval.jsonl` |
@@ -121,33 +122,47 @@ URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>
 
 An elevated retry was requested, but the runtime approval review rejected it because the command would send repository task/context data to an external LLM endpoint whose concrete destination had not been explicitly approved in this turn. This is recorded as `BLOCKED_BY_APPROVAL/API_EGRESS`, not as a local implementation failure.
 
-## 15-Task Agent Evaluation Status
+## 11-Task Agent Evaluation Status
 
-The suite is stored at `evals/week4/agent_task_suite_v1.jsonl`; hidden oracle V1 is stored under `eval_hidden/week4/`.
+The corrected suite is stored at `evals/week4/agent_task_suite_v1.jsonl`; hidden
+oracles are stored under `eval_hidden/week4/`. Four tasks that evaluated the
+CodeTeam repository itself (`F02`, `M01`, `M02`, `M03`) were removed. Every
+remaining task evaluates only `tests/fixtures/medium_repo` from one fixed base
+commit. `B01`, `B02`, and `B04` apply hash-pinned fault seeds after the common
+archive is created; the other eight use the archived base directly.
 
 | Split | Count | Purpose |
 |---|---:|---|
-| Development | 5 | Debug/tune harness, prompts, retrieval, repair. |
-| Held-out | 10 | Freeze-before-run evidence. |
+| Development | 4 | Debug/tune harness, prompts, retrieval, repair. |
+| Held-out | 7 | Freeze-before-run evidence. |
 
 | Type | Count |
 |---|---:|
 | Bug fix | 5 |
-| Feature | 4 |
+| Feature | 3 |
 | Refactor | 3 |
-| Maintenance | 3 |
 
-Current executable harness status: `RUN_WITH_NULL_ACTOR`.
+The runner now fails closed when a declared base commit cannot be archived,
+verifies each setup patch SHA-256, commits the seeded baseline before the actor
+runs, and records all base/seed metadata in the run manifest.
 
-Null actor baseline output: `evals/week4/agent_runs/null_baseline/`.
+Corrected null preflight output: `evals/week4/agent_runs/null_baseline_v2/`.
 
 | Actor | Mode | Tasks | Success | Provider Blocked | Acceptance Passed | Regression Passed |
 |---|---|---:|---:|---:|---:|---:|
-| null | baseline | 15 | 0 | 0 | 4 | 14 |
+| null | baseline | 11 | 0 | 0 | 0 | 11 |
+| Codex manual reference | baseline | 11 | 11 | 0 | 11 | 11 |
 
-Interpretation: the runner, isolated workspace setup, hidden acceptance commands, regression commands, and result serialization work end to end. The success count is intentionally 0 because the null actor produces no patch; the grader requires `actor_status=completed` as well as passing tests, so pre-solved fixture behavior cannot inflate success.
+The null result proves every pristine task fails its hidden acceptance while
+all public regression suites pass. The Codex reference run is stored at
+`evals/week4/agent_runs/codex_reference_20260825/`; all 11 tasks passed hidden
+acceptance, public regression, budget, and security checks. This is a
+non-blind reference run because Codex inspected the hidden tests while repairing
+the suite. It proves solvability and oracle discrimination, not held-out model
+performance.
 
-Real LLM actor status: `BLOCKED_BY_APPROVAL/API_EGRESS` after one-task smoke. The implementation path exists, but a valid coding success rate still requires explicit egress approval for the concrete provider endpoint and then a real run.
+The earlier real-LLM runs targeted the obsolete 15-task suite and must not be
+compared directly with V2. A fresh blind real-LLM baseline is still required.
 
 ## Ablation Status
 
@@ -174,7 +189,7 @@ Null ablation outputs:
 | ID | Status | Component | Observation | Next Action |
 |---|---|---|---|---|
 | W4-F001 | OPEN | Retrieval | Medium business/cross-module queries often miss indirect gold files. | Improve semantic query expansion, dependency fanout, and config/doc seeding. |
-| W4-F002 | PARTIAL | Evaluation | 15-task coding suite now has EvalRunner, Grader, hidden oracle V1, and PatchActor, but only null actor runs completed. | Approve concrete LLM egress and run real actor baseline plus ablations. |
+| W4-F002 | PARTIAL | Evaluation | Corrected 11-task suite has discriminative oracles and a passing non-blind Codex reference run; no blind real-LLM V2 run exists yet. | Freeze V2 and run a fresh real actor baseline plus ablations. |
 | W4-F003 | ACCEPTED | Provider/API Egress | Real LLM smoke previously hit `model_overloaded`; current managed sandbox DNS failed and elevated egress was rejected by policy review. | Explicitly approve the concrete provider/base URL before claiming real LLM evidence. |
 | W4-F004 | OPEN | Static hygiene | Full-repo ruff has many historical style issues; scoped touched-module ruff passes. | Decide whether to run a separate lint cleanup branch. |
 | W4-F005 | ACCEPTED | Type checking | Full mypy still has historical import-chain/stub debt. | Excluded by user for this closeout; keep tracked as type debt. |
@@ -183,4 +198,8 @@ Null ablation outputs:
 
 Current four-week status: functional runtime foundations are in good shape. The repository passes full tests, including real Docker boundaries when terminal permissions allow it. The strongest implemented evidence is around Git safety, command policy, sandbox boundaries, durable sessions, CLI contracts, and retrieval evaluation.
 
-The biggest remaining product gap is now narrower: the independent coding benchmark loop exists, but a real LLM-backed run is blocked by provider/egress approval rather than by missing local harness code. Day7 therefore closes with executable benchmark infrastructure, null-actor baseline evidence, and a clear requirement for an explicitly approved provider run before claiming task-solving performance.
+The benchmark infrastructure now has a fixed, reproducible medium-repo suite,
+a null preflight, and a solvability reference. The biggest remaining product
+gap is the actor itself: it is still a one-shot context-to-patch component, so a
+fresh blind run measures that limited scaffold rather than a tool-using coding
+agent. Real V2 performance and ablations must be rerun after the suite freeze.

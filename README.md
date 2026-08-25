@@ -25,7 +25,7 @@ The first four weeks are now at a closeout baseline.
 | Durable session and resume | Implemented | `tests/session/` |
 | CLI product layer | Implemented | `tests/cli/`, subprocess E2E |
 | Agent EvalRunner / Grader | Implemented V1 | `codeteam/evaluation/agent_runner.py`, `eval_hidden/week4/` |
-| 15-task coding benchmark | Harness run with null actor; real LLM blocked by egress approval | `evals/week4/agent_runs/` |
+| 11-task coding benchmark V2 | Null preflight valid; non-blind Codex reference 11/11 | `evals/week4/agent_runs/` |
 
 Latest closeout evidence:
 
@@ -34,7 +34,7 @@ normal sandbox:      1195 passed, 6 skipped
 Docker integration:  42 passed in prior elevated closeout run
 ```
 
-The current `codeteam run` command is still a productized shell around deterministic planning. It creates durable sessions and exercises orchestration, but it does not yet run a real LLM-backed patch-producing actor. For that reason the Week4 Day7 15-task task success rate is intentionally not claimed yet.
+The current `codeteam run` command is still a productized shell around deterministic planning. It creates durable sessions and exercises orchestration, but it does not yet run a real LLM-backed patch-producing actor. The independent eval actor can call a real provider, but it remains a one-shot context-to-patch flow rather than an interactive coding loop.
 
 ## Quick Start
 
@@ -219,7 +219,7 @@ Capabilities:
 - SIGINT E2E: `run` pauses a session, returns `130`, and `resume` rebuilds runtime in a new process.
 - Independent `agent-eval` path with `LLMPatchGenerator`, `PatchActor`, fresh workspace runner, hidden oracle grader, null baseline, and ablation modes.
 
-Important limitation: `run` is not yet a full autonomous coding task actor. The independent eval path can call a real LLM patch actor, but the latest real provider run was blocked by network/API egress approval. Null-actor benchmark runs prove the harness, not task-solving ability.
+Important limitation: `run` is not yet a full autonomous coding task actor. The independent eval path can call a real LLM patch actor and recent provider calls succeeded, but the corrected V2 suite has not had a fresh blind real-LLM run. Null preflight proves the harness and the non-blind Codex reference proves solvability; neither is a model benchmark score.
 
 ## Evaluation
 
@@ -229,9 +229,10 @@ Current evaluation artifacts:
 - `evals/medium_repo/file_retrieval.jsonl`: more realistic medium fixture benchmark.
 - `evals/week4/week2_retrieval/`: fresh Week4 rerun of the Week2 suite.
 - `evals/week4/medium_retrieval/`: fresh Week4 rerun of the medium suite.
-- `evals/week4/agent_task_suite_v1.jsonl`: 15-task agent benchmark suite.
-- `eval_hidden/week4/`: hidden oracle V1 for the 15 task suite.
-- `evals/week4/agent_runs/`: null baseline, null ablations, and LLM smoke outputs.
+- `evals/week4/agent_task_suite_v1.jsonl`: corrected 11-task medium-repo benchmark suite.
+- `evals/week4/task_seeds/`: hash-pinned per-task fault seeds applied after the common base archive.
+- `eval_hidden/week4/`: hidden acceptance oracle for the 11-task suite.
+- `evals/week4/agent_runs/`: null preflight, Codex reference, historical LLM, and ablation outputs.
 - `evals/week4/EVALUATION_WEEK4.md`: Week4 closeout report.
 - `test_log/2026-08-22_week4_day7_evaluation_log.md`: command log and conclusions.
 
@@ -255,17 +256,18 @@ Interpretation:
 - Current retrieval is strongest when exact symbols or direct text are present.
 - Current retrieval is weaker when the prompt describes behavior rather than implementation words.
 
-15-task coding benchmark status:
+11-task coding benchmark V2 status:
 
 ```text
-suite:         yes
-hidden oracle: yes, V1
-null baseline: 15 tasks, 0 success, 4 hidden acceptance pass, 14 regression pass
-null ablation: direct/single-shot/no-compaction/naive-compaction harness runs complete
-real LLM:      blocked by network/API egress approval in this environment
+fixture:       tests/fixtures/medium_repo only
+base commit:   3956afc05d6c1ad2f3efaac9a510133436c0f700
+hidden oracle: 11/11 fail on pristine state
+null V2:       0/11 success, 0 acceptance pass, 11 regression pass
+Codex reference: 11/11 success (non-blind oracle-informed solvability check)
+real LLM V2:  not rerun after suite correction
 ```
 
-`LLMPatchGenerator` and `PatchActor` exist in the independent eval path. A trustworthy success rate still requires an explicitly approved provider endpoint and a full real-actor run.
+`LLMPatchGenerator` and `PatchActor` exist in the independent eval path. A trustworthy model success rate still requires a fresh blind real-actor run on the frozen V2 suite; the Codex reference result is not held-out evidence.
 
 The project intentionally does not claim a task success rate until CodeTeam has an actor/judge evaluation harness with hidden acceptance tests, regression tests, fixed budgets, and safety invariants.
 
@@ -296,9 +298,9 @@ When running inside a restricted terminal sandbox, Docker tests may skip. In a u
 
 - Full-project mypy still has historical import-chain/stub/type debt.
 - Full-project ruff has historical style/lint findings; touched-module ruff gates pass, but repo-wide cleanup should be a separate maintenance branch.
-- The real LLM smoke script reached provider code but was blocked by external `model_overloaded` during closeout.
+- Earlier real LLM runs targeted the obsolete 15-task suite; the corrected V2 suite needs a fresh run.
 - The current CLI `run` path does not yet produce patches from a real model.
-- The 15-task benchmark suite has metadata but hidden tests and EvalRunner/Grader still need implementation.
+- The independent eval actor generates one patch per attempt and cannot yet inspect, search, test, diff, and repair through an adaptive tool loop.
 - Retrieval evaluation is still mostly Python and local fixtures, not a broad multi-language external benchmark.
 - Medium repo results show the context engine still needs better semantic retrieval and cross-module expansion.
 
@@ -321,8 +323,8 @@ Recommended order:
 
 1. Run the four-week reviewer prompt in `code_review/four_week_reviewer_prompt.md`.
 2. Fix any P0/P1/P2 findings from that review.
-3. Build the Day7 EvalRunner/Grader with fresh worktrees and hidden acceptance tests.
-4. Connect a real LLM-backed patch actor to `codeteam run`.
-5. Run the 15-task suite and ablations: plan-first vs direct, repair vs single shot, structured compaction vs truncation.
+3. Replace the one-shot patch actor with an observation/action/tool loop.
+4. Connect the real LLM-backed actor to `codeteam run`.
+5. Run the frozen 11-task V2 suite and ablations: plan-first vs direct, repair vs single shot, structured compaction vs truncation.
 6. Improve retrieval on medium repo business/cross-module/doc/config misses.
 7. Tackle full-project ruff and mypy as separate cleanup/type-hardening branches.

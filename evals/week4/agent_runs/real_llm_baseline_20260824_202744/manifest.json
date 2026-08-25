@@ -1,0 +1,13 @@
+{
+  "run_id": "baseline-28a22459",
+  "mode": "baseline",
+  "provider_id": "openai-compatible",
+  "model_id": "deepseek-v4-flash",
+  "planning_enabled": true,
+  "repair_enabled": true,
+  "compaction_mode": "structured",
+  "context_budget": 4096,
+  "task_count": 15,
+  "keep_workspaces": true,
+  "pristine_oracle_check": true
+}

@@ -1,0 +1,14 @@
+diff --git a/src/auth/api.py b/src/auth/api.py
+--- a/src/auth/api.py
++++ b/src/auth/api.py
+@@ -13,8 +13,8 @@ class AuthController:
+         token = request.get("refresh_token", "")
+         try:
+             return {"status": 200, "body": self.service.refresh_session(token)}
+-        except RefreshTokenExpired as exc:
+-            return {"status": 401, "error": str(exc)}
++        except RefreshTokenExpired:
++            return {"status": 401, "error": "internal server error"}
+         except RefreshTokenRevoked as exc:
+             return {"status": 401, "error": str(exc)}
+         except AuthError as exc:

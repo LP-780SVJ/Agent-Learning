@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
+import subprocess
 import urllib.error
 from pathlib import Path
+
+import pytest
 
 from codeteam.cli import agent_eval_command
 from codeteam.evaluation.agent_grader import AgentGrader
@@ -15,7 +19,11 @@ from codeteam.evaluation.agent_models import (
     PatchActorResult,
     PatchActorStatus,
 )
-from codeteam.evaluation.agent_runner import AgentEvalRunner, load_agent_eval_tasks
+from codeteam.evaluation.agent_runner import (
+    AgentEvalDatasetError,
+    AgentEvalRunner,
+    load_agent_eval_tasks,
+)
 from codeteam.evaluation.patch_actor import (
     LLMPatchGenerator,
     NullPatchGenerator,
@@ -35,6 +43,93 @@ class StaticPatchGenerator:
 
     def generate_patch(self, **kwargs) -> str:
         return self.patch
+
+
+def test_prepare_workspace_applies_verified_setup_patch(tmp_path: Path) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    setup_patch = tmp_path / "setup.diff"
+    setup_patch.write_text(
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 0\n",
+        encoding="utf-8",
+    )
+    task = AgentEvalTask(
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        repo_fixture=Path("fixture"),
+        base_commit="",
+        setup_patch=Path("setup.diff"),
+        setup_patch_sha256=hashlib.sha256(setup_patch.read_bytes()).hexdigest(),
+        prompt="restore VALUE",
+        oracle_review_status="test",
+    )
+    runner = AgentEvalRunner(
+        project_root=tmp_path,
+        actor=PatchActor(patch_generator=NullPatchGenerator()),
+        keep_workspaces=True,
+    )
+    destination = tmp_path / "workspace"
+
+    runner._prepare_workspace(task=task, destination=destination)
+
+    assert (destination / "app.py").read_text(encoding="utf-8") == "VALUE = 0\n"
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=destination,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert status.stdout == ""
+
+
+def test_prepare_workspace_fails_closed_for_missing_base_commit(
+    tmp_path: Path,
+) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    task = AgentEvalTask(
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        repo_fixture=Path("fixture"),
+        base_commit="not-a-real-commit",
+        prompt="change VALUE",
+        oracle_review_status="test",
+    )
+    runner = AgentEvalRunner(
+        project_root=tmp_path,
+        actor=PatchActor(patch_generator=NullPatchGenerator()),
+        keep_workspaces=True,
+    )
+
+    with pytest.raises(AgentEvalDatasetError, match="Unable to archive base_commit"):
+        runner._prepare_workspace(task=task, destination=tmp_path / "workspace")
+
+
+def test_setup_patch_path_and_hash_must_be_provided_together() -> None:
+    with pytest.raises(ValueError, match="must be provided together"):
+        AgentEvalTask(
+            task_id="T01",
+            split=AgentEvalSplit.DEV,
+            type=AgentTaskType.BUG,
+            difficulty="L1",
+            repo_fixture=Path("fixture"),
+            base_commit="",
+            setup_patch=Path("setup.diff"),
+            prompt="change VALUE",
+            oracle_review_status="test",
+        )
 
 
 def test_extract_unified_diff_from_markdown_fence() -> None:
@@ -127,6 +222,17 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
     summary = json.loads((tmp_path / "out" / "summary.json").read_text())
     assert summary["success_count"] == 1
     assert summary["pristine_acceptance_passed_count"] == 0
+    manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert manifest["tasks"] == [
+        {
+            "task_id": "T01",
+            "repo_fixture": str(fixture),
+            "base_commit": "",
+            "setup_patch": None,
+            "setup_patch_sha256": None,
+            "oracle_review_status": "test",
+        }
+    ]
 
 
 def test_null_patch_actor_cannot_pass_even_if_oracle_would_pass(

@@ -1,6 +1,7 @@
 """Task-level agent evaluation runner."""
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -178,6 +179,21 @@ class AgentEvalRunner:
                     "compaction_mode": config.compaction_mode,
                     "context_budget": config.context_budget,
                     "task_count": len(tasks),
+                    "tasks": [
+                        {
+                            "task_id": task.task_id,
+                            "repo_fixture": str(task.repo_fixture),
+                            "base_commit": task.base_commit,
+                            "setup_patch": (
+                                str(task.setup_patch)
+                                if task.setup_patch is not None
+                                else None
+                            ),
+                            "setup_patch_sha256": task.setup_patch_sha256,
+                            "oracle_review_status": task.oracle_review_status,
+                        }
+                        for task in tasks
+                    ],
                     "keep_workspaces": self.keep_workspaces,
                     "pristine_oracle_check": True,
                 },
@@ -208,12 +224,82 @@ class AgentEvalRunner:
             destination=destination,
         )
         if not archived:
+            if task.base_commit:
+                raise AgentEvalDatasetError(
+                    f"Unable to archive base_commit {task.base_commit!r} "
+                    f"for fixture {task.repo_fixture}."
+                )
             shutil.copytree(
                 source,
                 destination,
                 ignore=shutil.ignore_patterns(*IGNORED_NAMES),
             )
         _init_git_repo(destination)
+        if task.setup_patch is not None:
+            self._apply_setup_patch(task=task, destination=destination)
+
+    def _apply_setup_patch(
+        self,
+        *,
+        task: AgentEvalTask,
+        destination: Path,
+    ) -> None:
+        patch_path = task.setup_patch
+        if patch_path is None:
+            return
+        resolved = (
+            patch_path.resolve()
+            if patch_path.is_absolute()
+            else (self.project_root / patch_path).resolve()
+        )
+        try:
+            resolved.relative_to(self.project_root)
+        except ValueError as error:
+            raise AgentEvalDatasetError(
+                f"Setup patch must be inside the project: {patch_path}"
+            ) from error
+        if not resolved.is_file():
+            raise AgentEvalDatasetError(f"Setup patch does not exist: {patch_path}")
+
+        patch_bytes = resolved.read_bytes()
+        actual_sha256 = hashlib.sha256(patch_bytes).hexdigest()
+        if task.setup_patch_sha256 != actual_sha256:
+            raise AgentEvalDatasetError(
+                f"Setup patch hash mismatch for {task.task_id}: "
+                f"expected {task.setup_patch_sha256!r}, got {actual_sha256!r}"
+            )
+
+        apply_result = subprocess.run(  # noqa: UP022
+            ["git", "apply", "--check", "-"],
+            cwd=destination,
+            input=patch_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            timeout=30,
+            check=False,
+        )
+        if apply_result.returncode != 0:
+            stderr = apply_result.stderr.decode("utf-8", errors="replace")
+            raise AgentEvalDatasetError(
+                f"Setup patch check failed for {task.task_id}: {stderr}"
+            )
+        apply_result = subprocess.run(  # noqa: UP022
+            ["git", "apply", "-"],
+            cwd=destination,
+            input=patch_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            timeout=30,
+            check=False,
+        )
+        if apply_result.returncode != 0:
+            stderr = apply_result.stderr.decode("utf-8", errors="replace")
+            raise AgentEvalDatasetError(
+                f"Setup patch apply failed for {task.task_id}: {stderr}"
+            )
+        _commit_workspace_state(destination, message=f"seed {task.task_id}")
 
     def _archive_fixture(
         self,
@@ -415,6 +501,24 @@ def _init_git_repo(path: Path) -> None:
             stderr = result.stderr.decode("utf-8", errors="replace")
             raise RuntimeError(
                 f"workspace git command failed: {' '.join(command)}: {stderr}"
+            )
+
+
+def _commit_workspace_state(path: Path, *, message: str) -> None:
+    for command in (["git", "add", "."], ["git", "commit", "-m", message]):
+        result = subprocess.run(  # noqa: UP022
+            command,
+            cwd=path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            raise AgentEvalDatasetError(
+                f"workspace setup commit failed: {' '.join(command)}: {stderr}"
             )
 
 

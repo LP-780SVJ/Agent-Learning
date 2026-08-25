@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class AgentEvalSplit(str, Enum):
@@ -53,12 +53,22 @@ class AgentEvalTask(BaseModel):
     difficulty: str
     repo_fixture: Path
     base_commit: str
+    setup_patch: Path | None = None
+    setup_patch_sha256: str | None = None
     prompt: str
     acceptance_commands: tuple[str, ...] = ()
     regression_commands: tuple[str, ...] = ()
     budget: EvalBudget = Field(default_factory=EvalBudget)
     safety_invariants: tuple[str, ...] = ()
     oracle_review_status: str = "unknown"
+
+    @model_validator(mode="after")
+    def validate_setup_patch_metadata(self) -> AgentEvalTask:
+        if (self.setup_patch is None) != (self.setup_patch_sha256 is None):
+            raise ValueError(
+                "setup_patch and setup_patch_sha256 must be provided together"
+            )
+        return self
 
 
 class EvalRunConfig(BaseModel):
