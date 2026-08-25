@@ -1871,8 +1871,9 @@ dependency specs
 
 依赖来源可以有三种：
 
-1. 外部显式输入：例如 `(("P1", "P2"), ("P2", "P3"))`。
-2. 保守默认：没有显式依赖时，所有节点都作为 root，允许并行。
+1. 外部显式输入：例如 `(("A-backend", "A-tests"), ("A-frontend", "A-tests"))`。
+2. 明确独立：调用方传 `dependencies=()`，表示已经确认所有节点都可以作为 root。
+3. 未声明依赖：调用方传 `dependencies=None` 或省略参数；多节点时必须 fail closed，不能默认并行。
 3. 教学辅助转换：提供 `linear=True` 的 helper，把 Plan 顺序转换成链式依赖。
 
 第一版建议：
@@ -1880,15 +1881,23 @@ dependency specs
 ```python
 TaskDAG.from_lead_planning_result(
     result,
-    dependencies=(("P1", "P3"), ("P2", "P3")),
+    dependencies=(("A-backend", "A-tests"), ("A-frontend", "A-tests")),
 )
 ```
 
 这里的 pair 仍然使用：
 
 ```text
-(prerequisite_step_id, dependent_step_id)
+(prerequisite_node_id, dependent_node_id)
 ```
+
+当前 factory 的映射是：
+
+```text
+TaskNode.node_id = WorkerAssignment.assignment_id
+```
+
+也就是说，DAG 边引用的是运行时节点 ID。`source_step_id` 只是从 Planner 的 `PlanStep` 追踪到 `WorkerAssignment` 的审计字段，不是 DAG dependency 的 ID namespace。如果未来想让模型输出 `source_step_id` 依赖，需要写一个显式 adapter，把 step ID pair 转换成 assignment/node ID pair；不要让同一个参数同时接受两套 ID。
 
 ### 不要做的推断
 
@@ -2244,7 +2253,8 @@ def validate(self) -> None:
 
 - 容易解释。
 - 能自然发现 cycle。
-- 时间复杂度是 `O(V + E)`。
+- 如果用普通队列，Kahn 算法可以做到 `O(V + E)`。
+- 如果为了确定性顺序使用 `heapq` 按 `node_id` 取最小 ready 节点，复杂度应诚实记为 `O((V + E) log V)` 量级。
 
 伪代码：
 
@@ -2495,10 +2505,12 @@ Kahn 算法：
 复杂度：
 
 ```text
-O(V + E)
+O((V + E) log V)
 ```
 
 其中 V 是节点数，E 是依赖边数。
+
+这个复杂度对应 Day2 的确定性 heap 版本：每个节点进入/离开 heap，边用于更新 indegree。代价比纯队列 Kahn 更高一点，但输出顺序稳定，适合测试、benchmark 和可复现调度。
 
 ---
 

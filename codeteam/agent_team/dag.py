@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 from enum import Enum
 
 from pydantic import BaseModel, field_validator
@@ -50,6 +51,14 @@ class CycleDetectedError(DAGError):
     """Raised when the graph is not acyclic."""
 
 
+class UndeclaredDependenciesError(DAGError):
+    """Raised when multi-node DAG dependencies were not declared."""
+
+
+class InvalidTaskStatusError(DAGError):
+    """Raised when a status update bypasses the TaskStatus contract."""
+
+
 class TaskDAG:
     def __init__(self) -> None:
         self._nodes: dict[str, TaskNode] = {}
@@ -60,7 +69,7 @@ class TaskDAG:
         cls,
         result: LeadPlanningResult,
         *,
-        dependencies: tuple[tuple[str, str], ...] = (),
+        dependencies: tuple[tuple[str, str], ...] | None = None,
     ) -> TaskDAG:
         dag = cls()
         for assignment in result.assignments:
@@ -70,13 +79,26 @@ class TaskDAG:
                     assignment=assignment,
                 )
             )
+        if dependencies is None:
+            if len(result.assignments) > 1:
+                raise UndeclaredDependenciesError(
+                    "dependencies must be declared for multi-node DAGs; "
+                    "pass dependencies=() only when all nodes are intentionally "
+                    "independent"
+                )
+            dag.validate()
+            return dag
         for prerequisite_id, dependent_id in dependencies:
             dag.add_dependency(prerequisite_id, dependent_id)
+        dag.validate()
         return dag
 
     @property
     def nodes(self) -> tuple[TaskNode, ...]:
-        return tuple(self._nodes[node_id] for node_id in sorted(self._nodes))
+        return tuple(
+            self._snapshot_node(self._nodes[node_id])
+            for node_id in sorted(self._nodes)
+        )
 
     @property
     def dependencies(self) -> dict[str, frozenset[str]]:
@@ -88,7 +110,7 @@ class TaskDAG:
     def add_task(self, node: TaskNode) -> None:
         if node.node_id in self._nodes:
             raise DuplicateTaskNodeError(node.node_id)
-        self._nodes[node.node_id] = node
+        self._nodes[node.node_id] = self._snapshot_node(node)
         self._dependencies[node.node_id] = set()
 
     def add_dependency(self, prerequisite_id: str, dependent_id: str) -> None:
@@ -115,27 +137,27 @@ class TaskDAG:
             for node_id, prerequisites in self._dependencies.items()
         }
         dependents = self._dependents()
-        ready = sorted(
+        ready = [
             node_id
             for node_id, indegree in indegrees.items()
             if indegree == 0
-        )
+        ]
+        heapq.heapify(ready)
         ordered_ids: list[str] = []
 
         while ready:
-            node_id = ready.pop(0)
+            node_id = heapq.heappop(ready)
             ordered_ids.append(node_id)
 
-            for dependent_id in sorted(dependents[node_id]):
+            for dependent_id in dependents[node_id]:
                 indegrees[dependent_id] -= 1
                 if indegrees[dependent_id] == 0:
-                    ready.append(dependent_id)
-            ready.sort()
+                    heapq.heappush(ready, dependent_id)
 
         if len(ordered_ids) != len(self._nodes):
             raise CycleDetectedError("Task DAG contains a cycle")
 
-        return tuple(self._nodes[node_id] for node_id in ordered_ids)
+        return tuple(self._snapshot_node(self._nodes[node_id]) for node_id in ordered_ids)
 
     def get_ready_tasks(self) -> tuple[TaskNode, ...]:
         ready: list[TaskNode] = []
@@ -148,12 +170,27 @@ class TaskDAG:
                 self._nodes[prerequisite_id].status is TaskStatus.COMPLETED
                 for prerequisite_id in prerequisites
             ):
-                ready.append(node)
+                ready.append(self._snapshot_node(node))
         return tuple(ready)
+
+    def replace_task_status(self, node_id: str, status: TaskStatus) -> TaskNode:
+        self._require_node(node_id)
+        if not isinstance(status, TaskStatus):
+            raise InvalidTaskStatusError(
+                f"status must be a TaskStatus, got {type(status).__name__}"
+            )
+        self._nodes[node_id] = self._nodes[node_id].model_copy(
+            update={"status": status},
+            deep=True,
+        )
+        return self._snapshot_node(self._nodes[node_id])
 
     def _require_node(self, node_id: str) -> None:
         if node_id not in self._nodes:
             raise UnknownTaskNodeError(node_id)
+
+    def _snapshot_node(self, node: TaskNode) -> TaskNode:
+        return node.model_copy(deep=True)
 
     def _dependents(self) -> dict[str, set[str]]:
         dependents = {node_id: set() for node_id in self._nodes}
