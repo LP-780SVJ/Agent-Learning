@@ -1,0 +1,24 @@
+{
+  "run_id": "baseline-7bf867c7",
+  "mode": "baseline",
+  "provider_id": "openai-compatible",
+  "model_id": "deepseek-v4-flash",
+  "planning_enabled": true,
+  "repair_enabled": true,
+  "compaction_mode": "structured",
+  "context_budget": 4096,
+  "max_protocol_repairs": 2,
+  "task_count": 1,
+  "tasks": [
+    {
+      "task_id": "B01",
+      "repo_fixture": "tests/fixtures/medium_repo",
+      "base_commit": "3956afc05d6c1ad2f3efaac9a510133436c0f700",
+      "setup_patch": "evals/week4/task_seeds/B01.diff",
+      "setup_patch_sha256": "37e40dc5572420fb720425b1f9bec83da432e52688199bdabe488c8ba70356ef",
+      "oracle_review_status": "validated_v2"
+    }
+  ],
+  "keep_workspaces": true,
+  "pristine_oracle_check": true
+}

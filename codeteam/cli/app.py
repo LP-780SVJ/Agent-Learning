@@ -213,6 +213,10 @@ def run(
         typer.Option("--max-tool-calls", min=1),
     ] = 40,
     max_repairs: Annotated[int, typer.Option("--max-repairs", min=0)] = 3,
+    max_protocol_repairs: Annotated[
+        int,
+        typer.Option("--max-protocol-repairs", min=0, max=2),
+    ] = 2,
     compaction_mode: Annotated[
         AgentCompactionMode,
         typer.Option("--compaction", help="structured, none, or naive"),
@@ -236,6 +240,7 @@ def run(
             max_steps=max_steps,
             max_tool_calls=max_tool_calls,
             max_repairs=max_repairs,
+            max_protocol_repairs=max_protocol_repairs,
             compaction_mode=compaction_mode.value,
             output_format=cast(OutputFormat, output_format.value),
         )

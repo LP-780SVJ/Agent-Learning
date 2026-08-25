@@ -1,0 +1,13 @@
+{
+  "run_id": "baseline-7bf867c7",
+  "mode": "baseline",
+  "task_count": 1,
+  "success_count": 0,
+  "provider_blocked_count": 0,
+  "protocol_repair_attempt_count": 0,
+  "protocol_failed_count": 0,
+  "acceptance_passed_count": 1,
+  "regression_passed_count": 1,
+  "security_passed_count": 1,
+  "pristine_acceptance_passed_count": 0
+}

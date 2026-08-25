@@ -86,6 +86,7 @@ class EvalRunConfig(BaseModel):
     task_timeout_seconds: int = Field(default=900, gt=0)
     max_steps: int = Field(default=20, gt=0)
     max_repairs: int = Field(default=3, ge=0)
+    max_protocol_repairs: int = Field(default=2, ge=0, le=2)
 
 
 class PatchActorResult(BaseModel):
@@ -96,6 +97,7 @@ class PatchActorResult(BaseModel):
     compaction_mode: str
     patch_attempts: int = 0
     repair_attempts: int = 0
+    protocol_repair_attempts: int = 0
     tool_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -114,6 +116,7 @@ class PatchActorResult(BaseModel):
     patch_apply_stdout: str = ""
     patch_apply_stderr: str = ""
     error: str | None = None
+    failure_category: str | None = None
     events: tuple[str, ...] = ()
 
 
@@ -175,6 +178,7 @@ class AgentEvalTaskResult(BaseModel):
     changed_files: tuple[str, ...] = ()
     patch_attempts: int = 0
     repair_attempts: int = 0
+    protocol_repair_attempts: int = 0
     tool_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -190,6 +194,8 @@ class AgentEvalRunSummary(BaseModel):
     task_count: int
     success_count: int
     provider_blocked_count: int
+    protocol_repair_attempt_count: int = 0
+    protocol_failed_count: int = 0
     acceptance_passed_count: int
     regression_passed_count: int
     security_passed_count: int

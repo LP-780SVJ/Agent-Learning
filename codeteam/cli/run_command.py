@@ -123,6 +123,7 @@ def run_agent_task(request: RunRequest) -> None:
                     max_steps=request.max_steps,
                     max_tool_calls=request.max_tool_calls,
                     max_repairs=request.max_repairs,
+                    max_protocol_repairs=request.max_protocol_repairs,
                     compaction_mode=request.compaction_mode,
                 ),
             }
@@ -144,6 +145,9 @@ def run_agent_task(request: RunRequest) -> None:
                             "step_count": state.step_count,
                             "tool_call_count": state.tool_call_count,
                             "repair_attempts": evidence.repair_attempts,
+                            "protocol_repair_attempts": (
+                                state.protocol_repair_count
+                            ),
                             "workspace_version": evidence.workspace_version,
                             "recent_messages": tuple(state.messages[-24:]),
                             "last_verification": last_verification,
@@ -236,6 +240,7 @@ def run_agent_task(request: RunRequest) -> None:
         max_steps=request.max_steps,
         max_tool_calls=request.max_tool_calls,
         max_repairs=request.max_repairs,
+        max_protocol_repairs=request.max_protocol_repairs,
         compaction_mode=CompactionMode(request.compaction_mode),
         checkpoint_state_root=_checkpoint_state_root_for_repo(repo_root),
     )
@@ -267,6 +272,7 @@ def run_agent_task(request: RunRequest) -> None:
                     cost_usd=result.cost_usd,
                     tool_calls=result.tool_calls_used,
                     repair_attempts=result.repair_attempts,
+                    protocol_repair_attempts=result.protocol_repairs_used,
                 ),
                 "checkpoint_ids": tuple(
                     dict.fromkeys((*session.checkpoint_ids, *result.checkpoint_ids))
@@ -467,6 +473,10 @@ def resume_agent_session(request: ResumeRequest) -> None:
                             "repair_attempts": (
                                 state.repair_attempts + evidence.repair_attempts
                             ),
+                            "protocol_repair_attempts": (
+                                state.protocol_repair_attempts
+                                + loop_state.protocol_repair_count
+                            ),
                             "workspace_version": (
                                 state.workspace_version + evidence.workspace_version
                             ),
@@ -555,6 +565,9 @@ def resume_agent_session(request: ResumeRequest) -> None:
     remaining_steps = state.max_steps - state.step_count
     remaining_tool_calls = state.max_tool_calls - state.tool_call_count
     remaining_repairs = state.max_repairs - state.repair_attempts
+    remaining_protocol_repairs = (
+        state.max_protocol_repairs - state.protocol_repair_attempts
+    )
     if remaining_steps <= 0 or remaining_tool_calls <= 0:
         store.save(
             session.model_copy(
@@ -582,6 +595,7 @@ def resume_agent_session(request: ResumeRequest) -> None:
             max_steps=remaining_steps,
             max_tool_calls=remaining_tool_calls,
             max_repairs=max(0, remaining_repairs),
+            max_protocol_repairs=max(0, remaining_protocol_repairs),
             compaction_mode=CompactionMode(state.compaction_mode),
             verification_commands=state.verification_commands,
             checkpoint_state_root=_checkpoint_state_root_for_repo(repo_root),
@@ -617,6 +631,10 @@ def resume_agent_session(request: ResumeRequest) -> None:
                         ),
                         "repair_attempts": (
                             session.usage.repair_attempts + result.repair_attempts
+                        ),
+                        "protocol_repair_attempts": (
+                            session.usage.protocol_repair_attempts
+                            + result.protocol_repairs_used
                         ),
                     }
                 ),

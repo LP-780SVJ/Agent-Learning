@@ -25,17 +25,18 @@ The first four weeks are now at a closeout baseline.
 | Durable session and resume | Implemented | `tests/session/` |
 | CLI product layer | Implemented | `tests/cli/`, subprocess E2E |
 | Unified Coding Agent Runtime | Implemented | `codeteam/agent/runtime.py`, scripted-model integration tests |
+| Provider action normalization | Implemented | JSON, fenced JSON, DeepSeek DSML, bounded protocol repair |
 | Agent EvalRunner / Grader | Implemented V2 | Same Runtime as `run`; hidden oracle remains grader-only |
 | 11-task coding development benchmark | Null preflight 0/11; real run pending | `evals/week4/agent_task_suite_v1.jsonl` |
 
 Latest closeout evidence:
 
 ```text
-normal sandbox:      1219 passed, 6 skipped
+normal sandbox:      1236 passed, 6 skipped
 Docker integration:  42 passed in prior elevated closeout run
 ```
 
-`codeteam run` now uses the real provider-neutral `CodingAgentRuntime`. It creates a linked worktree from request-time `HEAD`, builds initial context, lets the model inspect and search further, applies patches through the safe patch lane, runs visible verification in Docker, supports local repair turns, inspects the final Git state, and keeps the worktree for review. `agent-eval` is a thin batch shell over the same Runtime; hidden acceptance remains outside the Agent in `AgentGrader`.
+`codeteam run` now uses the real provider-neutral `CodingAgentRuntime`. It creates a linked worktree from request-time `HEAD`, builds initial context, normalizes supported provider response dialects into one action protocol, lets the model inspect and search further, applies patches through the safe patch lane, runs visible verification in Docker, supports local repair turns, inspects the final Git state, and keeps the worktree for review. `agent-eval` is a thin batch shell over the same Runtime; hidden acceptance remains outside the Agent in `AgentGrader`.
 
 ## Quick Start
 
@@ -68,7 +69,7 @@ Core CLI commands:
 .venv/bin/python -m codeteam.cli.app context "refresh token error path" --path tests/fixtures/test_repo --top-k 5 --budget 1024 --format json
 .venv/bin/python -m codeteam.cli.app eval --dataset evals/week2/file_retrieval.jsonl --repo tests/fixtures/test_repo --methods filename,ripgrep,ripgrep_symbol,hybrid --output evals/week2
 .venv/bin/python -m codeteam.cli.app agent-eval --suite evals/week4/agent_task_suite_v1.jsonl --output evals/week4/agent_runs/null_baseline --actor null --mode baseline
-.venv/bin/python -m codeteam.cli.app run "fix the failing auth test" --repo . --context-budget 4096 --max-steps 20 --max-tool-calls 40 --max-repairs 3
+.venv/bin/python -m codeteam.cli.app run "fix the failing auth test" --repo . --context-budget 4096 --max-steps 20 --max-tool-calls 40 --max-repairs 3 --max-protocol-repairs 2
 ```
 
 Real-model commands read an OpenAI-compatible provider configuration from
@@ -93,6 +94,11 @@ provider-neutral extension points.
 - The model receives an initial context snapshot and can then call
   `list_files`, `read_file`, `search_code`, `apply_patch`, `run_tests`,
   `git_status`, and `git_diff` within the task worktree.
+- Exact assistant responses are retained for audit. The Agent protocol layer
+  accepts one bare JSON object, one complete Markdown JSON fence, or one
+  validated DeepSeek DSML envelope and assigns its own tool-call IDs.
+- Invalid action formats receive at most two schema-only protocol-repair turns;
+  these are counted separately from code repair and survive Session resume.
 - Patch application passes through path validation, checkpoint creation, the
   safe patch lane, and final Git-state inspection.
 - Visible verification runs through `CommandPolicy` and Docker. Docker
@@ -114,6 +120,7 @@ CLI
   -> Worktree + durable Session
   -> CodingAgentRuntime
        -> initial Context Engine snapshot
+       -> provider response dialect firewall
        -> provider-neutral JSON action loop
        -> list/read/search/apply_patch/run_tests/git_status/git_diff
        -> final diff + visible verification gate
@@ -151,6 +158,7 @@ codeteam/
 ├── session/                       # durable session, store, event log, resume
 ├── llm/                           # provider-neutral model client pieces
 ├── agent/                         # unified coding runtime, tools, edits, orchestration
+│   ├── protocol.py                # JSON/fence/DSML -> canonical action
 │   ├── runtime.py                 # model/action/tool/verification execution loop
 │   ├── runtime_models.py          # runtime request, status, evidence, result
 │   ├── runtime_tools.py           # seven worktree-scoped coding tools
@@ -309,7 +317,8 @@ base commit:   3956afc05d6c1ad2f3efaac9a510133436c0f700
 hidden oracle: 11/11 fail on pristine state
 null V2:       0/11 success, 0 acceptance pass, 11 regression pass
 Codex reference: 11/11 success (non-blind oracle-informed solvability check)
-real LLM V2:  not rerun after suite correction
+real LLM V2:  first unified Runtime run 0/11 due protocol integration failure
+protocol fix: offline replay accepts all 11 first responses; real rerun pending
 ```
 
 Legacy `LLMPatchGenerator` and `PatchActor` remain only for compatibility tests
@@ -371,6 +380,10 @@ tool calls, repair attempts, tokens, cost, and latency. Runtime messages, final
 diffs, and verification evidence are written below each run directory for
 failure analysis.
 
+Also inspect `protocol_repair_attempt_count` and `protocol_failed_count`. A run
+that never reaches a tool because of response-dialect mismatch is an integration
+failure, not a coding-capability score.
+
 ## Testing
 
 Common commands:
@@ -383,6 +396,7 @@ Common commands:
 .venv/bin/python -m pytest tests/session -q
 .venv/bin/python -m pytest tests/cli -q
 .venv/bin/python -m pytest tests/agent/test_coding_runtime.py -q
+.venv/bin/python -m pytest tests/agent/test_output_protocol.py tests/test_agent_loop_protocol.py -q
 .venv/bin/python -m pytest tests/evaluation/test_agent_eval_runner.py -q
 ```
 
@@ -401,7 +415,12 @@ When running inside a restricted terminal sandbox, Docker tests may skip. In a u
 - Full-project mypy still has historical import-chain/stub/type debt.
 - Full-project ruff has historical style/lint findings; touched-module ruff gates pass, but repo-wide cleanup should be a separate maintenance branch.
 - Earlier real LLM runs targeted the obsolete 15-task suite; the corrected V2 suite needs a fresh run.
-- The unified Runtime is implemented, but its real-model 11-task baseline and ablations have not yet been rerun.
+- The unified Runtime is implemented, but the real-model 11-task baseline has
+  not yet been rerun after the protocol fix; ablations must wait for a stable
+  baseline.
+- Provider dialect normalization covers formats observed from the configured
+  model, not arbitrary future provider syntaxes; new dialects require explicit
+  decoders and adversarial tests.
 - Docker remains a hard execution dependency for production verification; unavailable Docker pauses instead of falling back to host shell.
 - Retrieval evaluation is still mostly Python and local fixtures, not a broad multi-language external benchmark.
 - Medium repo results show the context engine still needs better semantic retrieval and cross-module expansion.

@@ -249,7 +249,7 @@ def _failure_category(
     if actor_result.status == PatchActorStatus.PATCH_FAILED:
         return "patch_failed"
     if actor_result.status == PatchActorStatus.FAILED:
-        return "actor_failed"
+        return actor_result.failure_category or "actor_failed"
     if not security_passed:
         return "security_failed"
     if not within_budget:

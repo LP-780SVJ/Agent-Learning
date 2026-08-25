@@ -30,6 +30,7 @@ class AgentLoopState:
     messages: list[Message] = field(default_factory=list)
     step_count: int = 0
     tool_call_count: int = 0
+    protocol_repair_count: int = 0
     last_action: ActionFingerprint | None = None
     stop_reason: StopReason | None = None
 

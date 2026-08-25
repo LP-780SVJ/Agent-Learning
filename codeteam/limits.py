@@ -7,6 +7,7 @@ from codeteam.state import AgentLoopState
 class AgentLoopLimits:
     max_steps: int = 10
     max_tool_calls: int = 20
+    max_protocol_repairs: int = 2
 
 def check_step_limit(state: AgentLoopState, limits: AgentLoopLimits) -> bool:
     return state.step_count >= limits.max_steps

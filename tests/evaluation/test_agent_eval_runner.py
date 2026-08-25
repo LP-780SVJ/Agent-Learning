@@ -20,8 +20,10 @@ from codeteam.evaluation.agent_grader import AgentGrader
 from codeteam.evaluation.agent_models import (
     AgentEvalSplit,
     AgentEvalTask,
+    AgentEvalTaskResult,
     AgentTaskType,
     EvalRunConfig,
+    EvalRunMode,
     PatchActorResult,
     PatchActorStatus,
 )
@@ -29,6 +31,7 @@ from codeteam.evaluation.agent_runner import (
     AgentEvalDatasetError,
     AgentEvalRunner,
     load_agent_eval_tasks,
+    summarize_agent_eval_results,
 )
 from codeteam.evaluation.patch_actor import (
     LLMPatchGenerator,
@@ -250,7 +253,10 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
     summary = json.loads((tmp_path / "out" / "summary.json").read_text())
     assert summary["success_count"] == 1
     assert summary["pristine_acceptance_passed_count"] == 0
+    assert summary["protocol_repair_attempt_count"] == 0
+    assert summary["protocol_failed_count"] == 0
     manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert manifest["max_protocol_repairs"] == 2
     assert manifest["tasks"] == [
         {
             "task_id": "T01",
@@ -271,6 +277,37 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
         for command in runtime_request.verification_commands
         for part in command
     )
+
+
+def test_summary_separates_protocol_repair_and_exhaustion() -> None:
+    result = AgentEvalTaskResult(
+        run_id="protocol-run",
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        mode=EvalRunMode.BASELINE,
+        provider_id="openai-compatible",
+        model_id="model",
+        success=False,
+        actor_status=PatchActorStatus.FAILED,
+        acceptance_passed=False,
+        regression_passed=True,
+        within_budget=True,
+        security_passed=True,
+        duration_ms=10,
+        protocol_repair_attempts=2,
+        failure_category="invalid_final_output",
+    )
+
+    summary = summarize_agent_eval_results(
+        [result],
+        run_id="protocol-run",
+        mode=EvalRunMode.BASELINE,
+    )
+
+    assert summary.protocol_repair_attempt_count == 2
+    assert summary.protocol_failed_count == 1
 
 
 def test_null_patch_actor_cannot_pass_even_if_oracle_would_pass(

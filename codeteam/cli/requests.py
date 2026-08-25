@@ -18,6 +18,7 @@ class RunRequest(BaseModel):
     max_steps: int = Field(default=20, gt=0)
     max_tool_calls: int = Field(default=40, gt=0)
     max_repairs: int = Field(default=3, ge=0)
+    max_protocol_repairs: int = Field(default=2, ge=0, le=2)
     compaction_mode: Literal["structured", "none", "naive"] = "structured"
 
     @model_validator(mode="after")

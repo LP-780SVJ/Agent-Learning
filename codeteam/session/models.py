@@ -190,6 +190,7 @@ class SessionUsage(BaseModel):
     cost_usd: float = 0.0
     tool_calls: int = 0
     repair_attempts: int = 0
+    protocol_repair_attempts: int = 0
     retry_count: int = 0
 
 
@@ -199,6 +200,7 @@ class AgentRuntimeState(BaseModel):
     step_count: int = 0
     tool_call_count: int = 0
     repair_attempts: int = 0
+    protocol_repair_attempts: int = 0
     workspace_version: int = 0
     recent_messages: tuple[Message, ...] = ()
     retrieved_files: tuple[str, ...] = ()
@@ -208,6 +210,7 @@ class AgentRuntimeState(BaseModel):
     max_steps: int = 20
     max_tool_calls: int = 40
     max_repairs: int = 3
+    max_protocol_repairs: int = 2
     verification_commands: tuple[tuple[str, ...], ...] = ()
 
 

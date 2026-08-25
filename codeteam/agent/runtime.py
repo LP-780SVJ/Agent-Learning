@@ -90,6 +90,7 @@ class CodingAgentRuntime:
             limits=AgentLoopLimits(
                 max_steps=request.max_steps,
                 max_tool_calls=request.max_tool_calls,
+                max_protocol_repairs=request.max_protocol_repairs,
             ),
             actual_tests_passed=lambda: evidence.tests_passed,
             message_transform=_message_transform(
@@ -121,6 +122,7 @@ class CodingAgentRuntime:
             steps_used=loop.steps_used,
             tool_calls_used=loop.tool_calls_used,
             repair_attempts=evidence.repair_attempts,
+            protocol_repairs_used=loop.protocol_repairs_used,
             input_tokens=loop.total_input_tokens,
             output_tokens=loop.total_output_tokens,
             cost_usd=loop.total_cost,
@@ -161,12 +163,37 @@ class CodingAgentRuntime:
         }
         system = {
             "role": "coding_agent",
-            "protocol": "Return exactly one JSON object containing non-empty tool_calls or a final output.",
+            "protocol": {
+                "rule": (
+                    "Return exactly one raw JSON object containing non-empty "
+                    "tool_calls or a final output. Do not add prose, Markdown "
+                    "fences, XML, DSML, or provider-specific tags."
+                ),
+                "tool_call_schema": {
+                    "tool_calls": [
+                        {
+                            "name": "read_file",
+                            "arguments": {"path": "src/example.py"},
+                        }
+                    ]
+                },
+                "tool_call_note": (
+                    "Do not generate call_id; the Runtime assigns it after validation."
+                ),
+                "final_output_schema": {
+                    "status": "completed | failed | needs_user_input",
+                    "summary": "short factual summary",
+                    "tests_passed": True,
+                    "error": None,
+                    "user_input_request": None,
+                },
+            },
             "tools": schemas,
             "budgets": {
                 "max_steps": request.max_steps,
                 "max_tool_calls": request.max_tool_calls,
                 "max_repairs": request.max_repairs,
+                "max_protocol_repairs": request.max_protocol_repairs,
                 "context_tokens": request.context_budget,
             },
             "completion": [

@@ -22,6 +22,10 @@ MODEL_PRICING: dict[str, ModelPricing] = {
         input_per_1m_tokens=0.10,
         output_per_1m_tokens=0.40,
     ),
+    "deepseek-v4-flash": ModelPricing(
+        input_per_1m_tokens=1.50,
+        output_per_1m_tokens=4.50,
+    ),
 }
 
 

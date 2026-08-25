@@ -30,6 +30,7 @@ class CodingAgentRunRequest(BaseModel):
     max_steps: int = Field(default=20, gt=0)
     max_tool_calls: int = Field(default=40, gt=0)
     max_repairs: int = Field(default=3, ge=0)
+    max_protocol_repairs: int = Field(default=2, ge=0, le=2)
     compaction_mode: CompactionMode = CompactionMode.STRUCTURED
     planning_enabled: bool = True
     verification_commands: tuple[tuple[str, ...], ...] = ()
@@ -59,6 +60,7 @@ class CodingAgentRunResult(BaseModel):
     steps_used: int = 0
     tool_calls_used: int = 0
     repair_attempts: int = 0
+    protocol_repairs_used: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0

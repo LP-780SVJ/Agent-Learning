@@ -108,6 +108,7 @@ class AgentEvalRunner:
                     max_steps=min(task.budget.max_steps, config.max_steps),
                     max_tool_calls=max(1, min(task.budget.max_steps, config.max_steps) * 3),
                     max_repairs=min(task.budget.max_repairs, config.max_repairs),
+                    max_protocol_repairs=config.max_protocol_repairs,
                     compaction_mode=CompactionMode(config.compaction_mode),
                     planning_enabled=config.planning_enabled,
                     verification_commands=_visible_verification_argv(task),
@@ -161,6 +162,9 @@ class AgentEvalRunner:
                     changed_files=grade.changed_files,
                     patch_attempts=actor_result.patch_attempts,
                     repair_attempts=actor_result.repair_attempts,
+                    protocol_repair_attempts=(
+                        actor_result.protocol_repair_attempts
+                    ),
                     tool_calls=actor_result.tool_calls,
                     input_tokens=actor_result.input_tokens,
                     output_tokens=actor_result.output_tokens,
@@ -193,6 +197,7 @@ class AgentEvalRunner:
                     "repair_enabled": config.repair_enabled,
                     "compaction_mode": config.compaction_mode,
                     "context_budget": config.context_budget,
+                    "max_protocol_repairs": config.max_protocol_repairs,
                     "task_count": len(tasks),
                     "tasks": [
                         {
@@ -431,6 +436,12 @@ def summarize_agent_eval_results(
             result.actor_status == PatchActorStatus.PROVIDER_BLOCKED
             for result in results
         ),
+        protocol_repair_attempt_count=sum(
+            result.protocol_repair_attempts for result in results
+        ),
+        protocol_failed_count=sum(
+            result.failure_category == "invalid_final_output" for result in results
+        ),
         acceptance_passed_count=sum(result.acceptance_passed for result in results),
         regression_passed_count=sum(result.regression_passed for result in results),
         security_passed_count=sum(result.security_passed for result in results),
@@ -481,6 +492,7 @@ def _runtime_to_actor_result(
         compaction_mode=config.compaction_mode,
         patch_attempts=1 if result.changed_files else 0,
         repair_attempts=result.repair_attempts,
+        protocol_repair_attempts=result.protocol_repairs_used,
         tool_calls=result.tool_calls_used,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
@@ -493,6 +505,7 @@ def _runtime_to_actor_result(
         changed_files=result.changed_files,
         applied_patch=bool(result.changed_files),
         error=result.error,
+        failure_category=result.failure_category,
         events=result.events,
     )
 

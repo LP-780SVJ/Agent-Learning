@@ -80,6 +80,18 @@ class SequencedSandbox:
         )
 
 
+class PassingSandbox:
+    def run(self, context) -> CommandResult:
+        return CommandResult(
+            status=CommandStatus.SUCCESS,
+            argv=context.argv,
+            cwd=context.cwd,
+            exit_code=0,
+            stdout="passed",
+            stderr="",
+        )
+
+
 def _call(index: int, name: str, arguments: dict) -> dict:
     return {
         "tool_calls": [
@@ -281,3 +293,98 @@ def test_structured_edits_support_new_and_deleted_files(tmp_path: Path) -> None:
     assert result.applied
     assert not (repo / "app.py").exists()
     assert (repo / "new.py").read_text(encoding="utf-8") == "NEW = True\n"
+
+
+def test_runtime_completes_with_dsml_actions_and_fenced_final(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    dsml = "｜｜DSML｜｜"
+    model = SimpleNamespace()
+    model.outputs = [
+        (
+            f"<{dsml}tool_calls><{dsml}invoke name=\"apply_patch\">"
+            f"<{dsml}parameter name=\"edits\" string=\"false\">"
+            '[{"path":"app.py","content":"VALUE = 2\\n"}]'
+            f"</{dsml}parameter></{dsml}invoke></{dsml}tool_calls>"
+        ),
+        (
+            f"<{dsml}tool_calls><{dsml}invoke name=\"run_tests\">"
+            f"<{dsml}parameter name=\"argv\" string=\"false\">"
+            '["python","-m","pytest"]'
+            f"</{dsml}parameter></{dsml}invoke></{dsml}tool_calls>"
+        ),
+        (
+            f"<{dsml}tool_calls><{dsml}invoke name=\"git_diff\">"
+            f"</{dsml}invoke></{dsml}tool_calls>"
+        ),
+        (
+            "```json\n"
+            '{"status":"completed","summary":"fixed",'
+            '"tests_passed":true}\n'
+            "```"
+        ),
+    ]
+    model.requests = []
+
+    def complete(messages: list[Message]) -> str:
+        model.requests.append(messages)
+        return model.outputs.pop(0)
+
+    model.complete = complete
+    runtime = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=SafeExecutionService(sandbox_runner=PassingSandbox()),
+        context_service=StubContext(),
+    )
+
+    result = runtime.run(
+        CodingAgentRunRequest(
+            task_id="T06",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="deepseek-compatible",
+            model_id="deepseek",
+            max_steps=8,
+            verification_commands=(("python", "-m", "pytest"),),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert result.protocol_repairs_used == 0
+    assert result.tool_calls_used == 3
+    assert result.changed_files == ("app.py",)
+    assert (repo / "app.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert any(
+        "<｜｜DSML｜｜tool_calls>" in (message.content or "")
+        for message in result.messages
+        if message.role == "assistant"
+    )
+
+
+def test_runtime_prompt_contains_complete_action_contract(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    model = ScriptedModel(
+        [
+            {
+                "status": "failed",
+                "summary": "stop after prompt inspection",
+                "tests_passed": False,
+                "error": "test-only stop",
+            }
+        ]
+    )
+
+    CodingAgentRuntime(model_client=model, context_service=StubContext()).run(
+        CodingAgentRunRequest(
+            task_id="T07",
+            task="inspect protocol",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+        )
+    )
+
+    system = json.loads(model.requests[0][0].content or "{}")
+    assert "tool_call_schema" in system["protocol"]
+    assert "final_output_schema" in system["protocol"]
+    assert "Runtime assigns" in system["protocol"]["tool_call_note"]

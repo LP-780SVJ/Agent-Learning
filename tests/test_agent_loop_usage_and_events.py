@@ -167,7 +167,7 @@ class AgentLoopUsageAndEventTests(unittest.TestCase):
                 if message.role == "tool"
             ]
             self.assertEqual(len(tool_messages), 1)
-            self.assertEqual(tool_messages[0].tool_call_id, "call-missing")
+            self.assertEqual(tool_messages[0].tool_call_id, "step-1-call-1")
             self.assertIn("Path does not exist", tool_messages[0].content or "")
 
             tool_result_events = [

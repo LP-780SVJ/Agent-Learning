@@ -154,6 +154,13 @@ def run_agent_eval(args: Namespace) -> None:
             result.failure_category == "provider_blocked"
             for result in all_results
         ),
+        "protocol_repair_attempt_count": sum(
+            result.protocol_repair_attempts for result in all_results
+        ),
+        "protocol_failed_count": sum(
+            result.failure_category == "invalid_final_output"
+            for result in all_results
+        ),
     }
     (output_root / "combined_summary.json").write_text(
         json.dumps(combined, ensure_ascii=False, indent=2) + "\n",

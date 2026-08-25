@@ -6,6 +6,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from codeteam.agent.protocol import (
+    ModelOutputDialect,
+    ModelOutputNormalizationError,
+    normalize_model_output,
+)
 from codeteam.events import AgentEvent, AgentEventType, make_event
 from codeteam.limits import AgentLoopLimits, check_step_limit, check_tool_call_limit
 from codeteam.llm.base import ModelResponse
@@ -62,6 +67,7 @@ class AgentLoopResult:
     error: str | None = None
     steps_used: int = 0
     tool_calls_used: int = 0
+    protocol_repairs_used: int = 0
 
     events: list[AgentEvent] = field(default_factory=list)
     total_input_tokens: int = 0
@@ -78,6 +84,7 @@ class ParsedModelOutput:
     final_output: AgentFinalOutput | None = None
     stop_reason: StopReason | None = None
     error: str | None = None
+    dialect: ModelOutputDialect | None = None
 
 
 def run_agent_loop(
@@ -219,9 +226,38 @@ def run_agent_loop(
         parsed_output = _parse_model_output(
             model_response.content,
             actual_tests_passed=tests_passed,
+            call_id_prefix=f"step-{state.step_count}",
         )
 
         if parsed_output.stop_reason is not None:
+            if (
+                parsed_output.stop_reason is StopReason.INVALID_FINAL_OUTPUT
+                and state.protocol_repair_count < limits.max_protocol_repairs
+                and state.step_count < limits.max_steps
+            ):
+                state.protocol_repair_count += 1
+                state.messages.append(
+                    _protocol_repair_message(
+                        parsed_output.error or "Invalid model output.",
+                        attempt=state.protocol_repair_count,
+                        maximum=limits.max_protocol_repairs,
+                    )
+                )
+                events.append(
+                    make_event(
+                        AgentEventType.PROTOCOL_REPAIR_REQUESTED,
+                        "Model output protocol repair requested.",
+                        step_index=state.step_count,
+                        data={
+                            "attempt": state.protocol_repair_count,
+                            "maximum": limits.max_protocol_repairs,
+                            "error": parsed_output.error,
+                        },
+                    )
+                )
+                if state_callback is not None:
+                    state_callback(state)
+                continue
             return _stop_with_failure(
                 state,
                 parsed_output.stop_reason,
@@ -270,19 +306,15 @@ def run_agent_loop(
 def _parse_model_output(
     raw_output: str,
     actual_tests_passed: bool | None = None,
+    call_id_prefix: str = "step-0",
 ) -> ParsedModelOutput:
     try:
-        parsed = json.loads(raw_output)
-    except json.JSONDecodeError as error:
+        normalized = normalize_model_output(raw_output)
+        parsed = normalized.payload
+    except ModelOutputNormalizationError as error:
         return ParsedModelOutput(
             stop_reason=StopReason.INVALID_FINAL_OUTPUT,
-            error=f"Model output was not valid JSON: {error}",
-        )
-
-    if not isinstance(parsed, dict):
-        return ParsedModelOutput(
-            stop_reason=StopReason.INVALID_FINAL_OUTPUT,
-            error="Model output must be a JSON object.",
+            error=str(error),
         )
 
     if "tool_calls" in parsed:
@@ -298,15 +330,31 @@ def _parse_model_output(
                 stop_reason=StopReason.INVALID_FINAL_OUTPUT,
                 error="tool_calls must be a list.",
             )
+        if not all(isinstance(item, dict) for item in tool_calls_data):
+            return ParsedModelOutput(
+                stop_reason=StopReason.INVALID_FINAL_OUTPUT,
+                error="Each tool call must be a JSON object.",
+            )
 
         try:
-            tool_calls = [ToolCall.model_validate(item) for item in tool_calls_data]
+            tool_calls = [
+                ToolCall.model_validate(
+                    {
+                        **item,
+                        "call_id": f"{call_id_prefix}-call-{index}",
+                    }
+                )
+                for index, item in enumerate(tool_calls_data, start=1)
+            ]
         except ValidationError as error:
             return ParsedModelOutput(
                 stop_reason=StopReason.INVALID_FINAL_OUTPUT,
                 error=f"Tool call validation failed: {error}",
             )
-        return ParsedModelOutput(tool_calls=tool_calls)
+        return ParsedModelOutput(
+            tool_calls=tool_calls,
+            dialect=normalized.dialect,
+        )
 
     if "status" not in parsed:
         return ParsedModelOutput(
@@ -326,7 +374,40 @@ def _parse_model_output(
             error=f"Final output validation failed: {error}",
         )
 
-    return ParsedModelOutput(final_output=final_output)
+    return ParsedModelOutput(
+        final_output=final_output,
+        dialect=normalized.dialect,
+    )
+
+
+def _protocol_repair_message(error: str, *, attempt: int, maximum: int) -> Message:
+    payload = {
+        "protocol_repair": {
+            "attempt": attempt,
+            "maximum": maximum,
+            "error": error,
+            "requirement": (
+                "Return exactly one raw JSON object with no prose, Markdown fence, "
+                "or provider-specific tags. The Runtime assigns call_id."
+            ),
+            "tool_call_example": {
+                "tool_calls": [
+                    {
+                        "name": "read_file",
+                        "arguments": {"path": "src/example.py"},
+                    }
+                ]
+            },
+            "final_output_example": {
+                "status": "completed",
+                "summary": "Implemented and verified the requested change.",
+                "tests_passed": True,
+                "error": None,
+                "user_input_request": None,
+            },
+        }
+    }
+    return Message(role="user", content=json.dumps(payload, ensure_ascii=False))
 
 
 def _handle_final_output(
@@ -528,6 +609,7 @@ def _build_loop_result(
         error=error,
         steps_used=state.step_count,
         tool_calls_used=state.tool_call_count,
+        protocol_repairs_used=state.protocol_repair_count,
         events=events,
         total_input_tokens=usage_tracker.total_input_tokens(),
         total_output_tokens=usage_tracker.total_output_tokens(),

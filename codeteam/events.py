@@ -17,6 +17,7 @@ class AgentEventType(str, Enum):
     STEP_STARTED = "step_started"
     MODEL_REQUEST = "model_request"
     MODEL_RESPONSE = "model_response"
+    PROTOCOL_REPAIR_REQUESTED = "protocol.repair_requested"
     TOOL_CALLED = "tool_called"
     TOOL_RESULT = "tool_result"
     RETRY_SCHEDULED = "retry_scheduled"
