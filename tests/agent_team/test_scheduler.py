@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from threading import Barrier, Thread
+from threading import Event as ThreadEvent
+from types import MappingProxyType
 
 import pytest
 
-from codeteam.agent_team.dag import TaskDAG, TaskNode, TaskStatus
+from codeteam.agent_team.dag import CycleDetectedError, TaskDAG, TaskNode, TaskStatus
 from codeteam.agent_team.models import (
     AgentIdentity,
     AgentInfo,
@@ -16,6 +18,7 @@ from codeteam.agent_team.scheduler import (
     TASK_TRANSITIONS,
     InvalidSchedulerTransitionError,
     SchedulerError,
+    SchedulerInitializationError,
     SchedulerResult,
     StaleTaskStateError,
     TaskClaim,
@@ -27,6 +30,8 @@ from codeteam.agent_team.scheduler import (
 )
 from codeteam.agent_team.worker import WorkerAgent, WorkerNotFoundError, WorkerRegistry
 from codeteam.events import AgentEventType
+
+JOIN_TIMEOUT_SECONDS = 2.0
 
 
 def _assignment(node_id: str, role: AgentRole = AgentRole.BACKEND) -> WorkerAssignment:
@@ -91,6 +96,13 @@ def _scheduler(
     )
 
 
+def _join_threads(threads: list[Thread]) -> None:
+    for thread in threads:
+        thread.join(timeout=JOIN_TIMEOUT_SECONDS)
+    live_threads = [thread.name for thread in threads if thread.is_alive()]
+    assert live_threads == []
+
+
 def test_scheduler_models_are_serializable() -> None:
     record = TaskRuntimeRecord(
         node_id="A",
@@ -112,10 +124,32 @@ def test_scheduler_models_are_serializable() -> None:
     assert SchedulerResult.model_validate_json(result.model_dump_json()) == result
 
 
-def test_transition_table_rejects_direct_pending_to_completed() -> None:
+def test_transition_table_is_immutable_and_rejects_forbidden_paths() -> None:
+    assert isinstance(TASK_TRANSITIONS, MappingProxyType)
     assert TaskStatus.COMPLETED not in TASK_TRANSITIONS[TaskStatus.PENDING]
+    assert TaskStatus.RUNNING not in TASK_TRANSITIONS[TaskStatus.READY]
+    assert TaskStatus.COMPLETED not in TASK_TRANSITIONS[TaskStatus.FAILED]
     assert TaskStatus.RUNNING not in TASK_TRANSITIONS[TaskStatus.COMPLETED]
     assert TaskStatus.CLAIMED in TASK_TRANSITIONS[TaskStatus.READY]
+
+    with pytest.raises(TypeError):
+        TASK_TRANSITIONS[TaskStatus.READY] = (  # type: ignore[index]
+            TaskStatus.RUNNING,
+        )
+    with pytest.raises(AttributeError):
+        TASK_TRANSITIONS[TaskStatus.READY].append(  # type: ignore[attr-defined]
+            TaskStatus.RUNNING
+        )
+
+
+def test_transition_table_mutation_attempt_does_not_break_scheduler() -> None:
+    scheduler = _scheduler(_dag("A"))
+
+    scheduler.schedule()
+    claim = scheduler.claim("worker-backend-1")
+
+    assert claim is not None
+    assert claim.node_id == "A"
 
 
 def test_ready_task_is_enqueued_once_and_schedule_is_idempotent() -> None:
@@ -223,8 +257,7 @@ def test_two_workers_contend_for_one_task_and_only_one_claims() -> None:
     ]
     for thread in threads:
         thread.start()
-    for thread in threads:
-        thread.join()
+    _join_threads(threads)
 
     assert errors == []
     successful_claims = [claim for claim in claims if claim is not None]
@@ -255,8 +288,7 @@ def test_many_workers_claim_many_tasks_without_duplicates_or_loss() -> None:
     threads = [Thread(target=contender, args=(worker,)) for worker in workers]
     for thread in threads:
         thread.start()
-    for thread in threads:
-        thread.join()
+    _join_threads(threads)
 
     assert errors == []
     claimed_ids = sorted(claim.node_id for claim in claims if claim is not None)
@@ -372,19 +404,33 @@ def test_non_retryable_failure_blocks_dependent() -> None:
     assert scheduler.queue == ()
 
 
-def test_missing_worker_role_blocks_ready_task_fail_closed() -> None:
-    scheduler = _scheduler(
-        _dag(("A", AgentRole.TEST)),
-        workers=(_worker("worker-backend-1", AgentRole.BACKEND),),
-    )
+def test_missing_worker_role_waits_and_can_recover_after_registration() -> None:
+    registry = _registry(_worker("worker-backend-1", AgentRole.BACKEND))
+    scheduler = TaskScheduler(_dag(("A", AgentRole.TEST)), registry)
 
     result = scheduler.schedule()
 
-    assert result.blocked == ("A",)
+    assert result.waiting_for_worker == ("A",)
+    assert result.blocked == ()
     record = scheduler.runtime_records["A"]
-    assert record.status is TaskStatus.BLOCKED
-    assert record.failure_reason == "blocked_by_missing_worker_role"
+    assert record.status is TaskStatus.PENDING
+    assert record.failure_reason is None
     assert scheduler.queue == ()
+
+    repeat = scheduler.schedule()
+    assert repeat.waiting_for_worker == ("A",)
+    assert [
+        event.event_type
+        for event in scheduler.events
+        if event.event_type is AgentEventType.SCHEDULER_TASK_WAITING_FOR_WORKER
+    ] == [AgentEventType.SCHEDULER_TASK_WAITING_FOR_WORKER]
+
+    registry.register(_worker("worker-test-1", AgentRole.TEST))
+    recovered = scheduler.schedule()
+
+    assert recovered.scheduled == ("A",)
+    assert scheduler.runtime_records["A"].status is TaskStatus.READY
+    assert scheduler.queue == ("A",)
 
 
 def test_runtime_record_snapshots_do_not_mutate_scheduler() -> None:
@@ -423,10 +469,12 @@ def test_scheduler_events_use_existing_event_log_and_safe_fields() -> None:
             "to_status",
             "attempt",
             "reason_code",
+            "failed_event_type",
+            "error_type",
         }
 
 
-def test_event_sink_receives_scheduler_events() -> None:
+def test_event_sink_receives_scheduler_event_snapshot() -> None:
     received = []
     scheduler = TaskScheduler(
         _dag("A"),
@@ -439,10 +487,267 @@ def test_event_sink_receives_scheduler_events() -> None:
     assert len(received) == 1
     assert received[0].event_type is AgentEventType.SCHEDULER_TASK_SCHEDULED
 
+    received[0].data["node_id"] = "mutated"
+    assert scheduler.events[0].data["node_id"] == "A"
+
+
+def test_event_sink_can_read_scheduler_events_without_deadlock() -> None:
+    scheduler_ref: dict[str, TaskScheduler] = {}
+    seen_event_count: list[int] = []
+
+    def sink(_event: object) -> None:
+        seen_event_count.append(len(scheduler_ref["scheduler"].events))
+
+    scheduler = TaskScheduler(
+        _dag("A"),
+        _registry(_worker("worker-backend-1")),
+        event_sink=sink,
+    )
+    scheduler_ref["scheduler"] = scheduler
+    thread = Thread(target=scheduler.schedule)
+
+    thread.start()
+    _join_threads([thread])
+
+    assert seen_event_count == [1]
+
+
+def test_event_sink_can_read_runtime_records_without_deadlock() -> None:
+    scheduler_ref: dict[str, TaskScheduler] = {}
+    statuses: list[TaskStatus] = []
+
+    def sink(_event: object) -> None:
+        statuses.append(scheduler_ref["scheduler"].runtime_records["A"].status)
+
+    scheduler = TaskScheduler(
+        _dag("A"),
+        _registry(_worker("worker-backend-1")),
+        event_sink=sink,
+    )
+    scheduler_ref["scheduler"] = scheduler
+    thread = Thread(target=scheduler.schedule)
+
+    thread.start()
+    _join_threads([thread])
+
+    assert statuses == [TaskStatus.READY]
+
+
+def test_raising_event_sink_does_not_hide_successful_claim() -> None:
+    delivered_types: list[AgentEventType] = []
+
+    def sink(event: object) -> None:
+        delivered_types.append(event.event_type)  # type: ignore[attr-defined]
+        raise RuntimeError("sink failed")
+
+    scheduler = TaskScheduler(
+        _dag("A"),
+        _registry(_worker("worker-backend-1")),
+        event_sink=sink,
+    )
+    scheduler.schedule()
+
+    claim = scheduler.claim("worker-backend-1")
+
+    assert claim is not None
+    assert claim.node_id == "A"
+    record = scheduler.runtime_records["A"]
+    assert record.status is TaskStatus.CLAIMED
+    assert record.owner_id == "worker-backend-1"
+    assert scheduler.queue == ()
+    assert delivered_types == [
+        AgentEventType.SCHEDULER_TASK_SCHEDULED,
+        AgentEventType.SCHEDULER_TASK_CLAIMED,
+    ]
+    assert [
+        event.event_type for event in scheduler.events
+    ] == [
+        AgentEventType.SCHEDULER_TASK_SCHEDULED,
+        AgentEventType.SCHEDULER_EVENT_DELIVERY_FAILED,
+        AgentEventType.SCHEDULER_TASK_CLAIMED,
+        AgentEventType.SCHEDULER_EVENT_DELIVERY_FAILED,
+    ]
+
+
+def test_slow_event_sink_does_not_hold_scheduler_state_lock() -> None:
+    entered_sink = ThreadEvent()
+    release_sink = ThreadEvent()
+
+    def sink(_event: object) -> None:
+        entered_sink.set()
+        release_sink.wait(timeout=JOIN_TIMEOUT_SECONDS)
+
+    scheduler = TaskScheduler(
+        _dag("A"),
+        _registry(_worker("worker-backend-1")),
+        event_sink=sink,
+    )
+    schedule_thread = Thread(target=scheduler.schedule)
+    status_seen: list[TaskStatus] = []
+
+    def read_state() -> None:
+        status_seen.append(scheduler.runtime_records["A"].status)
+
+    schedule_thread.start()
+    assert entered_sink.wait(timeout=JOIN_TIMEOUT_SECONDS)
+    reader_thread = Thread(target=read_state)
+    reader_thread.start()
+    _join_threads([reader_thread])
+    release_sink.set()
+    _join_threads([schedule_thread])
+
+    assert status_seen == [TaskStatus.READY]
+
+
+def test_events_property_returns_defensive_event_copies() -> None:
+    scheduler = _scheduler(_dag("A"))
+    scheduler.schedule()
+    event = scheduler.events[0]
+
+    event.data["node_id"] = "mutated"
+
+    assert scheduler.events[0].data["node_id"] == "A"
+
+
+def test_failed_operations_do_not_emit_false_success_events() -> None:
+    scheduler = _scheduler(
+        _dag(("A", AgentRole.BACKEND)),
+        workers=(
+            _worker("worker-backend-1", AgentRole.BACKEND),
+            _worker("worker-frontend-1", AgentRole.FRONTEND),
+        ),
+    )
+    scheduler.schedule()
+
+    with pytest.raises(WorkerRoleMismatchError):
+        scheduler.claim("worker-frontend-1")
+    assert AgentEventType.SCHEDULER_TASK_CLAIMED not in [
+        event.event_type for event in scheduler.events
+    ]
+
+    claim = scheduler.claim("worker-backend-1")
+    assert claim is not None
+
+    with pytest.raises(StaleTaskStateError):
+        scheduler.complete("A", "worker-backend-1")
+    with pytest.raises(TaskOwnershipError):
+        scheduler.start("A", "worker-frontend-1")
+
+    event_types = [event.event_type for event in scheduler.events]
+    assert AgentEventType.SCHEDULER_TASK_COMPLETED not in event_types
+    assert AgentEventType.SCHEDULER_TASK_STARTED not in event_types
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        TaskStatus.READY,
+        TaskStatus.CLAIMED,
+        TaskStatus.RUNNING,
+        TaskStatus.COMPLETED,
+        TaskStatus.FAILED,
+        TaskStatus.BLOCKED,
+    ],
+)
+def test_scheduler_rejects_non_pending_dag_at_initialization(
+    status: TaskStatus,
+) -> None:
+    dag = _dag("A")
+    dag.replace_task_status("A", status)
+
+    with pytest.raises(SchedulerInitializationError, match="fresh DAG"):
+        _scheduler(dag)
+
+
+def test_scheduler_rejects_unvalidated_cycle_at_initialization() -> None:
+    dag = _dag("A", "B")
+    dag.add_dependency("A", "B")
+    dag.add_dependency("B", "A")
+    scheduler = TaskScheduler.__new__(TaskScheduler)
+
+    with pytest.raises(SchedulerInitializationError) as exc_info:
+        TaskScheduler.__init__(scheduler, dag, _registry(_worker("worker-backend-1")))
+
+    assert isinstance(exc_info.value.__cause__, CycleDetectedError)
+    assert not hasattr(scheduler, "_records")
+    assert not hasattr(scheduler, "_queue")
+    assert not hasattr(scheduler, "_events")
+
+
+def test_scheduler_initializes_and_schedules_valid_manual_dag() -> None:
+    dag = _dag("A", "B")
+    dag.add_dependency("A", "B")
+    scheduler = _scheduler(dag)
+
+    result = scheduler.schedule()
+
+    assert result.scheduled == ("A",)
+    assert scheduler.queue == ("A",)
+    assert scheduler.runtime_records["A"].status is TaskStatus.READY
+    assert scheduler.runtime_records["B"].status is TaskStatus.PENDING
+
+
+def test_scheduler_uses_dag_topology_snapshot_after_initialization() -> None:
+    dag = _dag("A")
+    scheduler = _scheduler(dag)
+
+    dag.add_task(TaskNode(node_id="B", assignment=_assignment("B")))
+    dag.replace_task_status("A", TaskStatus.COMPLETED)
+
+    result = scheduler.schedule()
+
+    assert result.scheduled == ("A",)
+    assert scheduler.runtime_records == {
+        "A": TaskRuntimeRecord(node_id="A", status=TaskStatus.READY)
+    }
+
+
+def test_concurrent_claims_are_stable_over_repeated_runs() -> None:
+    for _ in range(50):
+        scheduler = _scheduler(
+            _dag("A"),
+            workers=(
+                _worker("worker-backend-1"),
+                _worker("worker-backend-2"),
+            ),
+        )
+        scheduler.schedule()
+        barrier = Barrier(2)
+        claims: list[TaskClaim | None] = []
+        errors: list[BaseException] = []
+
+        def contender(
+            worker_id: str,
+            *,
+            current_barrier: Barrier = barrier,
+            current_claims: list[TaskClaim | None] = claims,
+            current_errors: list[BaseException] = errors,
+            current_scheduler: TaskScheduler = scheduler,
+        ) -> None:
+            try:
+                current_barrier.wait()
+                current_claims.append(current_scheduler.claim(worker_id))
+            except (RuntimeError, SchedulerError, WorkerNotFoundError) as exc:
+                current_errors.append(exc)
+
+        threads = [
+            Thread(target=contender, args=("worker-backend-1",)),
+            Thread(target=contender, args=("worker-backend-2",)),
+        ]
+        for thread in threads:
+            thread.start()
+        _join_threads(threads)
+
+        assert errors == []
+        assert len([claim for claim in claims if claim is not None]) == 1
+
 
 def test_public_api_exports_scheduler_objects() -> None:
     from codeteam.agent_team import (
         InvalidSchedulerTransitionError as ExportedInvalidTransition,
+    )
+    from codeteam.agent_team import (
+        SchedulerInitializationError as ExportedSchedulerInitializationError,
     )
     from codeteam.agent_team import SchedulerResult as ExportedSchedulerResult
     from codeteam.agent_team import StaleTaskStateError as ExportedStaleState
@@ -451,6 +756,7 @@ def test_public_api_exports_scheduler_objects() -> None:
     from codeteam.agent_team import TaskScheduler as ExportedTaskScheduler
 
     assert ExportedInvalidTransition is InvalidSchedulerTransitionError
+    assert ExportedSchedulerInitializationError is SchedulerInitializationError
     assert ExportedSchedulerResult is SchedulerResult
     assert ExportedStaleState is StaleTaskStateError
     assert ExportedTaskClaim is TaskClaim

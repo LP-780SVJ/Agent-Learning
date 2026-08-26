@@ -6,9 +6,11 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from hashlib import sha256
 from pathlib import Path
 from statistics import median
 from threading import Barrier, Thread
+from typing import TypeVar
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -29,7 +31,9 @@ TASK_COUNTS = (100, 500, 1000)
 WORKER_COUNTS = (1, 4, 8, 16)
 WARMUP_RUNS = 5
 MEASURED_RUNS = 30
-OUTPUT_PATH = Path("docs/benchmark/W5_SCHEDULER.md")
+JOIN_TIMEOUT_SECONDS = 2.0
+OUTPUT_PATH = REPO_ROOT / "docs/benchmark/W5_SCHEDULER.md"
+T = TypeVar("T")
 
 
 def node_id(index: int) -> str:
@@ -105,6 +109,21 @@ def measure_ms(operation: Callable[[], object]) -> tuple[float, float]:
     return median(values), p95(values)
 
 
+def measure_ms_with_setup(
+    setup: Callable[[], T],
+    operation: Callable[[T], object],
+) -> tuple[float, float]:
+    values: list[float] = []
+    for run_index in range(WARMUP_RUNS + MEASURED_RUNS):
+        subject = setup()
+        start = time.perf_counter_ns()
+        operation(subject)
+        elapsed_ms = (time.perf_counter_ns() - start) / 1_000_000
+        if run_index >= WARMUP_RUNS:
+            values.append(elapsed_ms)
+    return median(values), p95(values)
+
+
 def measure_values(operation: Callable[[], float]) -> tuple[float, float]:
     values: list[float] = []
     for run_index in range(WARMUP_RUNS + MEASURED_RUNS):
@@ -112,11 +131,6 @@ def measure_values(operation: Callable[[], float]) -> tuple[float, float]:
         if run_index >= WARMUP_RUNS:
             values.append(value)
     return median(values), p95(values)
-
-
-def schedule_latency(task_count: int, worker_count: int) -> None:
-    scheduler = build_scheduler(task_count, worker_count)
-    scheduler.schedule()
 
 
 def claim_throughput(task_count: int, worker_count: int) -> float:
@@ -152,7 +166,10 @@ def contention_failure_rate(worker_count: int) -> float:
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join()
+        thread.join(timeout=JOIN_TIMEOUT_SECONDS)
+    live_threads = [thread.name for thread in threads if thread.is_alive()]
+    if live_threads:
+        raise RuntimeError(f"benchmark contention threads did not finish: {live_threads}")
 
     successes = len([claim for claim in claims if claim is not None])
     failures = worker_count - successes + len(errors)
@@ -160,9 +177,17 @@ def contention_failure_rate(worker_count: int) -> float:
 
 
 def commit_sha() -> str:
+    return git_output(["git", "rev-parse", "--short", "HEAD"])
+
+
+def base_head() -> str:
+    return git_output(["git", "rev-parse", "HEAD"])
+
+
+def git_output(argv: list[str]) -> str:
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
+            argv,
             check=True,
             capture_output=True,
             text=True,
@@ -185,9 +210,17 @@ def working_tree_state() -> str:
     return "dirty" if result.stdout.strip() else "clean"
 
 
+def file_sha256(relative_path: str) -> str:
+    return sha256((REPO_ROOT / relative_path).read_bytes()).hexdigest()
+
+
 def benchmark_case(task_count: int, worker_count: int) -> dict[str, object]:
-    schedule_median, schedule_p95 = measure_ms(
-        lambda: schedule_latency(task_count, worker_count)
+    setup_median, setup_p95 = measure_ms(
+        lambda: build_scheduler(task_count, worker_count)
+    )
+    schedule_median, schedule_p95 = measure_ms_with_setup(
+        lambda: build_scheduler(task_count, worker_count),
+        lambda scheduler: scheduler.schedule(),
     )
     throughput_median, throughput_p95 = measure_values(
         lambda: claim_throughput(task_count, worker_count)
@@ -198,6 +231,8 @@ def benchmark_case(task_count: int, worker_count: int) -> dict[str, object]:
     return {
         "task_count": task_count,
         "worker_count": worker_count,
+        "scheduler_setup_median_ms": setup_median,
+        "scheduler_setup_p95_ms": setup_p95,
         "schedule_median_ms": schedule_median,
         "schedule_p95_ms": schedule_p95,
         "claim_throughput_median_ops_s": throughput_median,
@@ -231,8 +266,14 @@ def write_report(rows: list[dict[str, object]]) -> None:
         "## Environment",
         "",
         f"- Generated at: {generated_at}",
+        f"- Base HEAD: `{base_head()}`",
         f"- Commit SHA: `{commit_sha()}`",
         f"- Working tree: `{working_tree_state()}`",
+        f"- scheduler.py SHA-256: `{file_sha256('codeteam/agent_team/scheduler.py')}`",
+        (
+            "- benchmark_scheduler.py SHA-256: "
+            f"`{file_sha256('evals/week5/benchmark_scheduler.py')}`"
+        ),
         f"- Python: `{platform.python_implementation()} {platform.python_version()}`",
         f"- Random seed: `{SEED}`",
         f"- Warmup runs per case: `{WARMUP_RUNS}`",
@@ -241,16 +282,18 @@ def write_report(rows: list[dict[str, object]]) -> None:
         "## Results",
         "",
         (
-            "| tasks | workers | schedule median ms | schedule p95 ms | "
-            "claim throughput median ops/s | claim throughput p95 ops/s | "
-            "contention failure median | contention failure p95 |"
+            "| tasks | workers | setup median ms | setup p95 ms | "
+            "schedule median ms | schedule p95 ms | claim throughput median ops/s | "
+            "claim throughput p95 ops/s | contention failure median | "
+            "contention failure p95 |"
         ),
-        "|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         formatted = {key: format_float(value) for key, value in row.items()}
         lines.append(
-            "| {task_count} | {worker_count} | {schedule_median_ms} | "
+            "| {task_count} | {worker_count} | {scheduler_setup_median_ms} | "
+            "{scheduler_setup_p95_ms} | {schedule_median_ms} | "
             "{schedule_p95_ms} | {claim_throughput_median_ops_s} | "
             "{claim_throughput_p95_ops_s} | {contention_failure_rate_median} | "
             "{contention_failure_rate_p95} |".format(**formatted)
@@ -263,7 +306,8 @@ def write_report(rows: list[dict[str, object]]) -> None:
             "",
             (
                 "- Schedule latency includes dependency-ready resolution and "
-                "idempotent enqueue for independent tasks."
+                "idempotent enqueue for independent tasks. Scheduler/DAG/Registry "
+                "setup is reported separately."
             ),
             (
                 "- Claim throughput measures only the first wave of in-process "
@@ -303,6 +347,7 @@ def main() -> int:
             rows.append(row)
             print(
                 f"tasks={task_count:4} workers={worker_count:2} "
+                f"setup_ms={row['scheduler_setup_median_ms']:.3f} "
                 f"schedule_ms={row['schedule_median_ms']:.3f} "
                 f"claim_ops_s={row['claim_throughput_median_ops_s']:.1f}"
             )

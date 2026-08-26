@@ -32,6 +32,8 @@ class AgentEventType(str, Enum):
     SCHEDULER_TASK_FAILED = "scheduler.task_failed"
     SCHEDULER_TASK_RETRIED = "scheduler.task_retried"
     SCHEDULER_TASK_BLOCKED = "scheduler.task_blocked"
+    SCHEDULER_TASK_WAITING_FOR_WORKER = "scheduler.task_waiting_for_worker"
+    SCHEDULER_EVENT_DELIVERY_FAILED = "scheduler.event_delivery_failed"
 
     # Task 生命周期（Week 4）
     TASK_CREATED = "task.created"

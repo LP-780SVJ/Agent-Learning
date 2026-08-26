@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from threading import Lock
+from types import MappingProxyType
 
 from pydantic import BaseModel, Field, field_validator
 
 from codeteam.agent_team.dag import (
+    DAGError,
     TaskDAG,
     TaskNode,
     TaskStatus,
@@ -17,7 +19,7 @@ from codeteam.agent_team.models import AgentRole, AgentStatus
 from codeteam.agent_team.worker import WorkerAgent, WorkerRegistry
 from codeteam.events import AgentEvent, AgentEventType, make_event
 
-TASK_TRANSITIONS: dict[TaskStatus, tuple[TaskStatus, ...]] = {
+_TASK_TRANSITIONS: dict[TaskStatus, tuple[TaskStatus, ...]] = {
     TaskStatus.PENDING: (TaskStatus.READY, TaskStatus.BLOCKED),
     TaskStatus.READY: (TaskStatus.CLAIMED, TaskStatus.BLOCKED),
     TaskStatus.CLAIMED: (TaskStatus.RUNNING, TaskStatus.FAILED),
@@ -26,10 +28,17 @@ TASK_TRANSITIONS: dict[TaskStatus, tuple[TaskStatus, ...]] = {
     TaskStatus.COMPLETED: (),
     TaskStatus.BLOCKED: (),
 }
+TASK_TRANSITIONS: Mapping[TaskStatus, tuple[TaskStatus, ...]] = MappingProxyType(
+    _TASK_TRANSITIONS
+)
 
 
 class SchedulerError(Exception):
     """Base class for task scheduler errors."""
+
+
+class SchedulerInitializationError(SchedulerError):
+    """Raised when a DAG cannot initialize a fresh scheduler."""
 
 
 class InvalidSchedulerTransitionError(SchedulerError):
@@ -80,6 +89,7 @@ class SchedulerResult(BaseModel):
     scheduled: tuple[str, ...] = ()
     blocked: tuple[str, ...] = ()
     already_ready: tuple[str, ...] = ()
+    waiting_for_worker: tuple[str, ...] = ()
 
 
 EventSink = Callable[[AgentEvent], None]
@@ -97,13 +107,27 @@ class TaskScheduler:
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
 
+        try:
+            dag.validate()
+        except DAGError as exc:
+            raise SchedulerInitializationError(
+                "TaskScheduler requires a valid TaskDAG"
+            ) from exc
+
         self._dag = dag
         self._registry = registry
         self._max_attempts = max_attempts
         self._lock = Lock()
         self._queue: deque[str] = deque()
         self._queued_node_ids: set[str] = set()
-        self._nodes: dict[str, TaskNode] = {node.node_id: node for node in dag.nodes}
+        self._nodes: dict[str, TaskNode] = {}
+        for node in dag.nodes:
+            if node.status is not TaskStatus.PENDING:
+                raise SchedulerInitializationError(
+                    "TaskScheduler requires a fresh DAG with all nodes PENDING; "
+                    f"{node.node_id} is {node.status.value}"
+                )
+            self._nodes[node.node_id] = node.model_copy(deep=True)
         self._dependencies = dag.dependencies
         self._records: dict[str, TaskRuntimeRecord] = {
             node_id: TaskRuntimeRecord(node_id=node_id)
@@ -111,6 +135,7 @@ class TaskScheduler:
         }
         self._worker_runtime_status: dict[str, AgentStatus] = {}
         self._worker_current_task: dict[str, str | None] = {}
+        self._waiting_for_worker_node_ids: set[str] = set()
         self._events: list[AgentEvent] = []
         self._event_sink = event_sink
 
@@ -130,13 +155,17 @@ class TaskScheduler:
     @property
     def events(self) -> tuple[AgentEvent, ...]:
         with self._lock:
-            return tuple(self._events)
+            return tuple(self._copy_event(event) for event in self._events)
 
     def schedule(self) -> SchedulerResult:
+        pending_delivery: list[AgentEvent] = []
         with self._lock:
-            return self._schedule_locked()
+            result = self._schedule_locked(pending_delivery)
+        self._deliver_events(pending_delivery)
+        return result
 
     def claim(self, worker_id: str) -> TaskClaim | None:
+        pending_delivery: list[AgentEvent] = []
         with self._lock:
             worker = self._require_available_worker_locked(worker_id)
             checked_count = len(self._queue)
@@ -169,6 +198,7 @@ class TaskScheduler:
                 self._worker_runtime_status[worker_id] = AgentStatus.BUSY
                 self._worker_current_task[worker_id] = node_id
                 self._record_event_locked(
+                    pending_delivery,
                     AgentEventType.SCHEDULER_TASK_CLAIMED,
                     f"Task {node_id} claimed.",
                     node_id=node_id,
@@ -177,18 +207,23 @@ class TaskScheduler:
                     to_status=TaskStatus.CLAIMED,
                     attempt=updated.attempt,
                 )
-                return TaskClaim(
+                claim = TaskClaim(
                     node_id=node_id,
                     worker_id=worker_id,
                     attempt=updated.attempt,
                     claimed_at=claimed_at,
                 )
+                break
+            else:
+                if saw_incompatible_ready_task:
+                    raise WorkerRoleMismatchError(worker_id)
+                claim = None
 
-            if saw_incompatible_ready_task:
-                raise WorkerRoleMismatchError(worker_id)
-            return None
+        self._deliver_events(pending_delivery)
+        return claim
 
     def start(self, node_id: str, worker_id: str) -> TaskRuntimeRecord:
+        pending_delivery: list[AgentEvent] = []
         with self._lock:
             self._require_owner_locked(node_id, worker_id)
             updated = self._transition_locked(
@@ -197,6 +232,7 @@ class TaskScheduler:
                 TaskStatus.RUNNING,
             )
             self._record_event_locked(
+                pending_delivery,
                 AgentEventType.SCHEDULER_TASK_STARTED,
                 f"Task {node_id} started.",
                 node_id=node_id,
@@ -205,9 +241,12 @@ class TaskScheduler:
                 to_status=TaskStatus.RUNNING,
                 attempt=updated.attempt,
             )
-            return updated.model_copy(deep=True)
+            result = updated.model_copy(deep=True)
+        self._deliver_events(pending_delivery)
+        return result
 
     def complete(self, node_id: str, worker_id: str) -> TaskRuntimeRecord:
+        pending_delivery: list[AgentEvent] = []
         with self._lock:
             self._require_owner_locked(node_id, worker_id)
             updated = self._transition_locked(
@@ -220,6 +259,7 @@ class TaskScheduler:
             )
             self._release_worker_locked(worker_id)
             self._record_event_locked(
+                pending_delivery,
                 AgentEventType.SCHEDULER_TASK_COMPLETED,
                 f"Task {node_id} completed.",
                 node_id=node_id,
@@ -228,8 +268,10 @@ class TaskScheduler:
                 to_status=TaskStatus.COMPLETED,
                 attempt=updated.attempt,
             )
-            self._schedule_locked()
-            return updated.model_copy(deep=True)
+            self._schedule_locked(pending_delivery)
+            result = updated.model_copy(deep=True)
+        self._deliver_events(pending_delivery)
+        return result
 
     def fail(
         self,
@@ -239,6 +281,7 @@ class TaskScheduler:
         *,
         retryable: bool = True,
     ) -> TaskRuntimeRecord:
+        pending_delivery: list[AgentEvent] = []
         with self._lock:
             self._require_owner_locked(node_id, worker_id)
             failed = self._transition_locked(
@@ -251,6 +294,7 @@ class TaskScheduler:
             )
             self._release_worker_locked(worker_id)
             self._record_event_locked(
+                pending_delivery,
                 AgentEventType.SCHEDULER_TASK_FAILED,
                 f"Task {node_id} failed.",
                 node_id=node_id,
@@ -274,6 +318,7 @@ class TaskScheduler:
                     self._queue.append(node_id)
                     self._queued_node_ids.add(node_id)
                 self._record_event_locked(
+                    pending_delivery,
                     AgentEventType.SCHEDULER_TASK_RETRIED,
                     f"Task {node_id} scheduled for retry.",
                     node_id=node_id,
@@ -283,15 +328,19 @@ class TaskScheduler:
                     attempt=retried.attempt,
                     reason_code="retryable_failure",
                 )
-                return retried.model_copy(deep=True)
+                result = retried.model_copy(deep=True)
+            else:
+                self._schedule_locked(pending_delivery)
+                result = failed.model_copy(deep=True)
 
-            self._schedule_locked()
-            return failed.model_copy(deep=True)
+        self._deliver_events(pending_delivery)
+        return result
 
-    def _schedule_locked(self) -> SchedulerResult:
+    def _schedule_locked(self, pending_delivery: list[AgentEvent]) -> SchedulerResult:
         scheduled: list[str] = []
         blocked: list[str] = []
         already_ready: list[str] = []
+        waiting_for_worker: list[str] = []
 
         for node_id in sorted(self._records):
             record = self._records[node_id]
@@ -314,7 +363,9 @@ class TaskScheduler:
                     failure_reason="blocked_by_failed_prerequisite",
                 )
                 blocked.append(node_id)
+                self._waiting_for_worker_node_ids.discard(node_id)
                 self._record_event_locked(
+                    pending_delivery,
                     AgentEventType.SCHEDULER_TASK_BLOCKED,
                     f"Task {node_id} blocked.",
                     node_id=node_id,
@@ -329,22 +380,19 @@ class TaskScheduler:
                 continue
 
             if not self._registry.compatible(self._role_for_node(node_id)):
-                updated = self._transition_locked(
-                    node_id,
-                    TaskStatus.PENDING,
-                    TaskStatus.BLOCKED,
-                    failure_reason="blocked_by_missing_worker_role",
-                )
-                blocked.append(node_id)
-                self._record_event_locked(
-                    AgentEventType.SCHEDULER_TASK_BLOCKED,
-                    f"Task {node_id} blocked.",
-                    node_id=node_id,
-                    from_status=TaskStatus.PENDING,
-                    to_status=TaskStatus.BLOCKED,
-                    attempt=updated.attempt,
-                    reason_code="missing_worker_role",
-                )
+                waiting_for_worker.append(node_id)
+                if node_id not in self._waiting_for_worker_node_ids:
+                    self._waiting_for_worker_node_ids.add(node_id)
+                    self._record_event_locked(
+                        pending_delivery,
+                        AgentEventType.SCHEDULER_TASK_WAITING_FOR_WORKER,
+                        f"Task {node_id} waiting for worker.",
+                        node_id=node_id,
+                        from_status=TaskStatus.PENDING,
+                        to_status=TaskStatus.PENDING,
+                        attempt=record.attempt,
+                        reason_code="missing_worker_role",
+                    )
                 continue
 
             updated = self._transition_locked(
@@ -352,11 +400,13 @@ class TaskScheduler:
                 TaskStatus.PENDING,
                 TaskStatus.READY,
             )
+            self._waiting_for_worker_node_ids.discard(node_id)
             if node_id not in self._queued_node_ids:
                 self._queue.append(node_id)
                 self._queued_node_ids.add(node_id)
             scheduled.append(node_id)
             self._record_event_locked(
+                pending_delivery,
                 AgentEventType.SCHEDULER_TASK_SCHEDULED,
                 f"Task {node_id} scheduled.",
                 node_id=node_id,
@@ -369,6 +419,7 @@ class TaskScheduler:
             scheduled=tuple(scheduled),
             blocked=tuple(blocked),
             already_ready=tuple(already_ready),
+            waiting_for_worker=tuple(waiting_for_worker),
         )
 
     def _transition_locked(
@@ -388,7 +439,7 @@ class TaskScheduler:
             raise StaleTaskStateError(
                 f"{node_id} expected {expected_status.value}, got {record.status.value}"
             )
-        if target_status not in TASK_TRANSITIONS[expected_status]:
+        if target_status not in _TASK_TRANSITIONS[expected_status]:
             raise InvalidSchedulerTransitionError(
                 f"cannot transition {node_id} from {expected_status.value} "
                 f"to {target_status.value}"
@@ -447,6 +498,7 @@ class TaskScheduler:
 
     def _record_event_locked(
         self,
+        pending_delivery: list[AgentEvent],
         event_type: AgentEventType,
         message: str,
         *,
@@ -471,5 +523,34 @@ class TaskScheduler:
 
         event = make_event(event_type, message, data=data)
         self._events.append(event)
-        if self._event_sink is not None:
-            self._event_sink(event)
+        pending_delivery.append(self._copy_event(event))
+
+    def _deliver_events(self, events: list[AgentEvent]) -> None:
+        if self._event_sink is None:
+            return
+        for event in events:
+            try:
+                self._event_sink(self._copy_event(event))
+            except Exception as exc:  # noqa: BLE001 - observer failure is isolated.
+                self._record_delivery_failure(event, exc)
+
+    def _record_delivery_failure(self, event: AgentEvent, error: Exception) -> None:
+        failure = make_event(
+            AgentEventType.SCHEDULER_EVENT_DELIVERY_FAILED,
+            "Scheduler event sink delivery failed.",
+            data={
+                "failed_event_type": event.event_type.value,
+                "error_type": type(error).__name__,
+            },
+        )
+        with self._lock:
+            self._events.append(failure)
+
+    def _copy_event(self, event: AgentEvent) -> AgentEvent:
+        return AgentEvent(
+            event_type=event.event_type,
+            message=event.message,
+            step_index=event.step_index,
+            data=dict(event.data),
+            timestamp=event.timestamp,
+        )

@@ -1703,16 +1703,17 @@ Multi-Agent Orchestration
 
 当前 `codeteam/agent_team/dag.py` 已有：
 
-- `TaskStatus`：`PENDING / READY / RUNNING / COMPLETED / FAILED / BLOCKED`。
+- `TaskStatus`：`PENDING / READY / CLAIMED / RUNNING / COMPLETED / FAILED / BLOCKED`。
 - `TaskNode`：`node_id / assignment / status`。
 - `TaskDAG.from_lead_planning_result()`：用 `assignment_id` 生成 `node_id`。
 - `dependencies=None` 多节点 fail closed。
 - `dependencies=()` 明确表示所有节点独立。
 - `nodes / topological_sort / get_ready_tasks` 返回防御性节点快照。
 - `topological_sort()` 使用 heap，顺序稳定。
+- `validate()` 能发现未知端点、自依赖和 cycle。
 - `replace_task_status()` 只做类型检查，不验证合法转移。
 
-Day3 可以复用 `TaskDAG.get_ready_tasks()` 作为 ready source，但不能直接把 `replace_task_status()` 当 Scheduler 状态机。它缺少：
+Day3 可以复用 `TaskDAG` 的 node/dependency topology，但 Scheduler 构造后应使用 `TaskRuntimeRecord.status` 计算 ready；不能直接把 `replace_task_status()` 当 Scheduler 状态机。它缺少：
 
 - expected current status。
 - owner 校验。
@@ -1839,7 +1840,7 @@ COMPLETED
 
 PENDING / READY
   |
-  | dependency failed or impossible role
+  | dependency failed or explicit irreversible policy
   v
 BLOCKED
 ```
@@ -1879,7 +1880,7 @@ prerequisites still valid
 | `RUNNING` | `FAILED` | `fail()` | caller 是 owner |
 | `FAILED` | `READY` | `retry()` 或 `fail(retry=True)` | attempt 未超限 |
 | `PENDING` | `BLOCKED` | `schedule()` | prerequisite failed 且不可继续 |
-| `READY` | `BLOCKED` | `schedule()` | role 永久不可满足或外部取消 |
+| `READY` | `BLOCKED` | `schedule()` | 明确不可恢复的策略决定 |
 
 非法跳转示例：
 
@@ -1896,13 +1897,13 @@ prerequisites still valid
 适合写 `BLOCKED` 的情况：
 
 - prerequisite 已经 terminal failed，dependent 永远无法满足。
-- 所需 role 在本次 team 配置中根本不存在，并且系统决定 fail closed。
 - 外部 policy/cancel 决定该节点不可执行。
 
 不建议写 `BLOCKED` 的情况：
 
 - 暂时没有空闲 Worker。
 - compatible worker 当前 `BUSY`。
+- 暂时没有注册兼容 role 的 Worker。
 - 队列暂时为空。
 
 这些是 Scheduler availability 问题，不是 task 自身不可执行。
@@ -1939,16 +1940,18 @@ owner_id
   Worker identity.agent_id，不是 role，不是 display_name。
 ```
 
-`TaskRuntimeRecord` 与 `TaskDAG.status` 不能各自独立变化。Day3 要选择唯一 source of truth：
+`TaskRuntimeRecord` 与 `TaskDAG.status` 不能各自作为运行时 source of truth。Day3 要选择唯一 source of truth：
 
 推荐：
 
 ```text
 TaskRuntimeRecord.status 是 Scheduler 状态权威。
-TaskDAG 继续负责 topology / prerequisites。
+TaskDAG 继续负责 topology / prerequisites。TaskScheduler 构造时复制 DAG 拓扑，构造后不再读取原 DAG status，也不接受动态 topology 修改。
 ```
 
-如果为了兼容 Day2 暂时需要回写 `TaskDAG.replace_task_status()`，也必须只由 Scheduler 在同一锁内调用，不能让外部同时修改 DAG status。
+Day3 只接受合法且全 `PENDING` 的 fresh DAG。`TaskScheduler.__init__()` 必须自己调用 `TaskDAG.validate()`，不能依赖调用方记得先 validate；如果发现 cycle、未知端点等 DAG 领域错误，应转换为 `SchedulerInitializationError`，并用异常链保留原始 `CycleDetectedError` 等根因。验证必须发生在复制 topology、创建 runtime records、queue 和 events 之前，避免失败时留下半初始化状态。
+
+如果传入 `READY/CLAIMED/RUNNING/COMPLETED/FAILED/BLOCKED` 节点，也应抛明确初始化异常。Resume/恢复已有状态留给 Day6 的显式 restore API。
 
 ---
 
@@ -2459,6 +2462,8 @@ SCHEDULER_TASK_COMPLETED = "scheduler.task_completed"
 SCHEDULER_TASK_FAILED = "scheduler.task_failed"
 SCHEDULER_TASK_RETRIED = "scheduler.task_retried"
 SCHEDULER_TASK_BLOCKED = "scheduler.task_blocked"
+SCHEDULER_TASK_WAITING_FOR_WORKER = "scheduler.task_waiting_for_worker"
+SCHEDULER_EVENT_DELIVERY_FAILED = "scheduler.event_delivery_failed"
 ```
 
 事件 data 只记录安全字段：
@@ -2470,9 +2475,26 @@ from_status
 to_status
 attempt
 reason_code
+failed_event_type
+error_type
 ```
 
 不要记录完整 prompt、完整 argv、secret、环境变量。
+
+事件事务边界：
+
+```text
+lock 内：
+  更新 status / owner / attempt / queue / worker availability
+  追加内部 AgentEvent
+
+lock 外：
+  向 event_sink 投递防御性事件副本
+  如果 sink 抛普通 Exception，记录 scheduler.event_delivery_failed
+  不递归投递 delivery_failed 事件
+```
+
+原因：Scheduler 的状态提交不能因为外部 observer 慢、重入读取或抛异常而卡死或反向污染。内部 `events` 列表是权威审计记录，外部 sink 是 best-effort 投递。
 
 完成标志：状态变化都能从事件重放中看懂。
 
@@ -2844,7 +2866,7 @@ Day3 不需要证明：
 - Step4：`TaskScheduler.claim()` 在 `threading.Lock` 内完成 status、owner、queue membership、worker availability 的一致更新。
 - Step5：`start()`、`complete()`、`fail()` 都校验 owner；`complete()` 会触发 dependent 下一轮 schedule。
 - Step6：`fail()` 支持 `max_attempts` 限制下的 retry，超限保持 `FAILED`。
-- Step7：Scheduler 事件接入 `codeteam.events.AgentEventType`，未新增独立日志系统。
+- Step7：Scheduler 事件接入 `codeteam.events.AgentEventType`，未新增独立日志系统；event sink 在状态锁外接收防御性副本，sink 普通异常会被隔离并记录 `scheduler.event_delivery_failed`。
 - Step8：新增 `tests/agent_team/test_scheduler.py`，覆盖并发 claim、状态机、ownership、retry、事件和半写入风险。
 - Step9：新增 `DD-W5-03`、`W5_SCHEDULER_FAILURE`、`W5_SCHEDULER.md` 和 `benchmark_scheduler.py`。
 
@@ -2853,3 +2875,13 @@ Day3 不需要证明：
 - 只证明进程内线程级原子 claim。
 - 不证明跨进程/分布式调度。
 - 不实现 Worker crash recovery、heartbeat、durable queue、Mailbox、Worktree ownership 或端到端 Multi-Agent 加速。
+
+Day3 前 hardening 补充：
+
+- `TASK_TRANSITIONS` 作为公共 API 暴露为只读 mapping，内部转移集合使用不可变 tuple，避免测试或外部调用方修改状态机。
+- 缺少兼容 role 的 Worker 时，`schedule()` 返回 `waiting_for_worker`，任务保持 `PENDING`；这不是 `BLOCKED`，后续注册兼容 Worker 后可重新调度。
+- `TaskScheduler` 构造时复制 DAG topology 和节点快照，只接受全 `PENDING` fresh DAG；构造后不读取原 DAG status 或动态 topology mutation。
+- `TaskScheduler` 构造时先调用 `TaskDAG.validate()`，是进入 Scheduler 前的最终 fail-fast gate；未显式 validate 的环形 DAG 会抛 `SchedulerInitializationError`，并通过 `__cause__` 保留 `CycleDetectedError`。
+- Scheduler 事件提交和 sink 投递分离，慢 sink 不持有状态锁，sink 普通异常不会隐藏已经成功提交的 claim/transition。
+- 并发测试和 benchmark worker thread 使用有界 join，并收集线程异常，避免验收时无限挂起。
+- Benchmark 将 scheduler setup latency 与 schedule-only latency 分开报告，避免把构造成本混入调度延迟。
