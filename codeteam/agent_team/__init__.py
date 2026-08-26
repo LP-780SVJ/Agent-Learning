@@ -23,6 +23,19 @@ from codeteam.agent_team.models import (
     LeadPlanningResult,
     WorkerAssignment,
 )
+from codeteam.agent_team.scheduler import (
+    TASK_TRANSITIONS,
+    InvalidSchedulerTransitionError,
+    SchedulerError,
+    SchedulerResult,
+    StaleTaskStateError,
+    TaskClaim,
+    TaskOwnershipError,
+    TaskRuntimeRecord,
+    TaskScheduler,
+    WorkerRoleMismatchError,
+    WorkerUnavailableError,
+)
 from codeteam.agent_team.worker import (
     DuplicateWorkerError,
     WorkerAgent,
@@ -31,6 +44,7 @@ from codeteam.agent_team.worker import (
 )
 
 __all__ = [
+    "TASK_TRANSITIONS",
     "AgentIdentity",
     "AgentInfo",
     "AgentRole",
@@ -41,12 +55,20 @@ __all__ = [
     "DuplicateTaskNodeError",
     "DuplicateWorkerError",
     "InvalidDependencyError",
+    "InvalidSchedulerTransitionError",
     "InvalidTaskStatusError",
     "LeadAgent",
     "LeadPlanningResult",
     "RoleAssigner",
+    "SchedulerError",
+    "SchedulerResult",
+    "StaleTaskStateError",
+    "TaskClaim",
     "TaskDAG",
     "TaskNode",
+    "TaskOwnershipError",
+    "TaskRuntimeRecord",
+    "TaskScheduler",
     "TaskStatus",
     "UndeclaredDependenciesError",
     "UnknownTaskNodeError",
@@ -54,4 +76,6 @@ __all__ = [
     "WorkerAssignment",
     "WorkerNotFoundError",
     "WorkerRegistry",
+    "WorkerRoleMismatchError",
+    "WorkerUnavailableError",
 ]

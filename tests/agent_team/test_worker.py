@@ -37,6 +37,34 @@ def test_register_then_get_returns_same_worker() -> None:
     assert registry.get("worker-backend-1") is worker
 
 
+def test_worker_info_is_defensive_snapshot() -> None:
+    info = AgentInfo(
+        identity=AgentIdentity(
+            agent_id="worker-backend-1",
+            display_name="Backend Worker 1",
+        ),
+        role=AgentRole.BACKEND,
+    )
+    worker = WorkerAgent(info)
+
+    info.identity.agent_id = "mutated-source"
+    snapshot = worker.info
+    snapshot.identity.agent_id = "mutated-snapshot"
+
+    assert worker.info.identity.agent_id == "worker-backend-1"
+
+
+def test_registry_key_survives_worker_info_snapshot_mutation() -> None:
+    registry = WorkerRegistry()
+    worker = _worker("worker-backend-1", AgentRole.BACKEND)
+    registry.register(worker)
+
+    snapshot = worker.info
+    snapshot.identity.agent_id = "mutated"
+
+    assert registry.get("worker-backend-1") is worker
+
+
 def test_duplicate_worker_id_is_rejected_without_overwrite() -> None:
     registry = WorkerRegistry()
     original = _worker("worker-test-1", AgentRole.TEST)

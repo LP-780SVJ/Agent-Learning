@@ -198,6 +198,7 @@ def test_fan_out_and_fan_in_ready_flow() -> None:
 def test_each_non_pending_status_is_not_returned_as_ready() -> None:
     for status in (
         TaskStatus.READY,
+        TaskStatus.CLAIMED,
         TaskStatus.RUNNING,
         TaskStatus.COMPLETED,
         TaskStatus.FAILED,

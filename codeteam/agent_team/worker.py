@@ -15,11 +15,11 @@ class WorkerAgent:
     def __init__(self, info: AgentInfo) -> None:
         if info.role is AgentRole.LEAD:
             raise ValueError("WorkerAgent cannot use the lead role")
-        self._info = info
+        self._info = info.model_copy(deep=True)
 
     @property
     def info(self) -> AgentInfo:
-        return self._info
+        return self._info.model_copy(deep=True)
 
     def supports(self, role: AgentRole) -> bool:
         return self._info.role is role

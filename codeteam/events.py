@@ -25,6 +25,13 @@ class AgentEventType(str, Enum):
     APPROVAL_APPROVED = "approval.approved"
     APPROVAL_DENIED = "approval.denied"
     APPROVAL_CONSUMED = "approval.consumed"
+    SCHEDULER_TASK_SCHEDULED = "scheduler.task_scheduled"
+    SCHEDULER_TASK_CLAIMED = "scheduler.task_claimed"
+    SCHEDULER_TASK_STARTED = "scheduler.task_started"
+    SCHEDULER_TASK_COMPLETED = "scheduler.task_completed"
+    SCHEDULER_TASK_FAILED = "scheduler.task_failed"
+    SCHEDULER_TASK_RETRIED = "scheduler.task_retried"
+    SCHEDULER_TASK_BLOCKED = "scheduler.task_blocked"
 
     # Task 生命周期（Week 4）
     TASK_CREATED = "task.created"

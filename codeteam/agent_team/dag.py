@@ -11,6 +11,7 @@ from codeteam.agent_team.models import LeadPlanningResult, WorkerAssignment
 class TaskStatus(str, Enum):
     PENDING = "pending"
     READY = "ready"
+    CLAIMED = "claimed"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
