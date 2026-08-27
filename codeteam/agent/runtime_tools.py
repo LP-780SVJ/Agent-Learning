@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import json
+import posixpath
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
 from codeteam.agent.editing import FileEdit, file_edits_to_patch
 from codeteam.agent.runtime_models import VerificationEvidence
+from codeteam.agent.verification import (
+    DEFAULT_TEST_TIMEOUT_SECONDS,
+    normalize_allowed_verification_commands,
+    normalize_run_tests_action,
+    normalize_verification_argv,
+    normalize_verification_cwd,
+)
 from codeteam.execution.models import CommandRequest
 from codeteam.execution.safe_execution_service import (
     SafeCommandExecutionRequest,
@@ -38,7 +47,11 @@ class ApplyPatchArgs(BaseModel):
 class RunTestsArgs(BaseModel):
     argv: tuple[str, ...] = Field(min_length=1)
     cwd: str = "."
-    timeout_seconds: float = Field(default=120.0, gt=0, le=900)
+    timeout_seconds: float = Field(
+        default=DEFAULT_TEST_TIMEOUT_SECONDS,
+        gt=0,
+        le=900,
+    )
 
 
 class EmptyArgs(BaseModel):
@@ -53,10 +66,22 @@ class RuntimeEvidence:
     paused_reason: str | None = None
     checkpoint_ids: list[str] = field(default_factory=list)
     repair_duration_ms: int = 0
+    required_verification_commands: tuple[tuple[str, ...], ...] = ()
+    changed_files: tuple[str, ...] = ()
+    git_diff_checked: bool = False
 
     @property
     def tests_passed(self) -> bool:
-        return bool(self.verification) and self.verification[-1].passed
+        if not self.required_verification_commands:
+            return bool(self.verification) and self.verification[-1].passed
+        latest: dict[tuple[str, ...], bool] = {}
+        for item in self.verification:
+            if item.completion_required:
+                latest[item.argv] = item.passed
+        return all(
+            latest.get(command, False)
+            for command in self.required_verification_commands
+        )
 
 
 def create_runtime_tools(
@@ -67,9 +92,17 @@ def create_runtime_tools(
     safe_execution: SafeExecutionService,
     evidence: RuntimeEvidence,
     allowed_verification_commands: tuple[tuple[str, ...], ...] = (),
+    required_verification_commands: tuple[tuple[str, ...], ...] = (),
     max_repairs: int = 3,
 ) -> ToolRegistry:
     root = workspace_root.resolve(strict=True)
+    canonical_allowed_commands = normalize_allowed_verification_commands(
+        allowed_verification_commands
+    )
+    canonical_required_commands = normalize_allowed_verification_commands(
+        required_verification_commands
+    )
+    evidence.required_verification_commands = canonical_required_commands
     registry = ToolRegistry()
     for tool in create_file_tools(root):
         if tool.name in {"list_files", "read_file", "search_code"}:
@@ -105,6 +138,8 @@ def create_runtime_tools(
             )
         evidence.workspace_version += 1
         changed = [change.path for change in (result.diff.changes if result.diff else [])]
+        evidence.changed_files = tuple(changed)
+        evidence.git_diff_checked = False
         return json.dumps(
             {"applied": True, "changed_files": changed},
             ensure_ascii=False,
@@ -112,9 +147,18 @@ def create_runtime_tools(
 
     def run_tests(args: BaseModel) -> str:
         parsed = RunTestsArgs.model_validate(args)
-        if allowed_verification_commands and parsed.argv not in allowed_verification_commands:
-            raise ValueError("Command is not in the task's visible verification commands.")
-        cwd = (root / parsed.cwd).resolve(strict=False)
+        argv = normalize_verification_argv(parsed.argv)
+        cwd_argument = normalize_verification_cwd(parsed.cwd)
+        if canonical_allowed_commands and argv not in canonical_allowed_commands:
+            allowed = json.dumps(
+                [list(command) for command in canonical_allowed_commands],
+                ensure_ascii=False,
+            )
+            raise ValueError(
+                "Command is not in the task's visible verification commands. "
+                f"Use one of these workspace-relative argv arrays: {allowed}"
+            )
+        cwd = (root / cwd_argument).resolve(strict=False)
         try:
             cwd.relative_to(root)
         except ValueError as error:
@@ -122,7 +166,7 @@ def create_runtime_tools(
         result = safe_execution.execute_command(
             SafeCommandExecutionRequest(
                 command=CommandRequest(
-                    argv=parsed.argv,
+                    argv=argv,
                     cwd=cwd,
                     workspace_root=root,
                     task_id=task_id,
@@ -134,7 +178,7 @@ def create_runtime_tools(
         )
         command = result.command_result
         item = VerificationEvidence(
-            argv=parsed.argv,
+            argv=argv,
             passed=(
                 result.status is SafeExecutionStatus.COMPLETED
                 and command is not None
@@ -145,6 +189,7 @@ def create_runtime_tools(
             stdout=command.stdout if command else "",
             stderr=command.stderr if command else "",
             error=result.error or (command.error if command else None),
+            completion_required=argv in canonical_required_commands,
         )
         evidence.verification.append(item)
         if evidence.repair_attempts:
@@ -164,6 +209,7 @@ def create_runtime_tools(
         )
 
     def git_diff(_: BaseModel) -> str:
+        evidence.git_diff_checked = True
         return render_workspace_diff(root)
 
     registry.register(
@@ -199,6 +245,29 @@ def create_runtime_tools(
         )
     )
     return registry
+
+
+def normalize_runtime_action(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    if tool_name == "run_tests":
+        return normalize_run_tests_action(tool_name, arguments)
+    normalized = dict(arguments)
+    if tool_name in {"list_files", "read_file", "search_code"}:
+        raw_path = normalized.get("path", ".")
+        if isinstance(raw_path, str):
+            normalized["path"] = posixpath.normpath(raw_path) or "."
+    if tool_name == "list_files":
+        normalized.setdefault("recursive", True)
+    elif tool_name == "read_file":
+        normalized.setdefault("start_line", None)
+        normalized.setdefault("end_line", None)
+    elif tool_name == "search_code":
+        normalized.setdefault("max_results", 50)
+    elif tool_name in {"git_status", "git_diff"}:
+        return {}
+    return normalized
 
 
 def render_workspace_diff(workspace_root: Path) -> str:

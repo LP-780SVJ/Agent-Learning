@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import pytest
 
+from codeteam.agent.runtime_models import ModelOutputEvidence
 from codeteam.events import AgentEventType
 from codeteam.session import store as store_module
 from codeteam.session.errors import (
@@ -29,6 +30,25 @@ def test_store_create_then_load_round_trips(git_repo, tmp_path: Path) -> None:
     store.create(session)
 
     assert store.load(session.manifest.session_id) == session
+
+
+def test_store_appends_private_model_output_evidence(git_repo, tmp_path: Path) -> None:
+    store = JsonSessionStore(tmp_path / "sessions")
+    session = store.create(make_session(git_repo))
+    evidence = ModelOutputEvidence(
+        step=1,
+        raw_content="provider raw output",
+        parse_error="not valid JSON",
+        model="test-model",
+        input_tokens=3,
+        output_tokens=4,
+    )
+
+    store.append_model_output(session.manifest.session_id, evidence)
+
+    path = store.session_dir(session.manifest.session_id) / "model_outputs.jsonl"
+    assert ModelOutputEvidence.model_validate_json(path.read_text()) == evidence
+    assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_store_create_existing_session_rejects_overwrite(

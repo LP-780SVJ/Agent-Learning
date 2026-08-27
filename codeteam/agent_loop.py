@@ -11,6 +11,7 @@ from codeteam.agent.protocol import (
     ModelOutputNormalizationError,
     normalize_model_output,
 )
+from codeteam.agent.runtime_models import ModelOutputEvidence
 from codeteam.events import AgentEvent, AgentEventType, make_event
 from codeteam.limits import AgentLoopLimits, check_step_limit, check_tool_call_limit
 from codeteam.llm.base import ModelResponse
@@ -25,6 +26,7 @@ from codeteam.state import (
     AgentLoopState,
     StopReason,
     is_repeated_action,
+    make_action_fingerprint,
     record_tool_call,
 )
 from codeteam.tools.registry import ToolRegistry
@@ -68,6 +70,8 @@ class AgentLoopResult:
     steps_used: int = 0
     tool_calls_used: int = 0
     protocol_repairs_used: int = 0
+    protocol_repair_streak: int = 0
+    model_outputs: list[ModelOutputEvidence] = field(default_factory=list)
 
     events: list[AgentEvent] = field(default_factory=list)
     total_input_tokens: int = 0
@@ -85,6 +89,7 @@ class ParsedModelOutput:
     stop_reason: StopReason | None = None
     error: str | None = None
     dialect: ModelOutputDialect | None = None
+    canonical_payload: dict[str, object] | None = None
 
 
 def run_agent_loop(
@@ -95,6 +100,12 @@ def run_agent_loop(
     actual_tests_passed: bool | Callable[[], bool] | None = None,
     message_transform: Callable[[list[Message]], list[Message]] | None = None,
     state_version_provider: Callable[[], int] | None = None,
+    action_fingerprint_normalizer: Callable[
+        [str, dict[str, Any]], dict[str, Any]
+    ] | None = None,
+    semantic_repeat_tools: frozenset[str] = frozenset(),
+    cacheable_tools: frozenset[str] = frozenset(),
+    initial_protocol_repair_streak: int = 0,
     state_callback: Callable[[AgentLoopState], None] | None = None,
     lifecycle_callback: Callable[
         [str, AgentLoopState, dict[str, Any]], None
@@ -103,7 +114,10 @@ def run_agent_loop(
     if limits is None:
         limits = AgentLoopLimits()
 
-    state = AgentLoopState(messages=list(messages))
+    state = AgentLoopState(
+        messages=list(messages),
+        protocol_repair_streak=initial_protocol_repair_streak,
+    )
     start_time = time.monotonic()
     usage_tracker = UsageTracker()
     events: list[AgentEvent] = []
@@ -212,12 +226,6 @@ def run_agent_loop(
             },
         ))
 
-        state.messages.append(
-            Message(role="assistant", content=model_response.content)
-        )
-        if state_callback is not None:
-            state_callback(state)
-
         tests_passed = (
             actual_tests_passed()
             if callable(actual_tests_passed)
@@ -228,18 +236,54 @@ def run_agent_loop(
             actual_tests_passed=tests_passed,
             call_id_prefix=f"step-{state.step_count}",
         )
+        state.model_outputs.append(
+            ModelOutputEvidence(
+                step=state.step_count,
+                raw_content=model_response.content,
+                dialect=(
+                    parsed_output.dialect.value
+                    if parsed_output.dialect is not None
+                    else None
+                ),
+                canonical_payload=parsed_output.canonical_payload,
+                parse_error=(
+                    parsed_output.error
+                    if parsed_output.stop_reason is not None
+                    else None
+                ),
+                model=model_response.model,
+                input_tokens=model_response.input_tokens,
+                output_tokens=model_response.output_tokens,
+            )
+        )
+
+        if parsed_output.stop_reason is None:
+            state.protocol_repair_streak = 0
+            state.messages.append(
+                Message(
+                    role="assistant",
+                    content=json.dumps(
+                        parsed_output.canonical_payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+        if state_callback is not None:
+            state_callback(state)
 
         if parsed_output.stop_reason is not None:
             if (
                 parsed_output.stop_reason is StopReason.INVALID_FINAL_OUTPUT
-                and state.protocol_repair_count < limits.max_protocol_repairs
+                and state.protocol_repair_streak < limits.max_protocol_repairs
                 and state.step_count < limits.max_steps
             ):
                 state.protocol_repair_count += 1
+                state.protocol_repair_streak += 1
                 state.messages.append(
                     _protocol_repair_message(
                         parsed_output.error or "Invalid model output.",
-                        attempt=state.protocol_repair_count,
+                        attempt=state.protocol_repair_streak,
                         maximum=limits.max_protocol_repairs,
                     )
                 )
@@ -250,6 +294,7 @@ def run_agent_loop(
                         step_index=state.step_count,
                         data={
                             "attempt": state.protocol_repair_count,
+                            "streak": state.protocol_repair_streak,
                             "maximum": limits.max_protocol_repairs,
                             "error": parsed_output.error,
                         },
@@ -277,6 +322,9 @@ def run_agent_loop(
                 usage_tracker,
                 events,
                 state_version_provider=state_version_provider,
+                action_fingerprint_normalizer=action_fingerprint_normalizer,
+                semantic_repeat_tools=semantic_repeat_tools,
+                cacheable_tools=cacheable_tools,
                 state_callback=state_callback,
                 lifecycle_callback=lifecycle_callback,
             )
@@ -354,6 +402,15 @@ def _parse_model_output(
         return ParsedModelOutput(
             tool_calls=tool_calls,
             dialect=normalized.dialect,
+            canonical_payload={
+                "tool_calls": [
+                    {
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }
+                    for call in tool_calls
+                ]
+            },
         )
 
     if "status" not in parsed:
@@ -377,6 +434,7 @@ def _parse_model_output(
     return ParsedModelOutput(
         final_output=final_output,
         dialect=normalized.dialect,
+        canonical_payload=final_output.model_dump(mode="json"),
     )
 
 
@@ -446,6 +504,11 @@ def _handle_tool_calls(
     events: list[AgentEvent],
     *,
     state_version_provider: Callable[[], int] | None = None,
+    action_fingerprint_normalizer: Callable[
+        [str, dict[str, Any]], dict[str, Any]
+    ] | None = None,
+    semantic_repeat_tools: frozenset[str] = frozenset(),
+    cacheable_tools: frozenset[str] = frozenset(),
     state_callback: Callable[[AgentLoopState], None] | None = None,
     lifecycle_callback: Callable[
         [str, AgentLoopState, dict[str, Any]], None
@@ -465,11 +528,61 @@ def _handle_tool_calls(
         workspace_version = (
             state_version_provider() if state_version_provider is not None else 0
         )
+        fingerprint_arguments = (
+            action_fingerprint_normalizer(call.name, call.arguments)
+            if action_fingerprint_normalizer is not None
+            else call.arguments
+        )
+        fingerprint = make_action_fingerprint(
+            call.name,
+            fingerprint_arguments,
+            workspace_version,
+        )
+        if call.name in cacheable_tools and fingerprint in state.tool_result_cache:
+            cached = state.tool_result_cache[fingerprint].model_copy(
+                update={"call_id": call.call_id}
+            )
+            state.cached_no_progress_count += 1
+            record_tool_call(
+                state,
+                call.name,
+                fingerprint_arguments,
+                workspace_version,
+            )
+            state.messages.append(_tool_result_to_message(cached))
+            events.append(
+                make_event(
+                    AgentEventType.TOOL_RESULT,
+                    "Cached tool observation returned.",
+                    step_index=state.step_count,
+                    data={
+                        "call_id": cached.call_id,
+                        "name": cached.name,
+                        "success": cached.success,
+                        "cached": True,
+                    },
+                )
+            )
+            if state_callback is not None:
+                state_callback(state)
+            if state.cached_no_progress_count >= 2:
+                return _stop_with_failure(
+                    state,
+                    StopReason.NO_PROGRESS,
+                    "Agent stopped after repeated cached exploration without workspace changes.",
+                    start_time,
+                    usage_tracker,
+                    events,
+                )
+            continue
+
+        state.cached_no_progress_count = 0
         if is_repeated_action(
             state,
             call.name,
-            call.arguments,
+            fingerprint_arguments,
             workspace_version,
+            include_history=call.name in semantic_repeat_tools,
         ):
             return _stop_with_failure(
                 state,
@@ -495,6 +608,8 @@ def _handle_tool_calls(
             )
 
         result = tool_registry.execute(call)
+        if call.name in cacheable_tools:
+            state.tool_result_cache[fingerprint] = result
 
         if lifecycle_callback is not None:
             lifecycle_callback(
@@ -521,7 +636,7 @@ def _handle_tool_calls(
         record_tool_call(
             state,
             call.name,
-            call.arguments,
+            fingerprint_arguments,
             workspace_version,
         )
         state.messages.append(_tool_result_to_message(result))
@@ -610,6 +725,8 @@ def _build_loop_result(
         steps_used=state.step_count,
         tool_calls_used=state.tool_call_count,
         protocol_repairs_used=state.protocol_repair_count,
+        protocol_repair_streak=state.protocol_repair_streak,
+        model_outputs=state.model_outputs,
         events=events,
         total_input_tokens=usage_tracker.total_input_tokens(),
         total_output_tokens=usage_tracker.total_output_tokens(),

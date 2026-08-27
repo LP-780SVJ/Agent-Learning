@@ -1,0 +1,35 @@
+diff --git a/tests/task_verification/test_f04.py b/tests/task_verification/test_f04.py
+new file mode 100644
+--- /dev/null
++++ b/tests/task_verification/test_f04.py
+@@ -0,0 +1,30 @@
++import json
++
++from src.billing.webhooks import BillingWebhookController
++from src.common.events import INVOICE_PAID
++
++
++class Verifier:
++    def verify(self, payload: bytes, signature: str) -> bool:
++        return True
++
++
++class Repository:
++    def mark_retry_requested(self, invoice_id: str) -> None:
++        pass
++
++
++class Bus:
++    def __init__(self) -> None:
++        self.events: list[object] = []
++
++    def publish(self, event: object) -> None:
++        self.events.append(event)
++
++
++def test_paid_webhook_publishes_invoice_event() -> None:
++    bus = Bus()
++    payload = {"type": "billing.invoice.paid", "data": {"invoice_id": "inv-1", "customer_email": "c@example.com", "amount": 10}}
++    BillingWebhookController(verifier=Verifier(), repository=Repository(), event_bus=bus).receive(json.dumps(payload).encode(), "ok")
++    assert bus.events[0].name == INVOICE_PAID
++    assert bus.events[0].payload == payload["data"]

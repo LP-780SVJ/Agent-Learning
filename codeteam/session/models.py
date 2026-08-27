@@ -201,6 +201,7 @@ class AgentRuntimeState(BaseModel):
     tool_call_count: int = 0
     repair_attempts: int = 0
     protocol_repair_attempts: int = 0
+    protocol_repair_streak: int = 0
     workspace_version: int = 0
     recent_messages: tuple[Message, ...] = ()
     retrieved_files: tuple[str, ...] = ()

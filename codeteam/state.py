@@ -3,7 +3,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from codeteam.agent.runtime_models import ModelOutputEvidence
 from codeteam.schemas.messages import Message
+from codeteam.schemas.tool_calls import ToolResult
 
 
 class StopReason(str, Enum):
@@ -31,7 +33,12 @@ class AgentLoopState:
     step_count: int = 0
     tool_call_count: int = 0
     protocol_repair_count: int = 0
+    protocol_repair_streak: int = 0
+    model_outputs: list[ModelOutputEvidence] = field(default_factory=list)
     last_action: ActionFingerprint | None = None
+    action_history: set[ActionFingerprint] = field(default_factory=set)
+    tool_result_cache: dict[ActionFingerprint, ToolResult] = field(default_factory=dict)
+    cached_no_progress_count: int = 0
     stop_reason: StopReason | None = None
 
 def normalize_arguments(arguments: dict[str, Any]) -> str:
@@ -63,22 +70,26 @@ def record_tool_call(
     workspace_version: int = 0,
 ) -> None:
     state.tool_call_count += 1
-    state.last_action = make_action_fingerprint(
+    fingerprint = make_action_fingerprint(
         tool_name,
         arguments,
         workspace_version,
     )
+    state.last_action = fingerprint
+    state.action_history.add(fingerprint)
 
 def is_repeated_action(
     state: AgentLoopState,
     tool_name: str,
     arguments: dict[str, Any],
     workspace_version: int = 0,
+    include_history: bool = False,
 ) -> bool:
-    if not state.last_action:
-        return False
-    return state.last_action == make_action_fingerprint(
+    fingerprint = make_action_fingerprint(
         tool_name,
         arguments,
         workspace_version,
+    )
+    return state.last_action == fingerprint or (
+        include_history and fingerprint in state.action_history
     )

@@ -11,7 +11,9 @@ from codeteam.agent.runtime_models import (
     CodingAgentRunRequest,
     CompactionMode,
     RuntimeStatus,
+    VerificationEvidence,
 )
+from codeteam.agent.runtime_tools import RuntimeEvidence
 from codeteam.execution.models import CommandResult, CommandStatus
 from codeteam.execution.safe_execution_service import SafeExecutionService
 from codeteam.git.workspace import GitWorkspace
@@ -92,6 +94,18 @@ class PassingSandbox:
         )
 
 
+class FailingSandbox:
+    def run(self, context) -> CommandResult:
+        return CommandResult(
+            status=CommandStatus.NONZERO_EXIT,
+            argv=context.argv,
+            cwd=context.cwd,
+            exit_code=1,
+            stdout="",
+            stderr="assertion failed",
+        )
+
+
 def _call(index: int, name: str, arguments: dict) -> dict:
     return {
         "tool_calls": [
@@ -107,10 +121,19 @@ def test_runtime_completes_search_patch_test_repair_diff_loop(tmp_path: Path) ->
             _call(1, "search_code", {"query": "VALUE", "path": "."}),
             _call(2, "read_file", {"path": "app.py"}),
             _call(3, "apply_patch", {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]}),
-            _call(4, "run_tests", {"argv": ["python", "-m", "pytest"]}),
+            _call(30, "read_file", {"path": "app.py"}),
+            _call(
+                4,
+                "run_tests",
+                {"argv": ["python", "-m", "pytest", "/workspace/tests"]},
+            ),
             _call(5, "git_diff", {}),
             _call(6, "apply_patch", {"edits": [{"path": "app.py", "content": "VALUE = 3\n"}]}),
-            _call(7, "run_tests", {"argv": ["python", "-m", "pytest"]}),
+            _call(
+                7,
+                "run_tests",
+                {"argv": ["python", "-m", "pytest", "./tests"]},
+            ),
             _call(8, "git_diff", {}),
             {"status": "completed", "summary": "fixed", "tests_passed": True},
         ]
@@ -130,7 +153,7 @@ def test_runtime_completes_search_patch_test_repair_diff_loop(tmp_path: Path) ->
             model_id="scripted",
             max_steps=12,
             max_tool_calls=12,
-            verification_commands=(("python", "-m", "pytest"),),
+            verification_commands=(("python", "-m", "pytest", "tests"),),
             checkpoint_state_root=tmp_path / "checkpoints",
         )
     )
@@ -141,8 +164,81 @@ def test_runtime_completes_search_patch_test_repair_diff_loop(tmp_path: Path) ->
     assert result.changed_files == ("app.py",)
     assert "VALUE = 3" in (repo / "app.py").read_text(encoding="utf-8")
     assert "VALUE = 3" in result.diff
+    assert result.verification[0].argv == ("python", "-m", "pytest", "tests")
+    assert result.verification[1].argv == ("python", "-m", "pytest", "tests")
     second_request = model.requests[1]
     assert [message.role for message in second_request[-2:]] == ["assistant", "tool"]
+
+
+def test_task_verification_is_distinct_from_broad_regression(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    model = ScriptedModel(
+        [
+            _call(1, "apply_patch", {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]}),
+            _call(2, "run_tests", {"argv": ["python", "-m", "pytest", "tests"]}),
+            _call(3, "run_tests", {"argv": ["python", "-m", "pytest", "tests/task.py"]}),
+            _call(4, "git_diff", {}),
+            {"status": "completed", "summary": "verified", "tests_passed": True},
+        ]
+    )
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=SafeExecutionService(sandbox_runner=PassingSandbox()),
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="required-test",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            verification_commands=(("python", "-m", "pytest", "tests"),),
+            task_verification_commands=(
+                ("python", "-m", "pytest", "tests/task.py"),
+            ),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert [item.completion_required for item in result.verification] == [False, True]
+
+
+def test_runtime_preserves_resumed_protocol_streak_before_first_model_call(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    observed_streaks: list[int] = []
+    runtime = CodingAgentRuntime(
+        model_client=ScriptedModel(
+            [
+                {
+                    "status": "failed",
+                    "summary": "stop",
+                    "tests_passed": False,
+                    "error": "stop",
+                }
+            ]
+        ),
+        context_service=StubContext(),
+        state_callback=lambda state, evidence: observed_streaks.append(
+            state.protocol_repair_streak
+        ),
+    )
+
+    runtime.run(
+        CodingAgentRunRequest(
+            task_id="resume-streak",
+            task="stop",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            initial_protocol_repair_streak=1,
+        )
+    )
+
+    assert observed_streaks[0] == 1
+    assert observed_streaks[-1] == 0
 
 
 def test_completed_without_verification_pauses(tmp_path: Path) -> None:
@@ -182,8 +278,58 @@ def test_compaction_modes_are_behaviorally_distinct() -> None:
 
     assert none == messages
     assert len(naive) < len(none)
-    assert any("Structured context summary" in (item.content or "") for item in structured)
+    assert any("structured_context_summary" in (item.content or "") for item in structured)
     assert structured != naive
+
+
+def test_structured_compaction_keeps_deterministic_runtime_facts() -> None:
+    evidence = RuntimeEvidence(
+        workspace_version=2,
+        changed_files=("app.py",),
+        git_diff_checked=True,
+        required_verification_commands=(("python", "-m", "pytest", "tests/task.py"),),
+        verification=[
+            VerificationEvidence(
+                argv=("python", "-m", "pytest", "tests/task.py"),
+                passed=True,
+                completion_required=True,
+            )
+        ],
+    )
+    messages = [
+        Message(role="system", content="system"),
+        Message(role="user", content="task"),
+        Message(
+            role="assistant",
+            content=json.dumps(
+                {
+                    "tool_calls": [
+                        {"name": "read_file", "arguments": {"path": "app.py"}},
+                        {"name": "search_code", "arguments": {"query": "VALUE"}},
+                        {"name": "git_diff", "arguments": {}},
+                    ]
+                }
+            ),
+        ),
+        Message(role="tool", content="x" * 200, tool_call_id="call-1"),
+        Message(role="assistant", content="<｜｜DSML｜｜tool_calls>raw"),
+    ]
+
+    compacted = _message_transform(CompactionMode.STRUCTURED, 20, evidence)(
+        messages
+    )
+    summary = next(
+        json.loads(item.content)["structured_context_summary"]
+        for item in compacted
+        if "structured_context_summary" in (item.content or "")
+    )
+
+    assert summary["read_files"] == ["app.py"]
+    assert summary["workspace_version"] == 2
+    assert summary["changed_files"] == ["app.py"]
+    assert summary["git_diff_checked"] is True
+    assert summary["remaining_completion_gate"] == "task_verification_passed"
+    assert all("DSML" not in (item.content or "") for item in compacted)
 
 
 def test_provider_failure_is_classified_without_escaping(tmp_path: Path) -> None:
@@ -354,11 +500,12 @@ def test_runtime_completes_with_dsml_actions_and_fenced_final(tmp_path: Path) ->
     assert result.tool_calls_used == 3
     assert result.changed_files == ("app.py",)
     assert (repo / "app.py").read_text(encoding="utf-8") == "VALUE = 2\n"
-    assert any(
-        "<｜｜DSML｜｜tool_calls>" in (message.content or "")
+    assert all(
+        "<｜｜DSML｜｜tool_calls>" not in (message.content or "")
         for message in result.messages
-        if message.role == "assistant"
     )
+    assert result.model_outputs[0].dialect == "deepseek_dsml"
+    assert "<｜｜DSML｜｜tool_calls>" in result.model_outputs[0].raw_content
 
 
 def test_runtime_prompt_contains_complete_action_contract(tmp_path: Path) -> None:
@@ -388,3 +535,57 @@ def test_runtime_prompt_contains_complete_action_contract(tmp_path: Path) -> Non
     assert "tool_call_schema" in system["protocol"]
     assert "final_output_schema" in system["protocol"]
     assert "Runtime assigns" in system["protocol"]["tool_call_note"]
+    assert "paths and cwd are relative to the workspace" in system["execution_boundary"]
+    assert "do not put /workspace" in system["execution_boundary"]
+
+
+def test_equivalent_failed_verification_stops_without_spending_more_steps(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    model = ScriptedModel(
+        [
+            _call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
+            _call(
+                2,
+                "run_tests",
+                {"argv": ["python", "-m", "pytest", "/workspace/tests"]},
+            ),
+            _call(3, "git_diff", {}),
+            _call(
+                4,
+                "run_tests",
+                {
+                    "argv": ["python", "-m", "pytest", "./tests"],
+                    "cwd": ".",
+                    "timeout_seconds": 120,
+                },
+            ),
+        ]
+    )
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=SafeExecutionService(sandbox_runner=FailingSandbox()),
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="T08",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            max_steps=10,
+            verification_commands=(("python", "-m", "pytest", "tests"),),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert result.status is RuntimeStatus.FAILED
+    assert result.failure_category == "repeated_action"
+    assert result.steps_used == 4
+    assert result.tool_calls_used == 3
+    assert len(result.verification) == 1

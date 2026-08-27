@@ -129,9 +129,13 @@ def run_agent_task(request: RunRequest) -> None:
             }
         )
     )
+    persisted_model_output_count = 0
 
     def persist_state(state, evidence) -> None:
-        nonlocal session
+        nonlocal persisted_model_output_count, session
+        for output in state.model_outputs[persisted_model_output_count:]:
+            store.append_model_output(session.manifest.session_id, output)
+        persisted_model_output_count = len(state.model_outputs)
         last_verification = (
             evidence.verification[-1].model_dump(mode="json")
             if evidence.verification
@@ -148,6 +152,7 @@ def run_agent_task(request: RunRequest) -> None:
                             "protocol_repair_attempts": (
                                 state.protocol_repair_count
                             ),
+                            "protocol_repair_streak": state.protocol_repair_streak,
                             "workspace_version": evidence.workspace_version,
                             "recent_messages": tuple(state.messages[-24:]),
                             "last_verification": last_verification,
@@ -458,9 +463,13 @@ def resume_agent_session(request: ResumeRequest) -> None:
             update={"provider_id": provider_id, "model_id": model_id}
         )
     )
+    persisted_model_output_count = 0
 
     def persist_state(loop_state, evidence) -> None:
-        nonlocal session
+        nonlocal persisted_model_output_count, session
+        for output in loop_state.model_outputs[persisted_model_output_count:]:
+            store.append_model_output(session.manifest.session_id, output)
+        persisted_model_output_count = len(loop_state.model_outputs)
         session = store.save(
             session.model_copy(
                 update={
@@ -477,6 +486,7 @@ def resume_agent_session(request: ResumeRequest) -> None:
                                 state.protocol_repair_attempts
                                 + loop_state.protocol_repair_count
                             ),
+                            "protocol_repair_streak": loop_state.protocol_repair_streak,
                             "workspace_version": (
                                 state.workspace_version + evidence.workspace_version
                             ),
@@ -565,9 +575,6 @@ def resume_agent_session(request: ResumeRequest) -> None:
     remaining_steps = state.max_steps - state.step_count
     remaining_tool_calls = state.max_tool_calls - state.tool_call_count
     remaining_repairs = state.max_repairs - state.repair_attempts
-    remaining_protocol_repairs = (
-        state.max_protocol_repairs - state.protocol_repair_attempts
-    )
     if remaining_steps <= 0 or remaining_tool_calls <= 0:
         store.save(
             session.model_copy(
@@ -595,11 +602,12 @@ def resume_agent_session(request: ResumeRequest) -> None:
             max_steps=remaining_steps,
             max_tool_calls=remaining_tool_calls,
             max_repairs=max(0, remaining_repairs),
-            max_protocol_repairs=max(0, remaining_protocol_repairs),
+            max_protocol_repairs=state.max_protocol_repairs,
             compaction_mode=CompactionMode(state.compaction_mode),
             verification_commands=state.verification_commands,
             checkpoint_state_root=_checkpoint_state_root_for_repo(repo_root),
             initial_messages=state.recent_messages,
+            initial_protocol_repair_streak=state.protocol_repair_streak,
         )
     )
     status = {

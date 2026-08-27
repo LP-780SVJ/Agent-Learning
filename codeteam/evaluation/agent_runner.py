@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -19,6 +20,7 @@ from codeteam.agent.runtime_models import (
     CompactionMode,
     RuntimeStatus,
 )
+from codeteam.agent.verification import normalize_verification_argv
 from codeteam.evaluation.agent_grader import AgentGrader
 from codeteam.evaluation.agent_models import (
     AgentEvalRunSummary,
@@ -60,11 +62,13 @@ class AgentEvalRunner:
         runtime: CodingRuntime,
         grader: AgentGrader | None = None,
         keep_workspaces: bool = False,
+        provider_metadata: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         self.project_root = (project_root or _default_project_root()).resolve()
         self.runtime = runtime
         self.grader = grader or AgentGrader(project_root=self.project_root)
         self.keep_workspaces = keep_workspaces
+        self.provider_metadata = provider_metadata
 
     def run_suite(
         self,
@@ -87,6 +91,13 @@ class AgentEvalRunner:
                 task=task,
                 workspace_root=pristine_workspace,
                 config=config,
+            )
+            pristine_task_verification_results = (
+                self.grader.check_pristine_task_verification(
+                    task=task,
+                    workspace_root=pristine_workspace,
+                    config=config,
+                )
             )
             if not self.keep_workspaces:
                 shutil.rmtree(pristine_workspace, ignore_errors=True)
@@ -111,7 +122,12 @@ class AgentEvalRunner:
                     max_protocol_repairs=config.max_protocol_repairs,
                     compaction_mode=CompactionMode(config.compaction_mode),
                     planning_enabled=config.planning_enabled,
-                    verification_commands=_visible_verification_argv(task),
+                    verification_commands=_verification_argv(
+                        task.verification_commands
+                    ),
+                    task_verification_commands=_verification_argv(
+                        task.task_verification_commands
+                    ),
                     checkpoint_state_root=(
                         task_repo.parent / "checkpoints" / _safe_name(task.task_id)
                     ),
@@ -132,6 +148,9 @@ class AgentEvalRunner:
                 actor_result=actor_result,
                 config=config,
                 pristine_acceptance_results=pristine_acceptance_results,
+                pristine_task_verification_results=(
+                    pristine_task_verification_results
+                ),
             )
             duration_ms = int((time.monotonic() - started) * 1000)
             results.append(
@@ -148,12 +167,20 @@ class AgentEvalRunner:
                     actor_status=actor_result.status,
                     acceptance_passed=grade.acceptance_passed,
                     regression_passed=grade.regression_passed,
+                    task_verification_passed=grade.task_verification_passed,
                     within_budget=grade.within_budget,
                     security_passed=grade.security_passed,
                     pristine_acceptance_passed=grade.pristine_acceptance_passed,
+                    pristine_task_verification_passed=(
+                        grade.pristine_task_verification_passed
+                    ),
                     acceptance_results=grade.acceptance_results,
                     regression_results=grade.regression_results,
+                    task_verification_results=grade.task_verification_results,
                     pristine_acceptance_results=grade.pristine_acceptance_results,
+                    pristine_task_verification_results=(
+                        grade.pristine_task_verification_results
+                    ),
                     duration_ms=duration_ms,
                     steps=actor_result.steps,
                     model_duration_ms=actor_result.model_duration_ms,
@@ -210,12 +237,25 @@ class AgentEvalRunner:
                                 else None
                             ),
                             "setup_patch_sha256": task.setup_patch_sha256,
+                            "public_test_patch": (
+                                str(task.public_test_patch)
+                                if task.public_test_patch is not None
+                                else None
+                            ),
+                            "public_test_patch_sha256": (
+                                task.public_test_patch_sha256
+                            ),
                             "oracle_review_status": task.oracle_review_status,
                         }
                         for task in tasks
                     ],
                     "keep_workspaces": self.keep_workspaces,
                     "pristine_oracle_check": True,
+                    "provider_runtime": (
+                        self.provider_metadata()
+                        if self.provider_metadata is not None
+                        else None
+                    ),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -257,6 +297,8 @@ class AgentEvalRunner:
         _init_git_repo(destination)
         if task.setup_patch is not None:
             self._apply_setup_patch(task=task, destination=destination)
+        if task.public_test_patch is not None:
+            self._apply_public_test_patch(task=task, destination=destination)
 
     def _apply_setup_patch(
         self,
@@ -320,6 +362,33 @@ class AgentEvalRunner:
                 f"Setup patch apply failed for {task.task_id}: {stderr}"
             )
         _commit_workspace_state(destination, message=f"seed {task.task_id}")
+
+    def _apply_public_test_patch(
+        self,
+        *,
+        task: AgentEvalTask,
+        destination: Path,
+    ) -> None:
+        patch_path = task.public_test_patch
+        if patch_path is None:
+            return
+        resolved = _resolve_pinned_patch(
+            project_root=self.project_root,
+            patch_path=patch_path,
+            expected_sha256=task.public_test_patch_sha256,
+            task_id=task.task_id,
+            label="Public test",
+        )
+        _apply_patch_bytes(
+            destination=destination,
+            patch_bytes=resolved.read_bytes(),
+            task_id=task.task_id,
+            label="Public test",
+        )
+        _commit_workspace_state(
+            destination,
+            message=f"public verification {task.task_id}",
+        )
 
     def _archive_fixture(
         self,
@@ -444,9 +513,15 @@ def summarize_agent_eval_results(
         ),
         acceptance_passed_count=sum(result.acceptance_passed for result in results),
         regression_passed_count=sum(result.regression_passed for result in results),
+        task_verification_passed_count=sum(
+            result.task_verification_passed for result in results
+        ),
         security_passed_count=sum(result.security_passed for result in results),
         pristine_acceptance_passed_count=sum(
             result.pristine_acceptance_passed for result in results
+        ),
+        pristine_task_verification_passed_count=sum(
+            result.pristine_task_verification_passed for result in results
         ),
     )
 
@@ -455,19 +530,81 @@ def make_run_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
+def _verification_argv(
+    source_commands: tuple[str, ...],
+) -> tuple[tuple[str, ...], ...]:
+    commands: list[tuple[str, ...]] = []
+    for command in source_commands:
+        formatted = command.format(
+            python="python",
+            workspace=".",
+            project_root=".",
+            hidden_root="<hidden-not-visible>",
+        )
+        commands.append(normalize_verification_argv(tuple(shlex.split(formatted))))
+    return tuple(commands)
+
+
 def _visible_verification_argv(
     task: AgentEvalTask,
 ) -> tuple[tuple[str, ...], ...]:
-    commands: list[tuple[str, ...]] = []
-    for command in task.verification_commands:
-        formatted = command.format(
-            python="python",
-            workspace="/workspace",
-            project_root="/workspace",
-            hidden_root="<hidden-not-visible>",
+    """Backward-compatible adapter for callers using the Week4 name."""
+    return _verification_argv(task.verification_commands)
+
+
+def _resolve_pinned_patch(
+    *,
+    project_root: Path,
+    patch_path: Path,
+    expected_sha256: str | None,
+    task_id: str,
+    label: str,
+) -> Path:
+    resolved = (
+        patch_path.resolve()
+        if patch_path.is_absolute()
+        else (project_root / patch_path).resolve()
+    )
+    try:
+        resolved.relative_to(project_root)
+    except ValueError as error:
+        raise AgentEvalDatasetError(
+            f"{label} patch must be inside the project: {patch_path}"
+        ) from error
+    if not resolved.is_file():
+        raise AgentEvalDatasetError(f"{label} patch does not exist: {patch_path}")
+    actual_sha256 = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    if expected_sha256 != actual_sha256:
+        raise AgentEvalDatasetError(
+            f"{label} patch hash mismatch for {task_id}: "
+            f"expected {expected_sha256!r}, got {actual_sha256!r}"
         )
-        commands.append(tuple(shlex.split(formatted)))
-    return tuple(commands)
+    return resolved
+
+
+def _apply_patch_bytes(
+    *,
+    destination: Path,
+    patch_bytes: bytes,
+    task_id: str,
+    label: str,
+) -> None:
+    for arguments in (["git", "apply", "--check", "-"], ["git", "apply", "-"]):
+        result = subprocess.run(  # noqa: UP022
+            arguments,
+            cwd=destination,
+            input=patch_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            raise AgentEvalDatasetError(
+                f"{label} patch apply failed for {task_id}: {stderr}"
+            )
 
 
 def _runtime_to_actor_result(
@@ -540,12 +677,21 @@ def _save_runtime_artifacts(
         + "\n",
         encoding="utf-8",
     )
+    model_outputs_path = root / "model_outputs.jsonl"
+    model_outputs_path.write_text(
+        "".join(
+            json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n"
+            for item in result.model_outputs
+        ),
+        encoding="utf-8",
+    )
     return tuple(
         path.as_posix()
         for path in (
             relative_root / messages_path.name,
             relative_root / diff_path.name,
             relative_root / verification_path.name,
+            relative_root / model_outputs_path.name,
         )
     )
 

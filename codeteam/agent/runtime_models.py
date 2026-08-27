@@ -34,8 +34,10 @@ class CodingAgentRunRequest(BaseModel):
     compaction_mode: CompactionMode = CompactionMode.STRUCTURED
     planning_enabled: bool = True
     verification_commands: tuple[tuple[str, ...], ...] = ()
+    task_verification_commands: tuple[tuple[str, ...], ...] = ()
     checkpoint_state_root: Path | None = None
     initial_messages: tuple[Message, ...] = ()
+    initial_protocol_repair_streak: int = Field(default=0, ge=0, le=2)
 
 
 class VerificationEvidence(BaseModel):
@@ -46,6 +48,20 @@ class VerificationEvidence(BaseModel):
     stdout: str = ""
     stderr: str = ""
     error: str | None = None
+    completion_required: bool = False
+
+
+class ModelOutputEvidence(BaseModel):
+    """Raw provider response retained outside the canonical conversation."""
+
+    step: int = Field(gt=0)
+    raw_content: str
+    dialect: str | None = None
+    canonical_payload: dict[str, object] | None = None
+    parse_error: str | None = None
+    model: str = "unknown"
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
 
 
 class CodingAgentRunResult(BaseModel):
@@ -71,4 +87,5 @@ class CodingAgentRunResult(BaseModel):
     failure_category: str | None = None
     error: str | None = None
     messages: tuple[Message, ...] = ()
+    model_outputs: tuple[ModelOutputEvidence, ...] = ()
     events: tuple[str, ...] = ()

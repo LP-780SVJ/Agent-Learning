@@ -1,16 +1,6 @@
-"""Single-Agent Orchestration 层。"""
-from codeteam.agent.runtime import CodingAgentRuntime
-from codeteam.agent.runtime_models import (
-    CodingAgentRunRequest,
-    CodingAgentRunResult,
-    CompactionMode,
-    RuntimeStatus,
-)
+"""Single-Agent orchestration package.
 
-__all__ = [
-    "CodingAgentRunRequest",
-    "CodingAgentRunResult",
-    "CodingAgentRuntime",
-    "CompactionMode",
-    "RuntimeStatus",
-]
+Public types live in ``runtime`` and ``runtime_models``. Keeping package import
+side-effect free prevents the provider protocol parser from importing the
+Runtime while the core loop itself is still initializing.
+"""

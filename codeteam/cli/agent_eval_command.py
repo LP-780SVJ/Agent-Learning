@@ -11,6 +11,7 @@ import urllib.request
 from argparse import Namespace
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from codeteam.agent.runtime import CodingAgentRuntime
 from codeteam.evaluation.agent_grader import AgentGrader
@@ -31,6 +32,10 @@ SECRETS_PATH = PROJECT_ROOT / "secrets.local.env"
 DEFAULT_LLM_TIMEOUT_SECONDS = 120.0
 DEFAULT_LLM_MAX_ATTEMPTS = 4
 DEFAULT_LLM_BACKOFF_SECONDS = 1.0
+DEFAULT_LLM_TEMPERATURE = 0.0
+_RESPONSE_MODES = frozenset({"auto", "json_object", "text"})
+_JSON_MODE_CAPABILITY: dict[tuple[str, str], bool] = {}
+_PROVIDER_RUNTIME_STATE: dict[tuple[str, str], dict[str, object]] = {}
 
 
 @dataclass(frozen=True)
@@ -114,6 +119,11 @@ def run_agent_eval(args: Namespace) -> None:
         runtime=runtime,
         grader=grader,
         keep_workspaces=args.keep_workspaces,
+        provider_metadata=(
+            (lambda: _provider_manifest(llm_config))
+            if args.actor == "llm"
+            else None
+        ),
     )
 
     configs = _build_run_configs(
@@ -303,12 +313,6 @@ def _chat_completion_model_response(
     *,
     sleep_func=time.sleep,
 ) -> ModelResponse:
-    body = json.dumps(
-        {
-            "model": config["CODETEAM_LLM_MODEL"],
-            "messages": [_provider_message(message) for message in messages],
-        }
-    ).encode("utf-8")
     max_attempts = _positive_int(
         config.get("CODETEAM_LLM_MAX_ATTEMPTS"),
         default=DEFAULT_LLM_MAX_ATTEMPTS,
@@ -321,20 +325,96 @@ def _chat_completion_model_response(
         config.get("CODETEAM_LLM_BACKOFF_SECONDS"),
         default=DEFAULT_LLM_BACKOFF_SECONDS,
     )
+    requested_mode = _response_mode(config)
+    temperature = _nonnegative_float(
+        config.get("CODETEAM_LLM_TEMPERATURE"),
+        default=DEFAULT_LLM_TEMPERATURE,
+    )
+    capability_key = _provider_capability_key(config)
+    actual_mode = (
+        "json_object"
+        if requested_mode == "auto"
+        and _JSON_MODE_CAPABILITY.get(capability_key) is not False
+        else requested_mode
+    )
+    if actual_mode == "auto":
+        actual_mode = "text"
+    prior_state = _PROVIDER_RUNTIME_STATE.get(capability_key, {})
+    _PROVIDER_RUNTIME_STATE[capability_key] = {
+        "response_mode_requested": requested_mode,
+        "response_mode_actual": actual_mode,
+        "response_mode_fallback": bool(
+            prior_state.get("response_mode_fallback", False)
+        ),
+        "temperature": temperature,
+    }
     failures: list[ProviderAttemptFailure] = []
 
     for attempt in range(1, max_attempts + 1):
-        request = urllib.request.Request(
-            f"{config['CODETEAM_LLM_BASE_URL'].rstrip('/')}/chat/completions",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {config['CODETEAM_LLM_API_KEY']}",
-                "Content-Type": "application/json",
-            },
-        )
         try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-                data = json.loads(response.read())
+            data = _perform_chat_completion_request(
+                config,
+                messages,
+                response_mode=actual_mode,
+                temperature=temperature,
+                timeout_seconds=timeout_seconds,
+            )
+            if requested_mode == "auto" and actual_mode == "json_object":
+                _JSON_MODE_CAPABILITY[capability_key] = True
+        except urllib.error.HTTPError as error:
+            body = _read_http_error_body(error)
+            if (
+                requested_mode == "auto"
+                and actual_mode == "json_object"
+                and error.code == 400
+                and _json_mode_is_unsupported(body)
+            ):
+                _JSON_MODE_CAPABILITY[capability_key] = False
+                actual_mode = "text"
+                _PROVIDER_RUNTIME_STATE[capability_key].update(
+                    {
+                        "response_mode_actual": actual_mode,
+                        "response_mode_fallback": True,
+                    }
+                )
+                try:
+                    data = _perform_chat_completion_request(
+                        config,
+                        messages,
+                        response_mode=actual_mode,
+                        temperature=temperature,
+                        timeout_seconds=timeout_seconds,
+                    )
+                except Exception as fallback_error:
+                    failure = _classify_provider_failure(
+                        fallback_error,
+                        attempt=attempt,
+                    )
+                    failures.append(failure)
+                    if not failure.retryable or attempt >= max_attempts:
+                        raise ProviderRequestError(failures) from fallback_error
+                    sleep_func(backoff_seconds * (2 ** (attempt - 1)))
+                    continue
+            else:
+                failure = _classify_provider_failure(
+                    error,
+                    attempt=attempt,
+                    http_body=body,
+                )
+                failures.append(failure)
+                if not failure.retryable or attempt >= max_attempts:
+                    raise ProviderRequestError(failures) from error
+                sleep_func(backoff_seconds * (2 ** (attempt - 1)))
+                continue
+        except Exception as error:
+            failure = _classify_provider_failure(error, attempt=attempt)
+            failures.append(failure)
+            if not failure.retryable or attempt >= max_attempts:
+                raise ProviderRequestError(failures) from error
+            sleep_func(backoff_seconds * (2 ** (attempt - 1)))
+            continue
+
+        try:
             usage = data.get("usage") or {}
             return ModelResponse(
                 content=data["choices"][0]["message"]["content"],
@@ -342,12 +422,16 @@ def _chat_completion_model_response(
                 input_tokens=int(usage.get("prompt_tokens") or 0),
                 output_tokens=int(usage.get("completion_tokens") or 0),
             )
-        except Exception as error:
-            failure = _classify_provider_failure(error, attempt=attempt)
-            failures.append(failure)
-            if not failure.retryable or attempt >= max_attempts:
-                raise ProviderRequestError(failures) from error
-            sleep_func(backoff_seconds * (2 ** (attempt - 1)))
+        except (KeyError, TypeError, ValueError) as error:
+            failures.append(
+                ProviderAttemptFailure(
+                    attempt=attempt,
+                    category="invalid_response",
+                    retryable=False,
+                    message=f"{type(error).__name__}: {error}",
+                )
+            )
+            raise ProviderRequestError(failures) from error
 
     raise ProviderRequestError(failures)
 
@@ -372,9 +456,10 @@ def _classify_provider_failure(
     error: Exception,
     *,
     attempt: int,
+    http_body: str | None = None,
 ) -> ProviderAttemptFailure:
     if isinstance(error, urllib.error.HTTPError):
-        body = _read_http_error_body(error)
+        body = http_body if http_body is not None else _read_http_error_body(error)
         message = body or str(error)
         if error.code == 429:
             return ProviderAttemptFailure(
@@ -513,3 +598,88 @@ def _positive_float(value: str | None, *, default: float) -> float:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def _nonnegative_float(value: str | None, *, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed >= 0 else default
+
+
+def _response_mode(config: dict[str, str]) -> str:
+    mode = config.get("CODETEAM_LLM_RESPONSE_MODE", "auto").strip().lower()
+    if mode not in _RESPONSE_MODES:
+        raise ValueError(
+            "CODETEAM_LLM_RESPONSE_MODE must be auto, json_object, or text."
+        )
+    return mode
+
+
+def _provider_capability_key(config: dict[str, str]) -> tuple[str, str]:
+    return (
+        config["CODETEAM_LLM_BASE_URL"].rstrip("/"),
+        config["CODETEAM_LLM_MODEL"],
+    )
+
+
+def _perform_chat_completion_request(
+    config: dict[str, str],
+    messages: list[Message],
+    *,
+    response_mode: str,
+    temperature: float,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    payload: dict[str, object] = {
+        "model": config["CODETEAM_LLM_MODEL"],
+        "messages": [_provider_message(message) for message in messages],
+        "temperature": temperature,
+    }
+    if response_mode == "json_object":
+        payload["response_format"] = {"type": "json_object"}
+    request = urllib.request.Request(
+        f"{config['CODETEAM_LLM_BASE_URL'].rstrip('/')}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {config['CODETEAM_LLM_API_KEY']}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        data = json.loads(response.read())
+    if not isinstance(data, dict):
+        raise TypeError("Provider response root must be a JSON object.")
+    return data
+
+
+def _json_mode_is_unsupported(body: str) -> bool:
+    normalized = body.lower()
+    mentions_mode = any(
+        marker in normalized
+        for marker in ("response_format", "response format", "json_object", "json mode")
+    )
+    explicitly_unsupported = any(
+        marker in normalized
+        for marker in ("not support", "unsupported", "unknown", "unrecognized")
+    )
+    return mentions_mode and explicitly_unsupported
+
+
+def _provider_manifest(config: dict[str, str]) -> dict[str, object]:
+    key = _provider_capability_key(config)
+    state = _PROVIDER_RUNTIME_STATE.get(key)
+    if state is not None:
+        return dict(state)
+    return {
+        "response_mode_requested": _response_mode(config),
+        "response_mode_actual": None,
+        "response_mode_fallback": False,
+        "temperature": _nonnegative_float(
+            config.get("CODETEAM_LLM_TEMPERATURE"),
+            default=DEFAULT_LLM_TEMPERATURE,
+        ),
+    }

@@ -1,0 +1,21 @@
+diff --git a/tests/task_verification/test_f01.py b/tests/task_verification/test_f01.py
+new file mode 100644
+--- /dev/null
++++ b/tests/task_verification/test_f01.py
+@@ -0,0 +1,16 @@
++from src.inventory.reservations import InventoryReservation
++from src.inventory.service import InventoryService
++
++
++class Store:
++    def find_by_id(self, reservation_id: str) -> InventoryReservation | None:
++        if reservation_id == "active":
++            return InventoryReservation("active", "o-1", "sku", 1)
++        return None
++
++
++def test_reservation_active_helper_uses_store_lookup() -> None:
++    service = InventoryService(reservations=Store())
++
++    assert service.is_reservation_active("active") is True
++    assert service.is_reservation_active("missing") is False

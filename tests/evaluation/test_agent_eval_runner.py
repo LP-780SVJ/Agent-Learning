@@ -30,6 +30,7 @@ from codeteam.evaluation.agent_models import (
 from codeteam.evaluation.agent_runner import (
     AgentEvalDatasetError,
     AgentEvalRunner,
+    _visible_verification_argv,
     load_agent_eval_tasks,
     summarize_agent_eval_results,
 )
@@ -249,6 +250,7 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
         "_artifacts/T01/runtime_messages.json",
         "_artifacts/T01/final.diff",
         "_artifacts/T01/verification.json",
+        "_artifacts/T01/model_outputs.jsonl",
     )
     summary = json.loads((tmp_path / "out" / "summary.json").read_text())
     assert summary["success_count"] == 1
@@ -264,6 +266,8 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
             "base_commit": "",
             "setup_patch": None,
             "setup_patch_sha256": None,
+            "public_test_patch": None,
+            "public_test_patch_sha256": None,
             "oracle_review_status": "test",
         }
     ]
@@ -308,6 +312,16 @@ def test_summary_separates_protocol_repair_and_exhaustion() -> None:
 
     assert summary.protocol_repair_attempt_count == 2
     assert summary.protocol_failed_count == 1
+
+
+def test_grader_treats_public_task_test_changes_as_safety_violation() -> None:
+    violations = AgentGrader._find_safety_violations(
+        ("src/app.py", "tests/task_verification/test_t01.py")
+    )
+
+    assert violations == [
+        "public task oracle changed: tests/task_verification/test_t01.py"
+    ]
 
 
 def test_null_patch_actor_cannot_pass_even_if_oracle_would_pass(
@@ -552,6 +566,78 @@ def test_provider_response_preserves_token_usage(monkeypatch) -> None:
     assert response.output_tokens == 7
 
 
+def test_provider_auto_requests_json_object_mode_with_zero_temperature(
+    monkeypatch,
+) -> None:
+    payloads: list[dict] = []
+    agent_eval_command._JSON_MODE_CAPABILITY.clear()
+    agent_eval_command._PROVIDER_RUNTIME_STATE.clear()
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        payloads.append(json.loads(request.data))
+        return _FakeResponse(b'{"choices":[{"message":{"content":"{}"}}]}')
+
+    monkeypatch.setattr(agent_eval_command.urllib.request, "urlopen", fake_urlopen)
+    config = {
+        "CODETEAM_LLM_BASE_URL": "https://json-mode.test",
+        "CODETEAM_LLM_API_KEY": "secret-key",
+        "CODETEAM_LLM_MODEL": "model",
+    }
+
+    agent_eval_command._chat_completion_model_response(config, [])
+
+    assert payloads[0]["response_format"] == {"type": "json_object"}
+    assert payloads[0]["temperature"] == 0.0
+    manifest = agent_eval_command._provider_manifest(config)
+    assert manifest == {
+        "response_mode_requested": "auto",
+        "response_mode_actual": "json_object",
+        "response_mode_fallback": False,
+        "temperature": 0.0,
+    }
+    assert "secret-key" not in json.dumps(manifest)
+
+
+def test_provider_auto_falls_back_only_for_explicit_unsupported_json_mode(
+    monkeypatch,
+) -> None:
+    payloads: list[dict] = []
+    agent_eval_command._JSON_MODE_CAPABILITY.clear()
+    agent_eval_command._PROVIDER_RUNTIME_STATE.clear()
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        payload = json.loads(request.data)
+        payloads.append(payload)
+        if "response_format" in payload:
+            raise urllib.error.HTTPError(
+                url="https://fallback.test",
+                code=400,
+                msg="unsupported",
+                hdrs={},
+                fp=io.BytesIO(b"response_format json_object is not supported"),
+            )
+        return _FakeResponse(b'{"choices":[{"message":{"content":"{}"}}]}')
+
+    monkeypatch.setattr(agent_eval_command.urllib.request, "urlopen", fake_urlopen)
+    config = {
+        "CODETEAM_LLM_BASE_URL": "https://fallback.test",
+        "CODETEAM_LLM_API_KEY": "key",
+        "CODETEAM_LLM_MODEL": "model",
+        "CODETEAM_LLM_TEMPERATURE": "0.25",
+    }
+
+    agent_eval_command._chat_completion_model_response(config, [])
+    agent_eval_command._chat_completion_model_response(config, [])
+
+    assert ["response_format" in payload for payload in payloads] == [True, False, False]
+    assert all(payload["temperature"] == 0.25 for payload in payloads)
+    manifest = agent_eval_command._provider_manifest(config)
+    assert manifest["response_mode_actual"] == "text"
+    assert manifest["response_mode_fallback"] is True
+
+
 def test_provider_request_records_non_retryable_auth_error(monkeypatch) -> None:
     def fake_urlopen(request, timeout):
         raise urllib.error.HTTPError(
@@ -603,6 +689,39 @@ def test_week4_development_suite_has_no_claimed_heldout_tasks() -> None:
     assert len(tasks) == 11
     assert {task.split for task in tasks} == {AgentEvalSplit.DEV}
     assert all(task.verification_commands for task in tasks)
+    assert all(task.task_verification_commands for task in tasks)
+    assert all(task.public_test_patch for task in tasks)
+    assert all(task.public_test_patch_sha256 for task in tasks)
+
+
+def test_eval_exposes_workspace_relative_verification_commands() -> None:
+    task = AgentEvalTask(
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        repo_fixture=Path("fixture"),
+        base_commit="",
+        prompt="test",
+        verification_commands=(
+            (
+                "{python} -m pytest {workspace}/tests/auth "
+                "{project_root}/tests/inventory -q"
+            ),
+        ),
+        oracle_review_status="test",
+    )
+
+    assert _visible_verification_argv(task) == (
+        (
+            "python",
+            "-m",
+            "pytest",
+            "tests/auth",
+            "tests/inventory",
+            "-q",
+        ),
+    )
 
 
 def test_product_cli_and_evaluator_import_the_same_runtime() -> None:

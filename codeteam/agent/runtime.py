@@ -12,6 +12,7 @@ from codeteam.agent.runtime_models import (
 from codeteam.agent.runtime_tools import (
     RuntimeEvidence,
     create_runtime_tools,
+    normalize_runtime_action,
     render_workspace_diff,
 )
 from codeteam.agent_loop import run_agent_loop
@@ -55,19 +56,27 @@ class CodingAgentRuntime:
             root.parent / ".codeteam" / "checkpoints" / request.task_id
         )
         evidence = RuntimeEvidence()
+        required_verification_commands = (
+            request.task_verification_commands or request.verification_commands
+        )
+        allowed_verification_commands = tuple(
+            dict.fromkeys(
+                (*request.task_verification_commands, *request.verification_commands)
+            )
+        )
         tools = create_runtime_tools(
             workspace_root=root,
             task_id=request.task_id,
             checkpoint_state_root=checkpoint_root,
             safe_execution=self._safe_execution,
             evidence=evidence,
-            allowed_verification_commands=request.verification_commands,
+            allowed_verification_commands=allowed_verification_commands,
+            required_verification_commands=required_verification_commands,
             max_repairs=request.max_repairs,
         )
-        messages = list(request.initial_messages) or self._initial_messages(
-            request,
-            tools.describe(),
-        )
+        messages = _canonicalize_conversation(
+            list(request.initial_messages)
+        ) or self._initial_messages(request, tools.describe())
 
         def persist(state: AgentLoopState) -> None:
             if self._state_callback is not None:
@@ -81,7 +90,12 @@ class CodingAgentRuntime:
             if self._operation_callback is not None:
                 self._operation_callback(phase, state, evidence, data)
 
-        persist(AgentLoopState(messages=list(messages)))
+        persist(
+            AgentLoopState(
+                messages=list(messages),
+                protocol_repair_streak=request.initial_protocol_repair_streak,
+            )
+        )
 
         loop = run_agent_loop(
             self._model_client,
@@ -96,8 +110,15 @@ class CodingAgentRuntime:
             message_transform=_message_transform(
                 request.compaction_mode,
                 request.context_budget,
+                evidence,
             ),
             state_version_provider=lambda: evidence.workspace_version,
+            action_fingerprint_normalizer=normalize_runtime_action,
+            semantic_repeat_tools=frozenset({"run_tests"}),
+            cacheable_tools=frozenset(
+                {"list_files", "read_file", "search_code", "git_status", "git_diff"}
+            ),
+            initial_protocol_repair_streak=request.initial_protocol_repair_streak,
             state_callback=persist,
             lifecycle_callback=operation,
         )
@@ -141,6 +162,7 @@ class CodingAgentRuntime:
             failure_category=category,
             error=error,
             messages=tuple(loop.messages),
+            model_outputs=tuple(loop.model_outputs),
             events=tuple(event.event_type.value for event in loop.events),
         )
 
@@ -198,21 +220,36 @@ class CodingAgentRuntime:
             },
             "completion": [
                 "Make a real Git diff.",
-                "Run at least one visible verification command successfully.",
+                "Run every task verification command successfully.",
                 "Inspect the final diff before returning completed.",
                 "Never claim hidden acceptance results.",
+                (
+                    "The initial context is a current snapshot. Do not reread the same "
+                    "file unless it was truncated or the workspace changed."
+                ),
             ],
             "execution_boundary": (
-                "run_tests executes inside Docker at /workspace. Use python -m pytest "
-                "instead of host-only .venv/bin/python paths. Commands are argv arrays; "
-                "shell strings, pipes, and redirection are unavailable."
+                "run_tests argv paths and cwd are relative to the workspace; use '.' for "
+                "the workspace root and paths such as tests/auth. The Runtime maps them "
+                "to Docker /workspace, so do not put /workspace or host-only .venv paths "
+                "in tool arguments. Use python -m pytest. Commands are argv arrays; shell "
+                "strings, pipes, and redirection are unavailable."
             ),
         }
         user = {
             "task": request.task,
             "workspace": str(request.workspace_root),
             "planning_enabled": request.planning_enabled,
-            "verification_commands": [list(command) for command in request.verification_commands],
+            "task_verification_commands": [
+                list(command)
+                for command in (
+                    request.task_verification_commands
+                    or request.verification_commands
+                )
+            ],
+            "regression_commands": [
+                list(command) for command in request.verification_commands
+            ],
             "initial_context": context_payload,
         }
         return [
@@ -240,23 +277,30 @@ class CodingAgentRuntime:
             return RuntimeStatus.PAUSED, "verification_required", "No visible verification was run."
         if not evidence.tests_passed:
             return RuntimeStatus.FAILED, "verification_failed", "The latest visible verification failed."
+        if not evidence.git_diff_checked:
+            return RuntimeStatus.PAUSED, "diff_review_required", "The final Git diff was not inspected."
         return RuntimeStatus.COMPLETED, None, None
 
 
 def _message_transform(
     mode: CompactionMode,
     context_budget: int,
+    evidence: RuntimeEvidence | None = None,
 ) -> Callable[[list[Message]], list[Message]]:
     max_chars = context_budget * 4
 
     def transform(messages: list[Message]) -> list[Message]:
+        messages = _canonicalize_conversation(messages)
         if mode is CompactionMode.NONE:
             return messages
         if sum(len(item.content or "") for item in messages) <= max_chars:
             return messages
         prefix = [item for item in messages[:2] if item.role in {"system", "user"}]
+        summary = _structured_context_message(messages, evidence)
         recent: list[Message] = []
         used = sum(len(item.content or "") for item in prefix)
+        if mode is CompactionMode.STRUCTURED:
+            used += len(summary.content or "")
         for item in reversed(messages[2:]):
             size = len(item.content or "")
             if recent and used + size > max_chars:
@@ -266,18 +310,99 @@ def _message_transform(
         recent.reverse()
         if mode is CompactionMode.NAIVE:
             return [*prefix, *recent]
-        omitted = max(0, len(messages) - len(prefix) - len(recent))
-        summary = Message(
-            role="user",
-            content=(
-                "Structured context summary: "
-                f"{omitted} older interaction messages were compacted. "
-                "Use the retained tool observations as current workspace facts."
-            ),
-        )
         return [*prefix, summary, *recent]
 
     return transform
+
+
+def _canonicalize_conversation(messages: list[Message]) -> list[Message]:
+    canonical: list[Message] = []
+    for message in messages:
+        if message.role != "assistant":
+            canonical.append(message)
+            continue
+        try:
+            payload = json.loads(message.content or "")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            canonical.append(
+                message.model_copy(
+                    update={
+                        "content": json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    }
+                )
+            )
+    return canonical
+
+
+def _structured_context_message(
+    messages: list[Message],
+    evidence: RuntimeEvidence | None,
+) -> Message:
+    read_files: set[str] = set()
+    searches: set[str] = set()
+    listed_paths: set[str] = set()
+    git_diff_checked = False
+    for message in messages:
+        if message.role != "assistant":
+            continue
+        try:
+            payload = json.loads(message.content or "{}")
+        except json.JSONDecodeError:
+            continue
+        for call in payload.get("tool_calls", []):
+            if not isinstance(call, dict):
+                continue
+            name = call.get("name")
+            arguments = call.get("arguments")
+            if not isinstance(arguments, dict):
+                arguments = {}
+            if name == "read_file" and isinstance(arguments.get("path"), str):
+                read_files.add(arguments["path"])
+            elif name == "search_code":
+                searches.add(
+                    json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+                )
+            elif name == "list_files" and isinstance(arguments.get("path"), str):
+                listed_paths.add(arguments["path"])
+            elif name == "git_diff":
+                git_diff_checked = True
+
+    latest_verification = None
+    workspace_version = 0
+    completion_gate = "verification_not_run"
+    if evidence is not None:
+        workspace_version = evidence.workspace_version
+        if evidence.verification:
+            latest_verification = evidence.verification[-1].model_dump(mode="json")
+        completion_gate = (
+            "task_verification_passed"
+            if evidence.tests_passed
+            else "task_verification_required"
+        )
+    summary = {
+        "structured_context_summary": {
+            "read_files": sorted(read_files),
+            "searches": sorted(searches),
+            "listed_paths": sorted(listed_paths),
+            "workspace_version": workspace_version,
+            "changed_files": list(evidence.changed_files) if evidence is not None else [],
+            "latest_verification": latest_verification,
+            "git_diff_checked": (
+                evidence.git_diff_checked if evidence is not None else git_diff_checked
+            ),
+            "remaining_completion_gate": completion_gate,
+        }
+    }
+    return Message(
+        role="user",
+        content=json.dumps(summary, ensure_ascii=False, separators=(",", ":")),
+    )
 
 
 def _paired_event_duration_ms(events, start_type, end_type) -> int:

@@ -55,8 +55,11 @@ class AgentEvalTask(BaseModel):
     base_commit: str
     setup_patch: Path | None = None
     setup_patch_sha256: str | None = None
+    public_test_patch: Path | None = None
+    public_test_patch_sha256: str | None = None
     prompt: str
     acceptance_commands: tuple[str, ...] = ()
+    task_verification_commands: tuple[str, ...] = ()
     verification_commands: tuple[str, ...] = ()
     regression_commands: tuple[str, ...] = ()
     budget: EvalBudget = Field(default_factory=EvalBudget)
@@ -68,6 +71,12 @@ class AgentEvalTask(BaseModel):
         if (self.setup_patch is None) != (self.setup_patch_sha256 is None):
             raise ValueError(
                 "setup_patch and setup_patch_sha256 must be provided together"
+            )
+        if (self.public_test_patch is None) != (
+            self.public_test_patch_sha256 is None
+        ):
+            raise ValueError(
+                "public_test_patch and public_test_patch_sha256 must be provided together"
             )
         if not self.verification_commands and self.regression_commands:
             self.verification_commands = self.regression_commands
@@ -139,12 +148,16 @@ class GradeResult(BaseModel):
     success: bool
     acceptance_passed: bool
     regression_passed: bool
+    task_verification_passed: bool = True
     within_budget: bool
     security_passed: bool
     pristine_acceptance_passed: bool = False
+    pristine_task_verification_passed: bool = False
     acceptance_results: tuple[GraderCommandResult, ...] = ()
     regression_results: tuple[GraderCommandResult, ...] = ()
+    task_verification_results: tuple[GraderCommandResult, ...] = ()
     pristine_acceptance_results: tuple[GraderCommandResult, ...] = ()
+    pristine_task_verification_results: tuple[GraderCommandResult, ...] = ()
     changed_files: tuple[str, ...] = ()
     safety_violations: tuple[str, ...] = ()
     failure_category: str | None = None
@@ -164,12 +177,16 @@ class AgentEvalTaskResult(BaseModel):
     actor_status: PatchActorStatus
     acceptance_passed: bool
     regression_passed: bool
+    task_verification_passed: bool = True
     within_budget: bool
     security_passed: bool
     pristine_acceptance_passed: bool = False
+    pristine_task_verification_passed: bool = False
     acceptance_results: tuple[GraderCommandResult, ...] = ()
     regression_results: tuple[GraderCommandResult, ...] = ()
+    task_verification_results: tuple[GraderCommandResult, ...] = ()
     pristine_acceptance_results: tuple[GraderCommandResult, ...] = ()
+    pristine_task_verification_results: tuple[GraderCommandResult, ...] = ()
     duration_ms: int
     steps: int = 0
     model_duration_ms: int = 0
@@ -198,5 +215,7 @@ class AgentEvalRunSummary(BaseModel):
     protocol_failed_count: int = 0
     acceptance_passed_count: int
     regression_passed_count: int
+    task_verification_passed_count: int = 0
     security_passed_count: int
     pristine_acceptance_passed_count: int = 0
+    pristine_task_verification_passed_count: int = 0

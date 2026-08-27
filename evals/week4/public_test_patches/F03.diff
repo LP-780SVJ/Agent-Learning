@@ -1,0 +1,27 @@
+diff --git a/tests/task_verification/test_f03.py b/tests/task_verification/test_f03.py
+new file mode 100644
+--- /dev/null
++++ b/tests/task_verification/test_f03.py
+@@ -0,0 +1,22 @@
++from src.common.events import ORDER_CANCELLED, EventEnvelope
++from src.notifications.dispatcher import NotificationDispatcher
++
++
++class Sender:
++    def __init__(self) -> None:
++        self.sent: list[tuple[str, str, dict]] = []
++
++    def send(self, to: str, template: str, context: dict) -> None:
++        self.sent.append((to, template, context))
++
++
++def test_email_dispatch_can_be_explicitly_disabled(tmp_path, monkeypatch) -> None:
++    configs = tmp_path / "configs"
++    configs.mkdir()
++    (configs / "feature_flags.yaml").write_text(
++        "notifications:\n  email_dispatch_enabled: false\n", encoding="utf-8"
++    )
++    monkeypatch.chdir(tmp_path)
++    sender = Sender()
++    NotificationDispatcher(sender=sender).handle(EventEnvelope(ORDER_CANCELLED, {}))
++    assert sender.sent == []
