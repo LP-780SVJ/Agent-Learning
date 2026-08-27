@@ -5,7 +5,9 @@ import uuid
 from collections import deque
 from collections.abc import Callable
 from enum import Enum
+from math import isfinite
 from threading import Lock
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -58,6 +60,24 @@ class AgentMessage(BaseModel):
         if not stripped:
             return None
         return stripped
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def _json_payload(cls, value: Any) -> dict[str, object]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError(  # noqa: TRY004
+                "payload must be a JSON-compatible object"
+            )
+        return _validate_json_object(value, path="payload")
+
+    @field_validator("created_at")
+    @classmethod
+    def _finite_non_negative_timestamp(cls, value: float) -> float:
+        if not isfinite(value) or value < 0:
+            raise ValueError("created_at must be a finite non-negative float")
+        return value
 
 
 class MailboxError(Exception):
@@ -223,6 +243,11 @@ class AgentMailbox:
                 )
                 for recipient_id in recipient_ids
             )
+            message_ids = [message.message_id for message in messages]
+            if len(set(message_ids)) != len(message_ids):
+                raise DuplicateMessageError(
+                    f"broadcast generated duplicate message_id values: {message_ids}"
+                )
             for message in messages:
                 self._require_new_message_id_locked(message.message_id)
 
@@ -327,3 +352,29 @@ class AgentMailbox:
             data=dict(event.data),
             timestamp=event.timestamp,
         )
+
+
+def _validate_json_object(value: dict[Any, Any], *, path: str) -> dict[str, object]:
+    validated: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise ValueError(f"{path} keys must be strings")  # noqa: TRY004
+        validated[key] = _validate_json_value(item, path=f"{path}.{key}")
+    return validated
+
+
+def _validate_json_value(value: Any, *, path: str) -> object:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError(f"{path} must be a finite JSON number")
+        return value
+    if isinstance(value, list):
+        return [
+            _validate_json_value(item, path=f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, dict):
+        return _validate_json_object(value, path=path)
+    raise ValueError(f"{path} must be JSON-compatible")

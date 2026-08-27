@@ -1,5 +1,15 @@
 # W5 Mailbox Benchmark
 
+## Current Status
+
+STALE_AFTER_HARDENING / RERUN_DEFERRED_UNTIL_WEEK5_COMPLETION.
+
+This report was generated before the Day4 hardening changes that added
+broadcast batch message-id collision rejection and stricter `AgentMessage`
+serialization validation. Historical measurements below are retained unchanged;
+do not treat the recorded file hashes as current provenance for the modified
+`mailbox.py`.
+
 ## Scope
 
 This benchmark measures the in-process synchronous AgentMailbox only. It covers setup, send, receive, concurrent producer send, broadcast fan-out, and approximate backlog size. It does not measure Worker execution, crash recovery, durable replay, exactly-once delivery, or Multi-Agent speedup.

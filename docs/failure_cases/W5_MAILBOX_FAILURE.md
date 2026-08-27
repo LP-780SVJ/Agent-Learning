@@ -101,6 +101,42 @@ Why it matters:
 Partial broadcast splits team state: some agents react to an instruction while
 others never see it.
 
+Regression evidence:
+
+- `evals/week5/ablation_mailbox.py` compares the full all-or-nothing broadcast
+  with a one-off looped `send()` ablation.
+- In the deterministic failure workloads, full broadcast produces zero partial
+  deliveries, while the looped-send ablation leaves earlier recipients with
+  messages when a later recipient is full or unknown.
+
+## F-W5-D4-04B Broadcast Batch Duplicate Generated ID
+
+Reproducer:
+
+```python
+# Force uuid.uuid4() to return the same UUID for every recipient, then:
+mailbox.broadcast(
+    sender_id="lead",
+    recipient_ids=("worker-a", "worker-b", "worker-c"),
+    message_type=AgentMessageType.INFO,
+    task_id="task-1",
+)
+```
+
+Expected evidence:
+
+- `DuplicateMessageError` is raised before any inbox append.
+- No recipient receives a new message.
+- No broadcast success event is recorded.
+- The duplicate ID does not enter `_seen_message_ids`; a later public `send()`
+  using that ID can still succeed.
+
+Why it matters:
+
+Batch-level duplicate IDs split observability and dedupe semantics even when
+all recipients are valid. The Mailbox must fail closed instead of attempting an
+unbounded regeneration loop.
+
 ## F-W5-D4-05 Payload Mutation Leak
 
 Reproducer:
@@ -210,3 +246,34 @@ Why it matters:
 
 Overclaiming global ordering can produce tests that pass locally but fail under
 real thread scheduling.
+
+## F-W5-D4-10 Cumulative Memory Retention
+
+Reproducer:
+
+```python
+mailbox = AgentMailbox(capacity_per_inbox=1)
+for index in range(1_000_000):
+    mailbox.send(unique_message(index))
+    mailbox.receive("worker-1")
+```
+
+Expected evidence:
+
+- `capacity_per_inbox` limits only the current queued backlog per inbox.
+- `_seen_message_ids` continues to grow with every accepted unique message.
+- `_events` continues to grow with registration, send, receive, broadcast, and
+  delivery failure events.
+
+Why it matters:
+
+Day4 uses global lifetime message ID dedupe to reject replayed IDs after
+destructive receive. That is a correctness tradeoff, not a global memory bound.
+The first implementation should be scoped to a team, task, or session lifecycle
+and released after that lifecycle completes.
+
+Remaining risk:
+
+Long-lived mailboxes with very high message volume can grow from retained seen
+IDs and event history even when all inboxes are empty. Dedupe windows, event
+archival, durable replay, and recovery policy are deferred to Day6.

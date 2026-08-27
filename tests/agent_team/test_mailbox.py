@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import math
+import uuid
 from threading import Barrier, Thread
 from threading import Event as ThreadEvent
 
 import pytest
 from pydantic import ValidationError
 
+from codeteam.agent_team.dag import TaskDAG, TaskNode, TaskStatus
 from codeteam.agent_team.mailbox import (
     AgentMailbox,
     AgentMessage,
@@ -17,7 +20,15 @@ from codeteam.agent_team.mailbox import (
     MailboxFullError,
     UnknownAgentError,
 )
-from codeteam.agent_team.models import AgentIdentity
+from codeteam.agent_team.models import (
+    AgentIdentity,
+    AgentInfo,
+    AgentRole,
+    AgentStatus,
+    WorkerAssignment,
+)
+from codeteam.agent_team.scheduler import TaskRuntimeRecord, TaskScheduler
+from codeteam.agent_team.worker import WorkerAgent, WorkerRegistry
 from codeteam.events import AgentEventType
 
 JOIN_TIMEOUT_SECONDS = 2.0
@@ -69,6 +80,39 @@ def _join_threads(threads: list[Thread]) -> None:
     assert live_threads == []
 
 
+def _assignment(node_id: str) -> WorkerAssignment:
+    return WorkerAssignment(
+        assignment_id=node_id,
+        task_id="task-1",
+        source_step_id=f"step-{node_id}",
+        role=AgentRole.BACKEND,
+        goal=f"Complete {node_id}",
+        expected_output=f"{node_id} complete",
+    )
+
+
+def _dag(node_id: str = "node-1") -> TaskDAG:
+    dag = TaskDAG()
+    dag.add_task(TaskNode(node_id=node_id, assignment=_assignment(node_id)))
+    return dag
+
+
+def _worker(worker_id: str = "worker-1") -> WorkerAgent:
+    return WorkerAgent(
+        AgentInfo(
+            identity=AgentIdentity(agent_id=worker_id, display_name=worker_id),
+            role=AgentRole.BACKEND,
+            status=AgentStatus.READY,
+        )
+    )
+
+
+def _registry(worker: WorkerAgent) -> WorkerRegistry:
+    registry = WorkerRegistry()
+    registry.register(worker)
+    return registry
+
+
 def test_agent_message_json_round_trip() -> None:
     message = _message(
         message_type=AgentMessageType.TASK_COMPLETED,
@@ -78,6 +122,57 @@ def test_agent_message_json_round_trip() -> None:
     restored = AgentMessage.model_validate_json(message.model_dump_json())
 
     assert restored == message
+
+
+def test_agent_message_accepts_nested_json_compatible_payload() -> None:
+    message = _message(
+        payload={
+            "text": "done",
+            "count": 3,
+            "ratio": 1.5,
+            "ok": True,
+            "missing": None,
+            "items": [1, "two", False, None, {"nested": ["x", 2]}],
+        }
+    )
+
+    restored = AgentMessage.model_validate_json(message.model_dump_json())
+
+    assert restored == message
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"callback": lambda: None},
+        {"custom": object()},
+        {"set": {"not", "json"}},
+        {"tuple": ("not", "json")},
+        {1: "non-string-key"},
+        {"number": math.nan},
+        {"number": math.inf},
+        {"nested": [{"number": -math.inf}]},
+    ],
+)
+def test_agent_message_rejects_non_json_compatible_payload(
+    payload: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        _message(payload=payload)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("created_at", [math.nan, math.inf, -math.inf, -0.001])
+def test_agent_message_rejects_invalid_created_at(created_at: float) -> None:
+    with pytest.raises(ValidationError):
+        AgentMessage(
+            message_id="msg-1",
+            sender_id="lead",
+            recipient_id="worker-1",
+            message_type=AgentMessageType.INFO,
+            task_id="task-1",
+            correlation_id="corr-1",
+            created_at=created_at,
+        )
 
 
 @pytest.mark.parametrize(
@@ -309,6 +404,115 @@ def test_broadcast_capacity_failure_is_all_or_nothing() -> None:
 
     assert mailbox.queue_size("worker-a") == 0
     assert mailbox.queue_size("worker-b") == 1
+
+
+def test_broadcast_batch_duplicate_message_id_is_all_or_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixed_uuid = uuid.UUID("00000000-0000-0000-0000-000000000001")
+    fixed_message_id = f"msg-{fixed_uuid.hex}"
+    mailbox = _mailbox("lead", "worker-a", "worker-b", "worker-c")
+
+    monkeypatch.setattr(
+        "codeteam.agent_team.mailbox.uuid.uuid4",
+        lambda: fixed_uuid,
+    )
+
+    with pytest.raises(DuplicateMessageError):
+        mailbox.broadcast(
+            sender_id="lead",
+            recipient_ids=("worker-a", "worker-b", "worker-c"),
+            message_type=AgentMessageType.INFO,
+            task_id="task-1",
+        )
+
+    assert mailbox.queue_size("worker-a") == 0
+    assert mailbox.queue_size("worker-b") == 0
+    assert mailbox.queue_size("worker-c") == 0
+    assert AgentEventType.MAILBOX_BROADCAST_SENT not in [
+        event.event_type for event in mailbox.events
+    ]
+
+    sent = mailbox.send(
+        _message(
+            fixed_message_id,
+            recipient_id="worker-a",
+        )
+    )
+
+    assert sent.message_id == fixed_message_id
+    assert mailbox.receive("worker-a") == sent
+
+
+def test_task_completed_message_does_not_change_scheduler_state() -> None:
+    scheduler = TaskScheduler(_dag(), _registry(_worker()))
+    scheduler.schedule()
+    claim = scheduler.claim("worker-1")
+    assert claim is not None
+    before_record = scheduler.runtime_records["node-1"]
+    before_queue = scheduler.queue
+    before_events = scheduler.events
+
+    mailbox = _mailbox("lead", "worker-1")
+    mailbox.send(
+        _message(
+            "msg-completed",
+            sender_id="worker-1",
+            recipient_id="lead",
+            message_type=AgentMessageType.TASK_COMPLETED,
+        )
+    )
+    assert mailbox.receive("lead") is not None
+
+    assert scheduler.runtime_records["node-1"] == before_record
+    assert scheduler.queue == before_queue
+    assert scheduler.events == before_events
+
+    scheduler.start("node-1", "worker-1")
+    completed = scheduler.complete("node-1", "worker-1")
+
+    assert completed.status is TaskStatus.COMPLETED
+    assert scheduler.runtime_records["node-1"] == TaskRuntimeRecord(
+        node_id="node-1",
+        status=TaskStatus.COMPLETED,
+        attempt=1,
+    )
+
+
+def test_task_failed_message_does_not_change_scheduler_state() -> None:
+    scheduler = TaskScheduler(_dag(), _registry(_worker()), max_attempts=1)
+    scheduler.schedule()
+    claim = scheduler.claim("worker-1")
+    assert claim is not None
+    scheduler.start("node-1", "worker-1")
+    before_record = scheduler.runtime_records["node-1"]
+    before_queue = scheduler.queue
+    before_events = scheduler.events
+
+    mailbox = _mailbox("lead", "worker-1")
+    mailbox.send(
+        _message(
+            "msg-failed",
+            sender_id="worker-1",
+            recipient_id="lead",
+            message_type=AgentMessageType.TASK_FAILED,
+        )
+    )
+    assert mailbox.receive("lead") is not None
+
+    assert scheduler.runtime_records["node-1"] == before_record
+    assert scheduler.queue == before_queue
+    assert scheduler.events == before_events
+
+    failed = scheduler.fail("node-1", "worker-1", "reported failure")
+
+    assert failed.status is TaskStatus.FAILED
+    assert scheduler.runtime_records["node-1"] == TaskRuntimeRecord(
+        node_id="node-1",
+        status=TaskStatus.FAILED,
+        attempt=1,
+        failure_reason="reported failure",
+    )
 
 
 def test_concurrent_producers_do_not_drop_or_duplicate_messages() -> None:

@@ -2598,7 +2598,7 @@ def receive(self, agent_id: str) -> AgentMessage | None:
 
 ### Step5：实现容量与重复 message_id
 
-目标：避免无限内存增长和重复消息污染。
+目标：限制 inbox backlog，降低慢消费者导致的瞬时积压，并防止重复消息污染。
 
 原因：Agent 输出可能很大，慢消费者会导致积压。
 
@@ -3376,3 +3376,105 @@ A：没有。消息只是通信。真正修改任务状态必须调用 `TaskSche
 - Mailbox 消息不会直接推进 Scheduler 状态；任务完成/失败仍必须走 `TaskScheduler.complete()` / `fail()` 的 owner 与状态机校验。
 - Day4 不证明 crash recovery、heartbeat、ack/nack、durable replay、SQLite mailbox、exactly-once、cross-process delivery 或端到端 Multi-Agent 加速。
 - Benchmark 只测本地 `AgentMailbox` 操作成本：setup、send、receive、concurrent producer send、broadcast fan-out 和近似 backlog bytes。
+
+---
+
+## 22. Day4 Hardening 收尾记录
+
+本轮修复的是 Day4 验收里暴露的最小闭环问题，不扩展到 Day5 heartbeat 或 Day6 durable mailbox。
+
+### 22.1 Broadcast 批内 message_id 碰撞
+
+原实现只检查生成的 `message_id` 是否已经存在于历史 `_seen_message_ids`。如果 UUID 工厂在同一批 broadcast 内返回相同值，多个 recipient 可能收到相同 `message_id`。
+
+修复后的契约：
+
+```text
+构造整批 AgentMessage
+  -> 检查批内 message_id 唯一
+  -> 检查历史 _seen_message_ids
+  -> 检查 recipient 和 capacity
+  -> 同一锁内 all-or-nothing append
+```
+
+如果批内 ID 重复，抛 `DuplicateMessageError`，并且不写 inbox、不写 `_seen_message_ids`、不产生 `MAILBOX_BROADCAST_SENT` 成功事件。不要用无限循环重新生成 UUID，因为那会把可测试的故障变成不可控等待。
+
+### 22.2 AgentMessage 序列化契约
+
+`AgentMessage.payload` 是 Agent 间纯数据通信载体，因此必须在模型构造时就是 JSON-compatible：
+
+```text
+支持：
+None
+str / bool / int / finite float
+list
+dict[str, JSON-compatible value]
+
+拒绝：
+callable
+自定义 object
+set / tuple 等非 JSON 稳定类型
+非字符串 dict key
+NaN / infinity / -infinity
+```
+
+`created_at` 必须是有限且非负的 `float`。`model_dump_json()` 到 `model_validate_json()` 必须 round-trip 一致。
+
+### 22.3 Mailbox 不写 Scheduler 状态
+
+新增回归测试证明：即使 Worker 通过 Mailbox 发送并且 Lead 消费了 `TASK_COMPLETED` 或 `TASK_FAILED` 消息，`TaskScheduler` 的 runtime record、owner、queue 和 scheduler events 都不会自动变化。
+
+正式边界仍然是：
+
+```text
+AgentMessage = 通信事实
+TaskScheduler.complete()/fail() = 唯一状态写入口
+```
+
+完成/失败必须显式调用 Scheduler API，并通过 owner/status gate。
+
+### 22.4 内存保留权衡
+
+`capacity_per_inbox` 只限制当前排队消息数量，不代表整个 `AgentMailbox` 内存有界：
+
+- `_seen_message_ids` 会随累计接受消息数增长；
+- `_events` 会随注册、发送、接收和投递失败事件增长；
+- 全局生命周期去重需要保留 seen IDs，这是正确性与内存之间的取舍；
+- 第一版 `AgentMailbox` 应按 team/task/session 生命周期使用，并在生命周期结束后释放；
+- 去重窗口、事件归档、持久化和恢复策略留给 Day6。
+
+所以 Day4 不能再说 “避免无限内存增长”。更准确的说法是：限制 inbox backlog，降低慢消费者导致的瞬时积压。
+
+### 22.5 Safety Ablation 证据
+
+本轮新增 `evals/week5/ablation_mailbox.py`，只做 correctness/safety ablation，不做性能 benchmark。
+
+对照：
+
+```text
+Full:
+  当前 AgentMailbox.broadcast()
+  预检所有 recipient/message_id/capacity
+  失败时 0 partial delivery
+
+Ablated:
+  实验代码 for recipient: send(...)
+  前面的 recipient 成功后，后面的 recipient 因未知地址或容量满失败
+  会产生 partial delivery，需要清理
+```
+
+记录指标：
+
+```text
+partial_delivery_count
+inbox_divergence_count
+cleanup_required_count
+```
+
+报告路径：
+
+```text
+docs/benchmark/W5_MAILBOX_ABLATION.md
+```
+
+由于 `mailbox.py` hardening 后文件 hash 已变化，旧 `docs/benchmark/W5_MAILBOX.md` 标记为 `STALE_AFTER_HARDENING / RERUN_DEFERRED_UNTIL_WEEK5_COMPLETION`。本轮没有运行 Mailbox 性能 benchmark，也不能把 safety ablation 当性能结果。
