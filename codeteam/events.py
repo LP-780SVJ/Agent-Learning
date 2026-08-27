@@ -34,6 +34,11 @@ class AgentEventType(str, Enum):
     SCHEDULER_TASK_BLOCKED = "scheduler.task_blocked"
     SCHEDULER_TASK_WAITING_FOR_WORKER = "scheduler.task_waiting_for_worker"
     SCHEDULER_EVENT_DELIVERY_FAILED = "scheduler.event_delivery_failed"
+    MAILBOX_AGENT_REGISTERED = "mailbox.agent_registered"
+    MAILBOX_MESSAGE_SENT = "mailbox.message_sent"
+    MAILBOX_MESSAGE_RECEIVED = "mailbox.message_received"
+    MAILBOX_BROADCAST_SENT = "mailbox.broadcast_sent"
+    MAILBOX_EVENT_DELIVERY_FAILED = "mailbox.event_delivery_failed"
 
     # Task 生命周期（Week 4）
     TASK_CREATED = "task.created"
