@@ -29,6 +29,7 @@ class PatchActorStatus(str, Enum):
     PROVIDER_BLOCKED = "provider_blocked"
     NO_PATCH = "no_patch"
     PATCH_FAILED = "patch_failed"
+    ENVIRONMENT_BLOCKED = "environment_blocked"
     FAILED = "failed"
 
 
@@ -127,6 +128,8 @@ class PatchActorResult(BaseModel):
     error: str | None = None
     failure_category: str | None = None
     events: tuple[str, ...] = ()
+    sandbox_preflight_available: bool | None = None
+    sandbox_preflight_category: str | None = None
 
 
 class GraderCommandResult(BaseModel):
@@ -203,6 +206,8 @@ class AgentEvalTaskResult(BaseModel):
     artifact_paths: tuple[str, ...] = ()
     failure_category: str | None = None
     error: str | None = None
+    sandbox_preflight_available: bool | None = None
+    sandbox_preflight_category: str | None = None
 
 
 class AgentEvalRunSummary(BaseModel):
@@ -211,6 +216,7 @@ class AgentEvalRunSummary(BaseModel):
     task_count: int
     success_count: int
     provider_blocked_count: int
+    environment_blocked_count: int = 0
     protocol_repair_attempt_count: int = 0
     protocol_failed_count: int = 0
     acceptance_passed_count: int

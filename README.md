@@ -32,7 +32,7 @@ The first four weeks are now at a closeout baseline.
 Latest closeout evidence:
 
 ```text
-normal sandbox:      1271 passed, 6 skipped
+normal sandbox:      1292 passed, 6 skipped
 Docker integration:  42 passed in prior elevated closeout run
 ```
 
@@ -72,6 +72,11 @@ Core CLI commands:
 .venv/bin/python -m codeteam.cli.app run "fix the failing auth test" --repo . --context-budget 4096 --max-steps 20 --max-tool-calls 40 --max-repairs 3 --max-protocol-repairs 2
 ```
 
+Execution worktrees default to `~/.codeteam/worktrees`, which keeps them
+separate from result artifacts and places them under the current user's home
+directory for Colima sharing. Override the base directory with
+`--worktree-root PATH` or `CODETEAM_WORKTREE_ROOT`; the CLI option wins.
+
 Real-model commands read an OpenAI-compatible provider configuration from
 `secrets.local.env` or from environment variables. Environment variables take
 precedence, and the secret file is ignored by Git.
@@ -91,8 +96,9 @@ provider-neutral extension points.
 
 ### `run` contract
 
-- A run creates `codeteam/<task-id>` in a linked worktree from the repository's
-  request-time `HEAD`; it never edits, commits, or merges the caller's worktree.
+- A run creates `codeteam/<task-id>` from request-time `HEAD` below
+  `~/.codeteam/worktrees/repos/<repo>-<path-hash>/`; it never edits, commits,
+  or merges the caller's worktree. Sessions persist the exact worktree path.
 - The model receives an initial context snapshot and can then call
   `list_files`, `read_file`, `search_code`, `apply_patch`, `run_tests`,
   `git_status`, and `git_diff` within the task worktree.
@@ -106,10 +112,16 @@ provider-neutral extension points.
 - OpenAI-compatible calls default to temperature `0` and negotiate JSON object
   mode. `auto` falls back to text only after an explicit unsupported 400 and
   records the actual mode in the evaluation manifest.
-- Patch application passes through path validation, checkpoint creation, the
-  safe patch lane, and final Git-state inspection.
+- Patch application accepts unified diff, complete-file edits, or compact exact
+  replacements. Every representation becomes a local diff and passes through
+  path validation, checkpoint creation, the safe patch lane, and final
+  Git-state inspection. Failed patch calls are included in `patch_attempts`.
 - Visible verification runs through `CommandPolicy` and Docker. Docker
   unavailability pauses verification instead of silently using the host shell.
+- Before the first provider call, Runtime starts a hardened read-only probe with
+  the real worktree mount. Missing CLI/daemon/image and invisible bind sources
+  return `PAUSED + sandbox_unavailable` with zero model tokens or cost. A
+  backend failure during verification also pauses immediately.
 - Verification argv and `cwd` are workspace-relative (`tests/auth`, `.`). The
   Runtime canonicalizes legacy `/workspace/...` inputs before policy checks,
   while Docker alone owns the host-worktree to `/workspace` mapping.
@@ -364,6 +376,7 @@ RUN_DIR="evals/week4/agent_runs/real_llm_smoke_$(date +%Y%m%d_%H%M%S)"
   --mode baseline \
   --task-id B01 \
   --context-budget 4096 \
+  --worktree-root "$HOME/.codeteam/worktrees" \
   --keep-workspaces
 ```
 
@@ -377,6 +390,7 @@ RUN_DIR="evals/week4/agent_runs/real_llm_baseline_$(date +%Y%m%d_%H%M%S)"
   --actor llm \
   --mode baseline \
   --context-budget 4096 \
+  --worktree-root "$HOME/.codeteam/worktrees" \
   --keep-workspaces
 ```
 
@@ -390,6 +404,7 @@ RUN_DIR="evals/week4/agent_runs/real_llm_ablations_$(date +%Y%m%d_%H%M%S)"
   --actor llm \
   --mode ablations \
   --context-budget 4096 \
+  --worktree-root "$HOME/.codeteam/worktrees" \
   --keep-workspaces
 ```
 
@@ -403,6 +418,12 @@ written below each ignored run directory for failure analysis.
 Also inspect `protocol_repair_attempt_count` and `protocol_failed_count`. A run
 that never reaches a tool because of response-dialect mismatch is an integration
 failure, not a coding-capability score.
+
+`--output` stores only reports and audit artifacts. Execution repositories live
+under the resolved worktree root. `environment_blocked_count` is reported
+separately from provider and Agent failures. The independent Grader still runs
+trusted post-run commands on the host, but a passing Grader never upgrades a
+paused or failed Runtime to success.
 
 ## Testing
 
@@ -428,6 +449,10 @@ Docker integration tests require:
 - Docker CLI and daemon available.
 - Local image `codeteam-sandbox:latest`.
 - A host directory visible to Docker.
+
+The Runtime preflight checks all three before spending Provider tokens. For
+Colima, keep the worktree root under the current `$HOME` unless the VM has an
+explicit additional mount.
 
 When running inside a restricted terminal sandbox, Docker tests may skip. In a user terminal with Docker permission they should execute.
 

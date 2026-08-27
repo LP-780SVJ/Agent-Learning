@@ -23,6 +23,22 @@ class FileEdit(BaseModel):
         return self
 
 
+class TextReplacement(BaseModel):
+    """A small exact text replacement converted to a local Git patch."""
+
+    path: str = Field(min_length=1)
+    old_text: str = Field(min_length=1)
+    new_text: str
+    expected_replacements: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def validate_replacement(self) -> TextReplacement:
+        validate_edit_path(self.path)
+        if self.old_text == self.new_text:
+            raise ValueError("Replacement old_text and new_text must differ.")
+        return self
+
+
 def validate_edit_path(path: str) -> None:
     candidate = PurePosixPath(path)
     if candidate.is_absolute() or ".." in candidate.parts:
@@ -84,3 +100,53 @@ def file_edits_to_patch(
     if not sections:
         raise ValueError("Structured edits produced no changes.")
     return "".join(sections)
+
+
+def text_replacements_to_patch(
+    workspace_root: Path,
+    replacements: list[TextReplacement],
+) -> str:
+    """Apply exact replacements in memory and render one deterministic patch."""
+    if not replacements:
+        raise ValueError("replacements must not be empty.")
+
+    root = workspace_root.resolve(strict=True)
+    originals: dict[str, str] = {}
+    updated: dict[str, str] = {}
+    for replacement in replacements:
+        validate_edit_path(replacement.path)
+        target = (root / replacement.path).resolve(strict=False)
+        try:
+            target.relative_to(root)
+        except ValueError as error:
+            raise ValueError(
+                f"Edit path escapes workspace: {replacement.path}"
+            ) from error
+        if not target.is_file():
+            raise ValueError(
+                f"Replacement target must be an existing regular file: "
+                f"{replacement.path}"
+            )
+
+        if replacement.path not in originals:
+            originals[replacement.path] = target.read_text(encoding="utf-8")
+            updated[replacement.path] = originals[replacement.path]
+        current = updated[replacement.path]
+        actual = current.count(replacement.old_text)
+        if actual != replacement.expected_replacements:
+            raise ValueError(
+                f"Replacement count mismatch for {replacement.path}: "
+                f"expected {replacement.expected_replacements}, found {actual}."
+            )
+        updated[replacement.path] = current.replace(
+            replacement.old_text,
+            replacement.new_text,
+        )
+
+    return file_edits_to_patch(
+        root,
+        [
+            FileEdit(path=path, content=content)
+            for path, content in updated.items()
+        ],
+    )

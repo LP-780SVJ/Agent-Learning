@@ -35,11 +35,22 @@ def test_run_argv_builds_run_request(monkeypatch) -> None:
 
     monkeypatch.setattr("codeteam.cli.run_command.run_agent_task", fake_run)
 
-    result = runner.invoke(app, ["run", "fix login", "--repo", "."])
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "fix login",
+            "--repo",
+            ".",
+            "--worktree-root",
+            "/tmp/codeteam-tests",
+        ],
+    )
 
     assert result.exit_code == 0
     assert captured["request"].task == "fix login"
     assert captured["request"].repo == Path(".")
+    assert captured["request"].worktree_root == Path("/tmp/codeteam-tests")
 
 
 def test_run_rejects_unpaired_provider_without_traceback() -> None:

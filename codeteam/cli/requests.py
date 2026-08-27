@@ -11,6 +11,7 @@ OutputFormat = Literal["text", "json"]
 class RunRequest(BaseModel):
     task: str = Field(min_length=1)
     repo: Path = Path(".")
+    worktree_root: Path | None = None
     output_format: OutputFormat = "text"
     provider_id: str | None = None
     model_id: str | None = None

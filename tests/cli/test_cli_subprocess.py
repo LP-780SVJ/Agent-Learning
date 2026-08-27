@@ -178,6 +178,7 @@ def test_run_sigint_pauses_session_and_resume_uses_new_process(
             **os.environ,
             "PYTHONUNBUFFERED": "1",
             "CODETEAM_CLI_TEST_WAIT_AFTER_SESSION": "1",
+            "CODETEAM_WORKTREE_ROOT": str(tmp_path / "worktrees"),
         },
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -210,7 +211,10 @@ def test_run_sigint_pauses_session_and_resume_uses_new_process(
         "--repo",
         str(repo),
         cwd=tmp_path,
-        env={"PYTHONUNBUFFERED": "1"},
+        env={
+            "PYTHONUNBUFFERED": "1",
+            "CODETEAM_CLI_TEST_WAIT_AFTER_SESSION": "1",
+        },
     )
 
     assert resumed.returncode == 130

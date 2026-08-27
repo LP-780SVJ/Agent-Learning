@@ -22,6 +22,7 @@ from codeteam.execution.safe_execution_service import SafeExecutionService
 from codeteam.git.workspace import GitWorkspace
 from codeteam.limits import AgentLoopLimits
 from codeteam.llm.base import ModelClient
+from codeteam.sandbox.preflight import DockerSandboxPreflight, SandboxPreflight
 from codeteam.schemas.final_output import CompletionStatus
 from codeteam.schemas.messages import Message
 from codeteam.state import AgentLoopState, StopReason
@@ -43,15 +44,33 @@ class CodingAgentRuntime:
         context_service: ContextApplicationService | None = None,
         state_callback: StateCallback | None = None,
         operation_callback: OperationCallback | None = None,
+        sandbox_preflight: SandboxPreflight | None = None,
     ) -> None:
         self._model_client = model_client
         self._safe_execution = safe_execution or SafeExecutionService()
         self._context_service = context_service or ContextApplicationService()
         self._state_callback = state_callback
         self._operation_callback = operation_callback
+        self._sandbox_preflight = sandbox_preflight or DockerSandboxPreflight()
 
     def run(self, request: CodingAgentRunRequest) -> CodingAgentRunResult:
         root = request.workspace_root.resolve(strict=True)
+        preflight = self._sandbox_preflight.check(root)
+        if not preflight.available:
+            return CodingAgentRunResult(
+                task_id=request.task_id,
+                status=RuntimeStatus.PAUSED,
+                summary="Docker sandbox is unavailable for this workspace.",
+                workspace_root=root,
+                failure_category="sandbox_unavailable",
+                error=preflight.error,
+                sandbox_preflight_available=False,
+                sandbox_preflight_category=preflight.category,
+                events=(
+                    AgentEventType.SANDBOX_PREFLIGHT_STARTED.value,
+                    AgentEventType.SANDBOX_PREFLIGHT_FAILED.value,
+                ),
+            )
         checkpoint_root = request.checkpoint_state_root or (
             root.parent / ".codeteam" / "checkpoints" / request.task_id
         )
@@ -121,6 +140,13 @@ class CodingAgentRuntime:
             initial_protocol_repair_streak=request.initial_protocol_repair_streak,
             state_callback=persist,
             lifecycle_callback=operation,
+            halt_signal_provider=(
+                lambda: (
+                    (StopReason.PAUSED, evidence.paused_reason)
+                    if evidence.paused_reason is not None
+                    else None
+                )
+            ),
         )
         workspace = GitWorkspace(root)
         changed_files = tuple(change.path for change in workspace.changed_files())
@@ -140,6 +166,7 @@ class CodingAgentRuntime:
             changed_files=changed_files,
             checkpoint_ids=tuple(evidence.checkpoint_ids),
             verification=tuple(evidence.verification),
+            patch_attempts=evidence.patch_attempts,
             steps_used=loop.steps_used,
             tool_calls_used=loop.tool_calls_used,
             repair_attempts=evidence.repair_attempts,
@@ -161,9 +188,14 @@ class CodingAgentRuntime:
             repair_duration_ms=evidence.repair_duration_ms,
             failure_category=category,
             error=error,
+            sandbox_preflight_available=True,
             messages=tuple(loop.messages),
             model_outputs=tuple(loop.model_outputs),
-            events=tuple(event.event_type.value for event in loop.events),
+            events=(
+                AgentEventType.SANDBOX_PREFLIGHT_STARTED.value,
+                AgentEventType.SANDBOX_PREFLIGHT_PASSED.value,
+                *(event.event_type.value for event in loop.events),
+            ),
         )
 
     def _initial_messages(
@@ -202,6 +234,23 @@ class CodingAgentRuntime:
                 "tool_call_note": (
                     "Do not generate call_id; the Runtime assigns it after validation."
                 ),
+                "preferred_patch_example": {
+                    "tool_calls": [
+                        {
+                            "name": "apply_patch",
+                            "arguments": {
+                                "replacements": [
+                                    {
+                                        "path": "src/example.py",
+                                        "old_text": "OLD_VALUE",
+                                        "new_text": "NEW_VALUE",
+                                        "expected_replacements": 1,
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                },
                 "final_output_schema": {
                     "status": "completed | failed | needs_user_input",
                     "summary": "short factual summary",

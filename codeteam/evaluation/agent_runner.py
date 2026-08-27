@@ -32,6 +32,7 @@ from codeteam.evaluation.agent_models import (
     PatchActorStatus,
 )
 from codeteam.git.worktree import WorktreeManager
+from codeteam.git.worktree_paths import eval_worktree_root, resolve_worktree_root
 
 IGNORED_NAMES = {
     ".git",
@@ -62,12 +63,14 @@ class AgentEvalRunner:
         runtime: CodingRuntime,
         grader: AgentGrader | None = None,
         keep_workspaces: bool = False,
+        worktree_root: Path | None = None,
         provider_metadata: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         self.project_root = (project_root or _default_project_root()).resolve()
         self.runtime = runtime
         self.grader = grader or AgentGrader(project_root=self.project_root)
         self.keep_workspaces = keep_workspaces
+        self.worktree_root = resolve_worktree_root(worktree_root)
         self.provider_metadata = provider_metadata
 
     def run_suite(
@@ -78,7 +81,10 @@ class AgentEvalRunner:
         output_dir: Path,
     ) -> list[AgentEvalTaskResult]:
         output_dir.mkdir(parents=True, exist_ok=True)
-        workspace_root = output_dir / "workspaces" / config.run_id
+        workspace_root = eval_worktree_root(
+            config.run_id,
+            worktree_root=self.worktree_root,
+        )
         workspace_root.mkdir(parents=True, exist_ok=True)
 
         results: list[AgentEvalTaskResult] = []
@@ -199,6 +205,12 @@ class AgentEvalRunner:
                     artifact_paths=actor_result.artifact_paths,
                     failure_category=grade.failure_category,
                     error=grade.error,
+                    sandbox_preflight_available=(
+                        actor_result.sandbox_preflight_available
+                    ),
+                    sandbox_preflight_category=(
+                        actor_result.sandbox_preflight_category
+                    ),
                 )
             )
 
@@ -250,6 +262,17 @@ class AgentEvalRunner:
                         for task in tasks
                     ],
                     "keep_workspaces": self.keep_workspaces,
+                    "execution_root": str(workspace_root),
+                    "runtime_execution": "docker",
+                    "grader_execution": "trusted_host_subprocess",
+                    "preflight_results": [
+                        {
+                            "task_id": result.task_id,
+                            "available": result.sandbox_preflight_available,
+                            "category": result.sandbox_preflight_category,
+                        }
+                        for result in results
+                    ],
                     "pristine_oracle_check": True,
                     "provider_runtime": (
                         self.provider_metadata()
@@ -505,6 +528,10 @@ def summarize_agent_eval_results(
             result.actor_status == PatchActorStatus.PROVIDER_BLOCKED
             for result in results
         ),
+        environment_blocked_count=sum(
+            result.actor_status == PatchActorStatus.ENVIRONMENT_BLOCKED
+            for result in results
+        ),
         protocol_repair_attempt_count=sum(
             result.protocol_repair_attempts for result in results
         ),
@@ -617,6 +644,8 @@ def _runtime_to_actor_result(
         status = PatchActorStatus.PROVIDER_BLOCKED
     elif result.failure_category == "no_patch":
         status = PatchActorStatus.NO_PATCH
+    elif result.failure_category == "sandbox_unavailable":
+        status = PatchActorStatus.ENVIRONMENT_BLOCKED
     elif result.failure_category in {"patch_failed", "security_failure"}:
         status = PatchActorStatus.PATCH_FAILED
     else:
@@ -627,7 +656,7 @@ def _runtime_to_actor_result(
         planning_enabled=config.planning_enabled,
         repair_enabled=config.repair_enabled,
         compaction_mode=config.compaction_mode,
-        patch_attempts=1 if result.changed_files else 0,
+        patch_attempts=result.patch_attempts,
         repair_attempts=result.repair_attempts,
         protocol_repair_attempts=result.protocol_repairs_used,
         tool_calls=result.tool_calls_used,
@@ -640,6 +669,8 @@ def _runtime_to_actor_result(
         tool_duration_ms=result.tool_duration_ms,
         repair_duration_ms=result.repair_duration_ms,
         changed_files=result.changed_files,
+        sandbox_preflight_available=result.sandbox_preflight_available,
+        sandbox_preflight_category=result.sandbox_preflight_category,
         applied_patch=bool(result.changed_files),
         error=result.error,
         failure_category=result.failure_category,

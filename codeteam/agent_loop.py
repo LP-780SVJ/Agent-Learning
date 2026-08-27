@@ -110,6 +110,7 @@ def run_agent_loop(
     lifecycle_callback: Callable[
         [str, AgentLoopState, dict[str, Any]], None
     ] | None = None,
+    halt_signal_provider: Callable[[], tuple[StopReason, str] | None] | None = None,
 ) -> AgentLoopResult:
     if limits is None:
         limits = AgentLoopLimits()
@@ -327,6 +328,7 @@ def run_agent_loop(
                 cacheable_tools=cacheable_tools,
                 state_callback=state_callback,
                 lifecycle_callback=lifecycle_callback,
+                halt_signal_provider=halt_signal_provider,
             )
             if stop_result is not None:
                 return stop_result
@@ -513,6 +515,7 @@ def _handle_tool_calls(
     lifecycle_callback: Callable[
         [str, AgentLoopState, dict[str, Any]], None
     ] | None = None,
+    halt_signal_provider: Callable[[], tuple[StopReason, str] | None] | None = None,
 ) -> AgentLoopResult | None:
     for call in tool_calls:
         if check_tool_call_limit(state, limits):
@@ -642,6 +645,17 @@ def _handle_tool_calls(
         state.messages.append(_tool_result_to_message(result))
         if state_callback is not None:
             state_callback(state)
+        halt = halt_signal_provider() if halt_signal_provider is not None else None
+        if halt is not None:
+            stop_reason, error = halt
+            return _stop_with_pause(
+                state,
+                stop_reason,
+                error,
+                start_time,
+                usage_tracker,
+                events,
+            )
 
     return None
 
@@ -665,6 +679,25 @@ def _stop_with_failure(
     return _build_loop_result(
         state=state,
         status=CompletionStatus.FAILED,
+        stop_reason=stop_reason,
+        start_time=start_time,
+        usage_tracker=usage_tracker,
+        events=events,
+        error=error,
+    )
+
+
+def _stop_with_pause(
+    state: AgentLoopState,
+    stop_reason: StopReason,
+    error: str,
+    start_time: float,
+    usage_tracker: UsageTracker,
+    events: list[AgentEvent],
+) -> AgentLoopResult:
+    return _build_loop_result(
+        state=state,
+        status=CompletionStatus.NEEDS_USER_INPUT,
         stop_reason=stop_reason,
         start_time=start_time,
         usage_tracker=usage_tracker,

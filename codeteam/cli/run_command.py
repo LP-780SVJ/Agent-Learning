@@ -39,7 +39,9 @@ from codeteam.git.models import (
 )
 from codeteam.git.workspace import GitWorkspace
 from codeteam.git.worktree import WorktreeManager
+from codeteam.git.worktree_paths import repository_worktree_root
 from codeteam.llm.mock import MockModelClient
+from codeteam.sandbox.preflight import SandboxPreflight, SandboxPreflightResult
 from codeteam.session.errors import (
     RepositoryMismatchError,
     SessionAlreadyActiveError,
@@ -73,7 +75,13 @@ def run_agent_task(request: RunRequest) -> None:
             "mock" if test_wait else request.provider_id,
             "mock-model" if test_wait else request.model_id,
         )
-        worktree = WorktreeManager(repo_root).create(task_id, base_ref="HEAD")
+        worktree = WorktreeManager(
+            repo_root,
+            worktree_root=repository_worktree_root(
+                repo_root,
+                worktree_root=request.worktree_root,
+            ),
+        ).create(task_id, base_ref="HEAD")
     except (OSError, ValueError, RuntimeError) as error:
         render_error(str(error))
         raise typer.Exit(2) from error
@@ -234,6 +242,7 @@ def run_agent_task(request: RunRequest) -> None:
         model_client=model_client,
         state_callback=persist_state,
         operation_callback=persist_operation,
+        sandbox_preflight=_test_sandbox_preflight(),
     )
     runtime_request = CodingAgentRunRequest(
         task_id=task_id,
@@ -590,6 +599,7 @@ def resume_agent_session(request: ResumeRequest) -> None:
         model_client=model_client,
         state_callback=persist_state,
         operation_callback=persist_operation,
+        sandbox_preflight=_test_sandbox_preflight(),
     )
     result = runtime.run(
         CodingAgentRunRequest(
@@ -870,3 +880,15 @@ def _exit_code_for_rollback(result: RollbackResult) -> int:
     if result.status is RollbackStatus.SUCCESS:
         return 0
     return 1
+
+
+class _AvailableTestPreflight:
+    def check(self, workspace_root: Path) -> SandboxPreflightResult:
+        del workspace_root
+        return SandboxPreflightResult(available=True)
+
+
+def _test_sandbox_preflight() -> SandboxPreflight | None:
+    if os.environ.get("CODETEAM_CLI_TEST_WAIT_AFTER_SESSION") == "1":
+        return _AvailableTestPreflight()
+    return None

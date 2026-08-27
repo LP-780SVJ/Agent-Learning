@@ -1,15 +1,19 @@
 from pathlib import Path
 
-from codeteam.agent.runtime_models import CodingAgentRunResult, RuntimeStatus
+from codeteam.agent.runtime_models import (
+    CodingAgentRunRequest,
+    CodingAgentRunResult,
+    RuntimeStatus,
+)
 from codeteam.evaluation.agent_models import EvalRunConfig
 from codeteam.evaluation.agent_runner import AgentEvalRunner, load_agent_eval_tasks
 
 
 class RecordingNullRuntime:
     def __init__(self) -> None:
-        self.requests = []
+        self.requests: list[CodingAgentRunRequest] = []
 
-    def run(self, request) -> CodingAgentRunResult:
+    def run(self, request: CodingAgentRunRequest) -> CodingAgentRunResult:
         self.requests.append(request)
         return CodingAgentRunResult(
             task_id=request.task_id,
@@ -33,6 +37,7 @@ def test_week4_public_oracles_fail_pristine_and_null_baseline_is_zero(
         project_root=project_root,
         runtime=runtime,
         keep_workspaces=False,
+        worktree_root=tmp_path / "worktrees",
     ).run_suite(
         tasks=tasks,
         config=EvalRunConfig(run_id="null-public-oracle"),

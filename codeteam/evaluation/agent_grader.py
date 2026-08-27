@@ -289,6 +289,8 @@ def _failure_category(
         return "visible_oracle_not_discriminative"
     if actor_result.status == PatchActorStatus.PROVIDER_BLOCKED:
         return "provider_blocked"
+    if actor_result.status == PatchActorStatus.ENVIRONMENT_BLOCKED:
+        return actor_result.failure_category or "sandbox_unavailable"
     if actor_result.status == PatchActorStatus.NO_PATCH:
         return "no_patch"
     if actor_result.status == PatchActorStatus.PATCH_FAILED:

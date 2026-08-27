@@ -170,6 +170,13 @@ def agent_eval(
         bool,
         typer.Option("--keep-workspaces", help="保留每个 task 的临时 workspace"),
     ] = False,
+    worktree_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--worktree-root",
+            help="Docker 可共享的执行 worktree 根目录",
+        ),
+    ] = None,
 ) -> None:
     """运行 Week4 task-level coding benchmark。"""
     from codeteam.cli.agent_eval_command import run_agent_eval
@@ -184,6 +191,7 @@ def agent_eval(
         limit=limit,
         context_budget=context_budget,
         keep_workspaces=keep_workspaces,
+        worktree_root=str(worktree_root) if worktree_root is not None else None,
     )
     run_agent_eval(args)
 
@@ -195,6 +203,13 @@ def run(
         Path,
         typer.Option("--repo", help="仓库路径（默认当前目录）"),
     ] = Path("."),
+    worktree_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--worktree-root",
+            help="Docker 可共享的执行 worktree 根目录",
+        ),
+    ] = None,
     provider_id: Annotated[
         str | None,
         typer.Option("--provider", help="LLM provider id"),
@@ -234,6 +249,7 @@ def run(
         request = RunRequest(
             task=task,
             repo=repo,
+            worktree_root=worktree_root,
             provider_id=provider_id,
             model_id=model_id,
             context_budget=context_budget,

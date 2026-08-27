@@ -5,7 +5,14 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
-from codeteam.agent.editing import FileEdit, file_edits_to_patch
+import pytest
+
+from codeteam.agent.editing import (
+    FileEdit,
+    TextReplacement,
+    file_edits_to_patch,
+    text_replacements_to_patch,
+)
 from codeteam.agent.runtime import CodingAgentRuntime, _message_transform
 from codeteam.agent.runtime_models import (
     CodingAgentRunRequest,
@@ -17,7 +24,20 @@ from codeteam.agent.runtime_tools import RuntimeEvidence
 from codeteam.execution.models import CommandResult, CommandStatus
 from codeteam.execution.safe_execution_service import SafeExecutionService
 from codeteam.git.workspace import GitWorkspace
+from codeteam.sandbox.preflight import (
+    DockerSandboxPreflight,
+    SandboxPreflightResult,
+)
 from codeteam.schemas.messages import Message
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_preflight_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        DockerSandboxPreflight,
+        "check",
+        lambda self, workspace_root: SandboxPreflightResult(available=True),
+    )
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -51,6 +71,16 @@ class ScriptedModel:
     def complete(self, messages: list[Message]) -> str:
         self.requests.append(messages)
         return json.dumps(self.outputs.pop(0))
+
+
+class FailedPreflight:
+    def check(self, workspace_root: Path) -> SandboxPreflightResult:
+        del workspace_root
+        return SandboxPreflightResult(
+            available=False,
+            category="workspace_mount_unavailable",
+            error="bind source path does not exist",
+        )
 
 
 class StubContext:
@@ -106,12 +136,144 @@ class FailingSandbox:
         )
 
 
+class MountFailingSandbox:
+    def run(self, context) -> CommandResult:
+        del context
+        return CommandResult(
+            status=CommandStatus.NONZERO_EXIT,
+            argv=("docker", "run"),
+            exit_code=125,
+            stderr="invalid mount config: bind source path does not exist",
+        )
+
+
 def _call(index: int, name: str, arguments: dict) -> dict:
     return {
         "tool_calls": [
             {"call_id": f"call-{index}", "name": name, "arguments": arguments}
         ]
     }
+
+
+def test_preflight_failure_pauses_before_provider_call(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    model = ScriptedModel(
+        [{"status": "completed", "summary": "should not run", "tests_passed": True}]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        context_service=StubContext(),
+        sandbox_preflight=FailedPreflight(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="T00",
+            task="fix app",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+        )
+    )
+
+    assert result.status is RuntimeStatus.PAUSED
+    assert result.failure_category == "sandbox_unavailable"
+    assert result.sandbox_preflight_available is False
+    assert result.sandbox_preflight_category == "workspace_mount_unavailable"
+    assert result.steps_used == 0
+    assert result.tool_calls_used == 0
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
+    assert result.cost_usd == 0
+    assert model.requests == []
+
+
+def test_sandbox_backend_failure_halts_without_second_model_turn(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    model = ScriptedModel(
+        [
+            _call(
+                1,
+                "apply_patch",
+                {
+                    "replacements": [
+                        {
+                            "path": "app.py",
+                            "old_text": "VALUE = 1",
+                            "new_text": "VALUE = 2",
+                        }
+                    ]
+                },
+            ),
+            _call(2, "run_tests", {"argv": ["pytest", "tests", "-q"]}),
+            {"status": "completed", "summary": "must not run", "tests_passed": True},
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        context_service=StubContext(),
+        safe_execution=SafeExecutionService(sandbox_runner=MountFailingSandbox()),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="T00B",
+            task="fix app",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert result.status is RuntimeStatus.PAUSED
+    assert result.failure_category == "execution_paused"
+    assert "bind source path" in (result.error or "")
+    assert len(model.requests) == 2
+
+
+def test_patch_attempts_include_rejected_patch_calls(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    model = ScriptedModel(
+        [
+            _call(1, "apply_patch", {"patch": "not a patch"}),
+            _call(
+                2,
+                "apply_patch",
+                {
+                    "replacements": [
+                        {
+                            "path": "app.py",
+                            "old_text": "VALUE = 1",
+                            "new_text": "VALUE = 2",
+                        }
+                    ]
+                },
+            ),
+            _call(3, "run_tests", {"argv": ["pytest", "tests", "-q"]}),
+            _call(4, "git_diff", {}),
+            {"status": "completed", "summary": "done", "tests_passed": True},
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        context_service=StubContext(),
+        safe_execution=SafeExecutionService(sandbox_runner=PassingSandbox()),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="T00C",
+            task="fix app",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert result.patch_attempts == 2
+    assert result.repair_attempts == 0
 
 
 def test_runtime_completes_search_patch_test_repair_diff_loop(tmp_path: Path) -> None:
@@ -439,6 +601,78 @@ def test_structured_edits_support_new_and_deleted_files(tmp_path: Path) -> None:
     assert result.applied
     assert not (repo / "app.py").exists()
     assert (repo / "new.py").read_text(encoding="utf-8") == "NEW = True\n"
+
+
+def test_text_replacement_generates_local_patch(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+
+    patch = text_replacements_to_patch(
+        repo,
+        [
+            TextReplacement(
+                path="app.py",
+                old_text="VALUE = 1",
+                new_text="VALUE = 2",
+            )
+        ],
+    )
+
+    assert "-VALUE = 1" in patch
+    assert "+VALUE = 2" in patch
+    assert (repo / "app.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+@pytest.mark.parametrize(
+    ("old_text", "expected", "found"),
+    [
+        ("MISSING", 1, 0),
+        ("VALUE", 1, 1),
+    ],
+)
+def test_text_replacement_requires_exact_match_count(
+    tmp_path: Path,
+    old_text: str,
+    expected: int,
+    found: int,
+) -> None:
+    repo = _repo(tmp_path)
+    if old_text == "VALUE":
+        (repo / "app.py").write_text("VALUE = 1\nVALUE = 2\n", encoding="utf-8")
+        found = 2
+
+    with pytest.raises(ValueError, match=f"expected {expected}, found {found}"):
+        text_replacements_to_patch(
+            repo,
+            [
+                TextReplacement(
+                    path="app.py",
+                    old_text=old_text,
+                    new_text="CHANGED",
+                    expected_replacements=expected,
+                )
+            ],
+        )
+
+
+def test_text_replacement_rejects_symlink_escape(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    outside = tmp_path / "outside.py"
+    outside.write_text("SECRET = 1\n", encoding="utf-8")
+    (repo / "linked.py").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="escapes workspace"):
+        text_replacements_to_patch(
+            repo,
+            [
+                TextReplacement(
+                    path="linked.py",
+                    old_text="SECRET = 1",
+                    new_text="SECRET = 2",
+                )
+            ],
+        )
+
+    assert outside.read_text(encoding="utf-8") == "SECRET = 1\n"
 
 
 def test_runtime_completes_with_dsml_actions_and_fenced_final(tmp_path: Path) -> None:

@@ -73,6 +73,7 @@ class CodingAgentRunResult(BaseModel):
     changed_files: tuple[str, ...] = ()
     checkpoint_ids: tuple[str, ...] = ()
     verification: tuple[VerificationEvidence, ...] = ()
+    patch_attempts: int = 0
     steps_used: int = 0
     tool_calls_used: int = 0
     repair_attempts: int = 0
@@ -86,6 +87,8 @@ class CodingAgentRunResult(BaseModel):
     repair_duration_ms: int = 0
     failure_category: str | None = None
     error: str | None = None
+    sandbox_preflight_available: bool | None = None
+    sandbox_preflight_category: str | None = None
     messages: tuple[Message, ...] = ()
     model_outputs: tuple[ModelOutputEvidence, ...] = ()
     events: tuple[str, ...] = ()

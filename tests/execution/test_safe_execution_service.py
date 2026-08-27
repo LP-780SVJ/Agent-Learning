@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -99,7 +99,7 @@ class FakeCheckpointManager:
             task_id=self.task_id,
             sequence=1,
             reason=reason,
-            created_at=datetime(2026, 8, 16, tzinfo=timezone.utc),
+            created_at=datetime(2026, 8, 16, tzinfo=UTC),
             shadow_commit_sha="shadow",
             shadow_tree_sha="tree",
             workspace_head_sha="head",
@@ -321,7 +321,7 @@ def test_denied_grant_is_rejected_before_backend(tmp_path: Path) -> None:
         agent_id=command.agent_id,
         scope=ApprovalScope.ONCE,
         decision=ApprovalDecision.DENIED,
-        created_at=datetime(2026, 8, 16, tzinfo=timezone.utc),
+        created_at=datetime(2026, 8, 16, tzinfo=UTC),
     )
     service = SafeExecutionService(
         policy=cast(Any, FakePolicy(evaluation)),
@@ -413,6 +413,52 @@ def test_sandbox_backend_failure_result_is_not_treated_as_success(
     assert result.status is SafeExecutionStatus.SANDBOX_FAILED
     assert result.sandbox_invoked is True
     assert sandbox.calls == 1
+
+
+def test_docker_exit_125_mount_failure_is_sandbox_failure(tmp_path: Path) -> None:
+    sandbox = FakeSandboxRunner(
+        result=CommandResult(
+            status=CommandStatus.NONZERO_EXIT,
+            argv=("docker", "run"),
+            exit_code=125,
+            stderr="invalid mount config: bind source path does not exist",
+        )
+    )
+    service = SafeExecutionService(
+        policy=cast(Any, FakePolicy(_evaluation(PolicyDecision.ALLOW_SANDBOXED))),
+        sandbox_runner=cast(Any, sandbox),
+    )
+
+    result = service.execute_command(
+        SafeCommandExecutionRequest(command=_request(tmp_path))
+    )
+
+    assert result.status is SafeExecutionStatus.SANDBOX_FAILED
+    assert result.command_result is not None
+    assert result.command_result.exit_code == 125
+
+
+def test_normal_test_failure_is_not_sandbox_failure(tmp_path: Path) -> None:
+    sandbox = FakeSandboxRunner(
+        result=CommandResult(
+            status=CommandStatus.NONZERO_EXIT,
+            argv=("docker", "run"),
+            exit_code=1,
+            stderr="one pytest assertion failed",
+        )
+    )
+    service = SafeExecutionService(
+        policy=cast(Any, FakePolicy(_evaluation(PolicyDecision.ALLOW_SANDBOXED))),
+        sandbox_runner=cast(Any, sandbox),
+    )
+
+    result = service.execute_command(
+        SafeCommandExecutionRequest(command=_request(tmp_path))
+    )
+
+    assert result.status is SafeExecutionStatus.COMPLETED
+    assert result.command_result is not None
+    assert result.command_result.exit_code == 1
 
 
 def test_successful_command_has_correlation_audit_chain(tmp_path: Path) -> None:

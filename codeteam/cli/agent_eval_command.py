@@ -15,7 +15,12 @@ from typing import Any
 
 from codeteam.agent.runtime import CodingAgentRuntime
 from codeteam.evaluation.agent_grader import AgentGrader
-from codeteam.evaluation.agent_models import AgentEvalSplit, EvalRunConfig, EvalRunMode
+from codeteam.evaluation.agent_models import (
+    AgentEvalSplit,
+    EvalRunConfig,
+    EvalRunMode,
+    PatchActorStatus,
+)
 from codeteam.evaluation.agent_runner import (
     AgentEvalRunner,
     filter_agent_eval_tasks,
@@ -23,6 +28,7 @@ from codeteam.evaluation.agent_runner import (
     make_run_id,
     summarize_agent_eval_results,
 )
+from codeteam.git.worktree_paths import resolve_worktree_root
 from codeteam.llm.base import ModelClient, ModelResponse
 from codeteam.llm.openai_compatible import OpenAICompatibleClient
 from codeteam.schemas.messages import Message
@@ -119,6 +125,7 @@ def run_agent_eval(args: Namespace) -> None:
         runtime=runtime,
         grader=grader,
         keep_workspaces=args.keep_workspaces,
+        worktree_root=resolve_worktree_root(getattr(args, "worktree_root", None)),
         provider_metadata=(
             (lambda: _provider_manifest(llm_config))
             if args.actor == "llm"
@@ -162,6 +169,10 @@ def run_agent_eval(args: Namespace) -> None:
         "success_count": sum(result.success for result in all_results),
         "provider_blocked_count": sum(
             result.failure_category == "provider_blocked"
+            for result in all_results
+        ),
+        "environment_blocked_count": sum(
+            result.actor_status is PatchActorStatus.ENVIRONMENT_BLOCKED
             for result in all_results
         ),
         "protocol_repair_attempt_count": sum(

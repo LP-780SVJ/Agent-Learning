@@ -9,7 +9,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
-from codeteam.agent.editing import FileEdit, file_edits_to_patch
+from codeteam.agent.editing import (
+    FileEdit,
+    TextReplacement,
+    file_edits_to_patch,
+    text_replacements_to_patch,
+)
 from codeteam.agent.runtime_models import VerificationEvidence
 from codeteam.agent.verification import (
     DEFAULT_TEST_TIMEOUT_SECONDS,
@@ -34,13 +39,20 @@ from codeteam.tools.registry import ToolRegistry
 class ApplyPatchArgs(BaseModel):
     patch: str | None = None
     edits: list[FileEdit] | None = None
+    replacements: list[TextReplacement] | None = None
 
     @model_validator(mode="after")
     def exactly_one_representation(self) -> ApplyPatchArgs:
-        if (self.patch is None) == (self.edits is None):
-            raise ValueError("Provide exactly one of patch or edits.")
+        representations = sum(
+            value is not None
+            for value in (self.patch, self.edits, self.replacements)
+        )
+        if representations != 1:
+            raise ValueError("Provide exactly one of patch, edits, or replacements.")
         if self.edits == []:
             raise ValueError("edits must not be empty.")
+        if self.replacements == []:
+            raise ValueError("replacements must not be empty.")
         return self
 
 
@@ -63,6 +75,7 @@ class RuntimeEvidence:
     workspace_version: int = 0
     verification: list[VerificationEvidence] = field(default_factory=list)
     repair_attempts: int = 0
+    patch_attempts: int = 0
     paused_reason: str | None = None
     checkpoint_ids: list[str] = field(default_factory=list)
     repair_duration_ms: int = 0
@@ -109,11 +122,17 @@ def create_runtime_tools(
             registry.register(tool)
 
     def apply_patch(args: BaseModel) -> str:
+        evidence.patch_attempts += 1
         parsed = ApplyPatchArgs.model_validate(args)
         is_repair = bool(evidence.verification and not evidence.verification[-1].passed)
         if is_repair and evidence.repair_attempts >= max_repairs:
             raise ValueError("Repair budget exhausted.")
-        patch = parsed.patch or file_edits_to_patch(root, parsed.edits or [])
+        if parsed.patch is not None:
+            patch = parsed.patch
+        elif parsed.edits is not None:
+            patch = file_edits_to_patch(root, parsed.edits)
+        else:
+            patch = text_replacements_to_patch(root, parsed.replacements or [])
         started = time.monotonic()
         result = safe_execution.execute_patch(
             SafePatchExecutionRequest(

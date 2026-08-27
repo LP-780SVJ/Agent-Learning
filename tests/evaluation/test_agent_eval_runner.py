@@ -72,6 +72,20 @@ class FakeRuntime:
         )
 
 
+class EnvironmentBlockedRuntime:
+    def run(self, request) -> CodingAgentRunResult:
+        return CodingAgentRunResult(
+            task_id=request.task_id,
+            status=RuntimeStatus.PAUSED,
+            summary="sandbox unavailable",
+            workspace_root=request.workspace_root,
+            failure_category="sandbox_unavailable",
+            error="bind source path does not exist",
+            sandbox_preflight_available=False,
+            sandbox_preflight_category="workspace_mount_unavailable",
+        )
+
+
 def test_prepare_workspace_applies_verified_setup_patch(tmp_path: Path) -> None:
     fixture = tmp_path / "fixture"
     fixture.mkdir()
@@ -102,6 +116,7 @@ def test_prepare_workspace_applies_verified_setup_patch(tmp_path: Path) -> None:
         project_root=tmp_path,
         runtime=FakeRuntime(),
         keep_workspaces=True,
+        worktree_root=tmp_path / "worktrees",
     )
     destination = tmp_path / "workspace"
 
@@ -116,6 +131,53 @@ def test_prepare_workspace_applies_verified_setup_patch(tmp_path: Path) -> None:
         check=True,
     )
     assert status.stdout == ""
+
+
+def test_eval_separates_execution_root_and_reports_environment_block(
+    tmp_path: Path,
+) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    worktree_base = tmp_path / "worktree-base"
+    output = tmp_path / "results"
+    task = AgentEvalTask(
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        repo_fixture=fixture,
+        base_commit="",
+        prompt="change value",
+        oracle_review_status="test",
+    )
+
+    results = AgentEvalRunner(
+        project_root=tmp_path,
+        runtime=EnvironmentBlockedRuntime(),
+        keep_workspaces=False,
+        worktree_root=worktree_base,
+    ).run_suite(
+        tasks=[task],
+        config=EvalRunConfig(run_id="blocked-run"),
+        output_dir=output,
+    )
+
+    assert results[0].actor_status is PatchActorStatus.ENVIRONMENT_BLOCKED
+    assert results[0].failure_category == "sandbox_unavailable"
+    assert not results[0].success
+    assert not (output / "workspaces").exists()
+    assert not (worktree_base / "evals" / "blocked-run").exists()
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["environment_blocked_count"] == 1
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["preflight_results"] == [
+        {
+            "task_id": "T01",
+            "available": False,
+            "category": "workspace_mount_unavailable",
+        }
+    ]
 
 
 def test_prepare_workspace_fails_closed_for_missing_base_commit(
@@ -138,6 +200,7 @@ def test_prepare_workspace_fails_closed_for_missing_base_commit(
         project_root=tmp_path,
         runtime=FakeRuntime(),
         keep_workspaces=True,
+        worktree_root=tmp_path / "worktrees",
     )
 
     with pytest.raises(AgentEvalDatasetError, match="Unable to archive base_commit"):
@@ -234,6 +297,7 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
         runtime=runtime,
         grader=AgentGrader(hidden_root=tmp_path / "hidden"),
         keep_workspaces=True,
+        worktree_root=tmp_path / "worktrees",
     )
 
     results = runner.run_suite(
@@ -258,6 +322,11 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
     assert summary["protocol_repair_attempt_count"] == 0
     assert summary["protocol_failed_count"] == 0
     manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert manifest["execution_root"] == str(
+        tmp_path / "worktrees" / "evals" / "test-run"
+    )
+    assert manifest["runtime_execution"] == "docker"
+    assert manifest["grader_execution"] == "trusted_host_subprocess"
     assert manifest["max_protocol_repairs"] == 2
     assert manifest["tasks"] == [
         {
@@ -353,6 +422,7 @@ def test_null_patch_actor_cannot_pass_even_if_oracle_would_pass(
         runtime=FakeRuntime(),
         grader=AgentGrader(hidden_root=tmp_path / "hidden"),
         keep_workspaces=True,
+        worktree_root=tmp_path / "worktrees",
     )
 
     results = runner.run_suite(
@@ -410,6 +480,7 @@ def test_pristine_oracle_pass_blocks_completed_actor_success(
         runtime=FakeRuntime(patch),
         grader=AgentGrader(hidden_root=tmp_path / "hidden"),
         keep_workspaces=True,
+        worktree_root=tmp_path / "worktrees",
     )
 
     results = runner.run_suite(
@@ -477,6 +548,61 @@ def test_grader_filters_runtime_artifacts_from_changed_files(tmp_path: Path) -> 
 
     assert grade.changed_files == ("app.py",)
     assert grade.security_passed is True
+
+
+def test_grader_cannot_rescue_environment_blocked_runtime(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Eval Test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "eval@example.com"],
+        cwd=tmp_path,
+        check=True,
+    )
+    (tmp_path / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "baseline"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    task = AgentEvalTask(
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        repo_fixture=tmp_path,
+        base_commit="",
+        prompt="test",
+        acceptance_commands=(
+            "{python} -c 'import app; assert app.VALUE == 2'",
+        ),
+        oracle_review_status="test",
+    )
+    actor_result = PatchActorResult(
+        task_id="T01",
+        status=PatchActorStatus.ENVIRONMENT_BLOCKED,
+        planning_enabled=True,
+        repair_enabled=True,
+        compaction_mode="structured",
+        failure_category="sandbox_unavailable",
+        error="bind source path does not exist",
+    )
+
+    grade = AgentGrader(hidden_root=tmp_path / "hidden").grade(
+        task=task,
+        workspace_root=tmp_path,
+        actor_result=actor_result,
+        config=EvalRunConfig(run_id="blocked-run"),
+    )
+
+    assert grade.acceptance_passed
+    assert not grade.success
+    assert grade.failure_category == "sandbox_unavailable"
 
 
 def test_llm_patch_generator_records_raw_and_extracted_patch(tmp_path: Path) -> None:
