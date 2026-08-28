@@ -14,7 +14,16 @@ from codeteam.agent.protocol import (
 from codeteam.agent.runtime_models import ModelOutputEvidence
 from codeteam.events import AgentEvent, AgentEventType, make_event
 from codeteam.limits import AgentLoopLimits, check_step_limit, check_tool_call_limit
-from codeteam.llm.base import ModelResponse
+from codeteam.llm.base import (
+    LegacyModelClient,
+    ModelClient,
+    ModelFinishState,
+    ModelRequest,
+    ModelResponse,
+    ModelResponseMode,
+    ModelTurn,
+    ModelUsage,
+)
 from codeteam.schemas.final_output import (
     AgentFinalOutput,
     CompletionStatus,
@@ -93,7 +102,7 @@ class ParsedModelOutput:
 
 
 def run_agent_loop(
-    model_client: Any,
+    model_client: ModelClient | LegacyModelClient,
     tool_registry: ToolRegistry,
     messages: list[Message],
     limits: AgentLoopLimits | None = None,
@@ -111,6 +120,12 @@ def run_agent_loop(
         [str, AgentLoopState, dict[str, Any]], None
     ] | None = None,
     halt_signal_provider: Callable[[], tuple[StopReason, str] | None] | None = None,
+    max_output_tokens: int = 4096,
+    max_input_tokens: int = 4096,
+    model_context_window: int = 32768,
+    safety_headroom_tokens: int = 1024,
+    native_tools: bool = True,
+    reasoning_enabled: bool | None = False,
 ) -> AgentLoopResult:
     if limits is None:
         limits = AgentLoopLimits()
@@ -161,7 +176,17 @@ def run_agent_loop(
                 {"step_index": state.step_count},
             )
         try:
-            raw_response = model_client.complete(request_messages)
+            model_request = ModelRequest(
+                messages=tuple(request_messages),
+                tools=tuple(tool_registry.describe()),
+                max_output_tokens=max_output_tokens,
+                max_input_tokens=max_input_tokens,
+                model_context_window=model_context_window,
+                safety_headroom_tokens=safety_headroom_tokens,
+                native_tools=native_tools,
+                reasoning_enabled=reasoning_enabled,
+            )
+            model_turn = _request_model_turn(model_client, model_request)
         except Exception as error:  # noqa: BLE001
             if lifecycle_callback is not None:
                 lifecycle_callback(
@@ -190,23 +215,11 @@ def run_agent_loop(
                 usage_tracker,
                 events,
             )
-        try:
-            model_response = _normalize_model_response(raw_response)
-        except TypeError as error:
-            return _stop_with_failure(
-                state,
-                StopReason.INVALID_FINAL_OUTPUT,
-                str(error),
-                start_time,
-                usage_tracker,
-                events,
-            )
-
         usage_record = usage_tracker.record_step(
             step_index=state.step_count,
-            model=model_response.model,
-            input_tokens=model_response.input_tokens,
-            output_tokens=model_response.output_tokens,
+            model=model_turn.model,
+            input_tokens=model_turn.usage.input_tokens,
+            output_tokens=model_turn.usage.output_tokens,
         )
         if lifecycle_callback is not None:
             lifecycle_callback(
@@ -220,56 +233,111 @@ def run_agent_loop(
             "Model response received.",
             step_index=state.step_count,
             data={
-                "model": model_response.model,
-                "input_tokens": model_response.input_tokens,
-                "output_tokens": model_response.output_tokens,
+                "model": model_turn.model,
+                "provider": model_turn.provider,
+                "finish_state": model_turn.finish_state.value,
+                "finish_reason": model_turn.finish_reason,
+                "actual_response_mode": (
+                    model_turn.actual_response_mode.value
+                    if model_turn.actual_response_mode is not None
+                    else None
+                ),
+                "input_tokens": model_turn.usage.input_tokens,
+                "output_tokens": model_turn.usage.output_tokens,
                 "cost": usage_record.cost.total_cost,
             },
         ))
 
-        tests_passed = (
-            actual_tests_passed()
-            if callable(actual_tests_passed)
-            else actual_tests_passed
-        )
-        parsed_output = _parse_model_output(
-            model_response.content,
-            actual_tests_passed=tests_passed,
+        native_tool_calls = _assign_runtime_call_ids(
+            model_turn.tool_calls,
             call_id_prefix=f"step-{state.step_count}",
         )
+        early_stop = _stop_reason_for_turn(model_turn)
+        if native_tool_calls and early_stop is None:
+            canonical_payload: dict[str, object] | None = {
+                "tool_calls": [
+                    {
+                        "name": call.name,
+                        "arguments": call.arguments,
+                        "runtime_call_id": call.call_id,
+                        "provider_call_id": call.provider_call_id,
+                    }
+                    for call in native_tool_calls
+                ]
+            }
+            parsed_output = ParsedModelOutput(
+                tool_calls=native_tool_calls,
+                canonical_payload=canonical_payload,
+            )
+        elif early_stop is None:
+            tests_passed = (
+                actual_tests_passed()
+                if callable(actual_tests_passed)
+                else actual_tests_passed
+            )
+            parsed_output = _parse_model_output(
+                model_turn.text or "",
+                actual_tests_passed=tests_passed,
+                call_id_prefix=f"step-{state.step_count}",
+            )
+            canonical_payload = parsed_output.canonical_payload
+        else:
+            parsed_output = ParsedModelOutput(
+                stop_reason=early_stop,
+                error=model_turn.incomplete_reason or _turn_failure_message(model_turn),
+            )
+            canonical_payload = None
+
         state.model_outputs.append(
             ModelOutputEvidence(
                 step=state.step_count,
-                raw_content=model_response.content,
+                raw_content=model_turn.text,
+                native_tool_calls=tuple(native_tool_calls),
                 dialect=(
                     parsed_output.dialect.value
                     if parsed_output.dialect is not None
                     else None
                 ),
-                canonical_payload=parsed_output.canonical_payload,
+                canonical_payload=canonical_payload,
                 parse_error=(
                     parsed_output.error
                     if parsed_output.stop_reason is not None
                     else None
                 ),
-                model=model_response.model,
-                input_tokens=model_response.input_tokens,
-                output_tokens=model_response.output_tokens,
+                model=model_turn.model,
+                provider=model_turn.provider,
+                response_id=model_turn.response_id,
+                finish_state=model_turn.finish_state,
+                finish_reason=model_turn.finish_reason,
+                actual_response_mode=model_turn.actual_response_mode,
+                incomplete_reason=model_turn.incomplete_reason,
+                system_fingerprint=model_turn.system_fingerprint,
+                input_tokens=model_turn.usage.input_tokens,
+                output_tokens=model_turn.usage.output_tokens,
             )
         )
 
         if parsed_output.stop_reason is None:
             state.protocol_repair_streak = 0
-            state.messages.append(
-                Message(
-                    role="assistant",
-                    content=json.dumps(
-                        parsed_output.canonical_payload,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
+            if native_tool_calls and early_stop is None:
+                state.messages.append(
+                    Message(
+                        role="assistant",
+                        content=model_turn.text,
+                        tool_calls=native_tool_calls,
+                    )
                 )
-            )
+            else:
+                state.messages.append(
+                    Message(
+                        role="assistant",
+                        content=json.dumps(
+                            parsed_output.canonical_payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    )
+                )
         if state_callback is not None:
             state_callback(state)
 
@@ -518,6 +586,15 @@ def _handle_tool_calls(
     halt_signal_provider: Callable[[], tuple[StopReason, str] | None] | None = None,
 ) -> AgentLoopResult | None:
     for call in tool_calls:
+        if call.call_id is None:
+            return _stop_with_failure(
+                state,
+                StopReason.INVALID_TOOL_CALL,
+                "Runtime call id was not assigned after tool-call validation.",
+                start_time,
+                usage_tracker,
+                events,
+            )
         if check_tool_call_limit(state, limits):
             return _stop_with_failure(
                 state,
@@ -543,7 +620,10 @@ def _handle_tool_calls(
         )
         if call.name in cacheable_tools and fingerprint in state.tool_result_cache:
             cached = state.tool_result_cache[fingerprint].model_copy(
-                update={"call_id": call.call_id}
+                update={
+                    "call_id": call.call_id,
+                    "provider_call_id": call.provider_call_id,
+                }
             )
             state.cached_no_progress_count += 1
             record_tool_call(
@@ -560,6 +640,7 @@ def _handle_tool_calls(
                     step_index=state.step_count,
                     data={
                         "call_id": cached.call_id,
+                        "provider_call_id": cached.provider_call_id,
                         "name": cached.name,
                         "success": cached.success,
                         "cached": True,
@@ -600,14 +681,23 @@ def _handle_tool_calls(
             AgentEventType.TOOL_CALLED,
             f"Calling tool: {call.name}",
             step_index=state.step_count,
-            data={"call_id": call.call_id, "name": call.name, "arguments": call.arguments},
+            data={
+                "call_id": call.call_id,
+                "provider_call_id": call.provider_call_id,
+                "name": call.name,
+                "arguments": call.arguments,
+            },
         ))
 
         if lifecycle_callback is not None:
             lifecycle_callback(
                 "tool.started",
                 state,
-                {"call_id": call.call_id, "tool_name": call.name},
+                {
+                    "call_id": call.call_id,
+                    "provider_call_id": call.provider_call_id,
+                    "tool_name": call.name,
+                },
             )
 
         result = tool_registry.execute(call)
@@ -620,6 +710,7 @@ def _handle_tool_calls(
                 state,
                 {
                     "call_id": call.call_id,
+                    "provider_call_id": call.provider_call_id,
                     "tool_name": call.name,
                     "success": result.success,
                 },
@@ -631,6 +722,7 @@ def _handle_tool_calls(
             step_index=state.step_count,
             data={
                 "call_id": result.call_id,
+                "provider_call_id": result.provider_call_id,
                 "name": result.name,
                 "success": result.success,
                 "error": result.error,
@@ -665,6 +757,7 @@ def _tool_result_to_message(result: ToolResult) -> Message:
         role="tool",
         content=result.content if result.success else result.error,
         tool_call_id=result.call_id,
+        provider_call_id=result.provider_call_id,
     )
 
 
@@ -706,13 +799,75 @@ def _stop_with_pause(
     )
 
 
-def _normalize_model_response(raw_response: str | ModelResponse) -> ModelResponse:
-    if isinstance(raw_response, str):
-        return ModelResponse(content=raw_response)
-    if isinstance(raw_response, ModelResponse):
-        return raw_response
+def _request_model_turn(
+    model_client: ModelClient | LegacyModelClient,
+    request: ModelRequest,
+) -> ModelTurn:
+    turn_method = getattr(model_client, "turn", None)
+    if callable(turn_method):
+        turn = turn_method(request)
+        if not isinstance(turn, ModelTurn):
+            raise TypeError("ModelClient.turn() must return ModelTurn.")
+        return turn
 
-    raise TypeError("Model client must return str or ModelResponse.")
+    complete_method = getattr(model_client, "complete", None)
+    if not callable(complete_method):
+        raise TypeError("Model client must implement turn() or legacy complete().")
+    raw_response = complete_method(list(request.messages))
+    if isinstance(raw_response, str):
+        return ModelTurn(
+            text=raw_response,
+            finish_state=ModelFinishState.STOP,
+            actual_response_mode=ModelResponseMode.TEXT,
+            model="mock-model",
+        )
+    if isinstance(raw_response, ModelResponse):
+        return ModelTurn(
+            text=raw_response.content,
+            finish_state=ModelFinishState.STOP,
+            actual_response_mode=ModelResponseMode.TEXT,
+            model=raw_response.model,
+            usage=ModelUsage(
+                input_tokens=raw_response.input_tokens,
+                output_tokens=raw_response.output_tokens,
+            ),
+        )
+    raise TypeError("Legacy model client must return str or ModelResponse.")
+
+
+def _assign_runtime_call_ids(
+    tool_calls: tuple[ToolCall, ...],
+    *,
+    call_id_prefix: str,
+) -> list[ToolCall]:
+    return [
+        call.model_copy(update={"call_id": f"{call_id_prefix}-call-{index}"})
+        for index, call in enumerate(tool_calls, start=1)
+    ]
+
+
+def _stop_reason_for_turn(turn: ModelTurn) -> StopReason | None:
+    if turn.finish_state is ModelFinishState.OUTPUT_TRUNCATED:
+        return StopReason.OUTPUT_TRUNCATED
+    if turn.finish_state is ModelFinishState.CONTENT_FILTERED:
+        return StopReason.CONTENT_FILTERED
+    if turn.finish_state is ModelFinishState.RESOURCE_EXHAUSTED:
+        return StopReason.PROVIDER_ERROR
+    if turn.finish_state is ModelFinishState.INCOMPLETE:
+        return StopReason.INCOMPLETE_PROVIDER_TURN
+    if turn.finish_state is ModelFinishState.INVALID_TOOL_CALL:
+        return StopReason.INVALID_TOOL_CALL
+    return None
+
+
+def _turn_failure_message(turn: ModelTurn) -> str:
+    return {
+        ModelFinishState.OUTPUT_TRUNCATED: "Provider output was truncated.",
+        ModelFinishState.CONTENT_FILTERED: "Provider content filter stopped the turn.",
+        ModelFinishState.RESOURCE_EXHAUSTED: "Provider resource failure stopped the turn.",
+        ModelFinishState.INCOMPLETE: "Provider returned an incomplete empty turn.",
+        ModelFinishState.INVALID_TOOL_CALL: "Provider returned malformed native tool arguments.",
+    }.get(turn.finish_state, "Provider turn could not be handled.")
 
 
 def _is_provider_error(error: Exception) -> bool:

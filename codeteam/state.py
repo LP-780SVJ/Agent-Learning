@@ -19,6 +19,10 @@ class StopReason(str, Enum):
     INVALID_FINAL_OUTPUT = "invalid_final_output"
     PROVIDER_ERROR = "provider_error"
     INTERNAL_ERROR = "internal_error"
+    OUTPUT_TRUNCATED = "output_truncated"
+    CONTENT_FILTERED = "content_filtered"
+    INCOMPLETE_PROVIDER_TURN = "incomplete_provider_turn"
+    INVALID_TOOL_CALL = "invalid_tool_call"
 
 @dataclass(frozen=True)
 class ActionFingerprint:# 检测重复动作 工具动作指纹

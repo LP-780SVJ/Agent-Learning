@@ -21,11 +21,12 @@ from codeteam.events import AgentEventType
 from codeteam.execution.safe_execution_service import SafeExecutionService
 from codeteam.git.workspace import GitWorkspace
 from codeteam.limits import AgentLoopLimits
-from codeteam.llm.base import ModelClient
+from codeteam.llm.base import LegacyModelClient, ModelClient
 from codeteam.sandbox.preflight import DockerSandboxPreflight, SandboxPreflight
 from codeteam.schemas.final_output import CompletionStatus
 from codeteam.schemas.messages import Message
 from codeteam.state import AgentLoopState, StopReason
+from codeteam.usage.token_counter import ApproximateTokenCounter
 
 StateCallback = Callable[[AgentLoopState, RuntimeEvidence], None]
 OperationCallback = Callable[
@@ -39,7 +40,7 @@ class CodingAgentRuntime:
     def __init__(
         self,
         *,
-        model_client: ModelClient,
+        model_client: ModelClient | LegacyModelClient,
         safe_execution: SafeExecutionService | None = None,
         context_service: ContextApplicationService | None = None,
         state_callback: StateCallback | None = None,
@@ -130,6 +131,7 @@ class CodingAgentRuntime:
                 request.compaction_mode,
                 request.context_budget,
                 evidence,
+                tool_schemas=tuple(tools.describe()),
             ),
             state_version_provider=lambda: evidence.workspace_version,
             action_fingerprint_normalizer=normalize_runtime_action,
@@ -147,6 +149,12 @@ class CodingAgentRuntime:
                     else None
                 )
             ),
+            max_output_tokens=request.max_output_tokens,
+            max_input_tokens=request.context_budget,
+            model_context_window=request.model_context_window,
+            safety_headroom_tokens=request.safety_headroom_tokens,
+            native_tools=request.native_tools,
+            reasoning_enabled=request.reasoning_enabled,
         )
         workspace = GitWorkspace(root)
         changed_files = tuple(change.path for change in workspace.changed_files())
@@ -206,7 +214,9 @@ class CodingAgentRuntime:
         context = self._context_service.execute(
             query=request.task,
             repository_root=request.workspace_root,
-            budget_tokens=min(request.context_budget, 4096),
+            # context_budget is the complete provider input budget. Reserve
+            # room for instructions, durable history, and native tool schemas.
+            budget_tokens=max(1, min(request.context_budget // 2, 4096)),
         )
         context_payload = {
             "repo_map": context.repo_map,
@@ -219,9 +229,9 @@ class CodingAgentRuntime:
             "role": "coding_agent",
             "protocol": {
                 "rule": (
-                    "Return exactly one raw JSON object containing non-empty "
-                    "tool_calls or a final output. Do not add prose, Markdown "
-                    "fences, XML, DSML, or provider-specific tags."
+                    "Use provider-native tools when they are available. Only when "
+                    "native tools are unavailable, return exactly one raw JSON "
+                    "object containing non-empty tool_calls or a final output."
                 ),
                 "tool_call_schema": {
                     "tool_calls": [
@@ -266,6 +276,9 @@ class CodingAgentRuntime:
                 "max_repairs": request.max_repairs,
                 "max_protocol_repairs": request.max_protocol_repairs,
                 "context_tokens": request.context_budget,
+                "max_output_tokens": request.max_output_tokens,
+                "model_context_window": request.model_context_window,
+                "safety_headroom_tokens": request.safety_headroom_tokens,
             },
             "completion": [
                 "Make a real Git diff.",
@@ -335,39 +348,199 @@ def _message_transform(
     mode: CompactionMode,
     context_budget: int,
     evidence: RuntimeEvidence | None = None,
+    *,
+    tool_schemas: tuple[dict[str, object], ...] = (),
 ) -> Callable[[list[Message]], list[Message]]:
-    max_chars = context_budget * 4
-
     def transform(messages: list[Message]) -> list[Message]:
         messages = _canonicalize_conversation(messages)
         if mode is CompactionMode.NONE:
             return messages
-        if sum(len(item.content or "") for item in messages) <= max_chars:
+        if _conversation_tokens(messages, tool_schemas) <= context_budget:
             return messages
-        prefix = [item for item in messages[:2] if item.role in {"system", "user"}]
+
+        # Initial context is a snapshot, not an untouchable prefix.  Once the
+        # request is over budget, replace it with an explicit compact form.
+        prefix = [
+            _compact_initial_message(item)
+            for item in messages[:2]
+            if item.role in {"system", "user"}
+        ]
         summary = _structured_context_message(messages, evidence)
-        recent: list[Message] = []
-        used = sum(len(item.content or "") for item in prefix)
+        base = [*prefix]
         if mode is CompactionMode.STRUCTURED:
-            used += len(summary.content or "")
-        for item in reversed(messages[2:]):
-            size = len(item.content or "")
-            if recent and used + size > max_chars:
-                break
-            recent.append(item)
-            used += size
-        recent.reverse()
-        if mode is CompactionMode.NAIVE:
-            return [*prefix, *recent]
-        return [*prefix, summary, *recent]
+            base.append(summary)
+
+        recent_groups: list[list[Message]] = []
+        for group in reversed(_atomic_conversation_groups(messages[2:])):
+            candidate_groups = [group, *recent_groups]
+            candidate = [*base, *(item for part in candidate_groups for item in part)]
+            if _conversation_tokens(candidate, tool_schemas) > context_budget:
+                continue
+            recent_groups = candidate_groups
+
+        compacted = [*base, *(item for group in recent_groups for item in group)]
+        if _conversation_tokens(compacted, tool_schemas) <= context_budget:
+            return compacted
+
+        # Very small budgets may not fit the structured summary.  Drop it and
+        # reduce initial messages to their durable task/protocol essentials.
+        reduced = [_minimal_initial_message(item) for item in prefix]
+        if mode is CompactionMode.STRUCTURED:
+            # Preserve deterministic working memory even if an unrealistically
+            # tiny configured budget cannot fit the minimum request. The
+            # provider boundary will reject it as input_budget_exceeded.
+            reduced.append(summary)
+        for group in recent_groups:
+            candidate = [*reduced, *group]
+            if _conversation_tokens(candidate, tool_schemas) <= context_budget:
+                reduced.extend(group)
+        return reduced
 
     return transform
+
+
+def _conversation_tokens(
+    messages: list[Message],
+    tool_schemas: tuple[dict[str, object], ...],
+) -> int:
+    serialized = json.dumps(
+        {
+            "messages": [message.model_dump(mode="json") for message in messages],
+            "tools": list(tool_schemas),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return ApproximateTokenCounter().count_text(serialized)
+
+
+def _compact_initial_message(message: Message) -> Message:
+    try:
+        payload = json.loads(message.content or "{}")
+    except json.JSONDecodeError:
+        return _minimal_initial_message(message)
+    if not isinstance(payload, dict):
+        return _minimal_initial_message(message)
+    if message.role == "system":
+        compact = {
+            "role": payload.get("role", "coding_agent"),
+            "protocol": {
+                "native_tools": "preferred",
+                "textual_json": "fallback_only",
+            },
+            "budgets": payload.get("budgets"),
+            "completion": payload.get("completion"),
+            "execution_boundary": payload.get("execution_boundary"),
+            "compacted": True,
+        }
+    else:
+        context = payload.get("initial_context")
+        compact_context: dict[str, object] = {"compacted": True}
+        if isinstance(context, dict):
+            compact_context.update(
+                {
+                    "repo_map": context.get("repo_map"),
+                    "instructions": context.get("instructions"),
+                    "visible_test_commands": context.get("visible_test_commands"),
+                }
+            )
+        compact = {
+            "task": payload.get("task"),
+            "planning_enabled": payload.get("planning_enabled"),
+            "task_verification_commands": payload.get("task_verification_commands"),
+            "regression_commands": payload.get("regression_commands"),
+            "initial_context": compact_context,
+        }
+    return message.model_copy(
+        update={
+            "content": json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+        }
+    )
+
+
+def _minimal_initial_message(message: Message) -> Message:
+    try:
+        payload = json.loads(message.content or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    compact = (
+        {
+            "role": "coding_agent",
+            "protocol": "native_tools_preferred_text_fallback",
+            "compacted": True,
+        }
+        if message.role == "system"
+        else {
+            "task": payload.get("task"),
+            "task_verification_commands": payload.get("task_verification_commands"),
+            "compacted": True,
+        }
+    )
+    return message.model_copy(
+        update={
+            "content": json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+        }
+    )
+
+
+def _atomic_conversation_groups(messages: list[Message]) -> list[list[Message]]:
+    groups: list[list[Message]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.role == "assistant" and message.tool_calls:
+            group = [message]
+            expected = {
+                call.provider_call_id
+                for call in message.tool_calls
+                if call.provider_call_id is not None
+            }
+            index += 1
+            while index < len(messages) and messages[index].role == "tool":
+                tool_message = messages[index]
+                if expected and tool_message.provider_call_id not in expected:
+                    break
+                group.append(tool_message)
+                index += 1
+            groups.append(group)
+            continue
+        if message.role == "tool" and message.provider_call_id is not None:
+            # Never retain an orphaned native tool result.
+            index += 1
+            continue
+        groups.append([message])
+        index += 1
+    return groups
+
+
+def durable_recent_messages(
+    messages: list[Message],
+    *,
+    maximum: int = 24,
+) -> tuple[Message, ...]:
+    """Return a bounded durable tail without splitting native turn groups."""
+
+    selected: list[list[Message]] = []
+    count = 0
+    for group in reversed(_atomic_conversation_groups(messages)):
+        if selected and count + len(group) > maximum:
+            break
+        selected.insert(0, group)
+        count += len(group)
+    return tuple(item for group in selected for item in group)
 
 
 def _canonicalize_conversation(messages: list[Message]) -> list[Message]:
     canonical: list[Message] = []
     for message in messages:
         if message.role != "assistant":
+            canonical.append(message)
+            continue
+        if message.tool_calls:
+            # Native assistant calls are already structured and carry the
+            # durable provider/runtime correlation mapping.
             canonical.append(message)
             continue
         try:
@@ -400,25 +573,36 @@ def _structured_context_message(
     for message in messages:
         if message.role != "assistant":
             continue
-        try:
-            payload = json.loads(message.content or "{}")
-        except json.JSONDecodeError:
-            continue
-        for call in payload.get("tool_calls", []):
-            if not isinstance(call, dict):
+        calls: list[tuple[str | None, dict[str, object]]] = []
+        if message.tool_calls:
+            calls.extend((call.name, call.arguments) for call in message.tool_calls)
+        else:
+            try:
+                payload = json.loads(message.content or "{}")
+            except json.JSONDecodeError:
                 continue
-            name = call.get("name")
-            arguments = call.get("arguments")
-            if not isinstance(arguments, dict):
-                arguments = {}
-            if name == "read_file" and isinstance(arguments.get("path"), str):
-                read_files.add(arguments["path"])
+            if not isinstance(payload, dict):
+                continue
+            for call in payload.get("tool_calls", []):
+                if not isinstance(call, dict):
+                    continue
+                arguments = call.get("arguments")
+                calls.append(
+                    (
+                        call.get("name") if isinstance(call.get("name"), str) else None,
+                        arguments if isinstance(arguments, dict) else {},
+                    )
+                )
+        for name, arguments in calls:
+            path = arguments.get("path")
+            if name == "read_file" and isinstance(path, str):
+                read_files.add(path)
             elif name == "search_code":
                 searches.add(
                     json.dumps(arguments, ensure_ascii=False, sort_keys=True)
                 )
-            elif name == "list_files" and isinstance(arguments.get("path"), str):
-                listed_paths.add(arguments["path"])
+            elif name == "list_files" and isinstance(path, str):
+                listed_paths.add(path)
             elif name == "git_diff":
                 git_diff_checked = True
 

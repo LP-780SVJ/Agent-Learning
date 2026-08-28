@@ -3,7 +3,7 @@
 > 文档状态：持续维护  
 > 首次建立：2026-08-27  
 > 当前分支：`week4`  
-> 当前记录终点：两次 `runtime_docker_stability` B01 smoke 仍因模型动作协议失败  
+> 当前记录终点：Model Client 已升级为 Agent Turn；等待用户执行 B01 native-tool smoke
 > 维护范围：从第一次真实 15-task benchmark 开始，持续记录单 Agent 生产闭环的故障、修复、实验和架构演进
 
 ## 1. 文档目的
@@ -847,3 +847,115 @@ Dialect firewall 不是错误实现，它解决了真实存在的 DSML、fenced 
 - 记录第一次 15-task benchmark 到两次 Docker stability smoke 的完整问题链。
 - 当前结论：Docker execution root 修复已得到 preflight 证据；单 Agent 仍被 raw-text action transport 阻断。
 - 下一步：先升级 Model Response / Provider Adapter 边界，不运行 11-task baseline。
+
+### 2026-08-28：第一刀修复——ModelRequest → ModelTurn
+
+#### 问题与根因
+
+修改前真实链路是：
+
+```text
+messages
+→ complete(messages)
+→ message.content
+→ JSON / fence / DSML parser
+→ Runtime ToolCall
+```
+
+OpenAI-compatible HTTP 实现位于 CLI evaluation 模块，请求不发送 Runtime
+tool schema 或显式输出预算；响应只保留 `content/model/tokens`；Runtime
+生成的 `role=tool` observation 在下一次 Provider 请求中又被包装成
+`role=user` JSON。`content=None + native tool_calls` 无法表达，`length` 与
+malformed JSON 也无法区分。
+
+确认的 Root Cause：
+
+> Agent action transport was incorrectly modeled as free-form text generation.
+
+原 failure 保留为：模型已理解正确修改 → action JSON envelope 截断 → parser
+无法恢复完整 patch → `SafeExecutionService` 从未收到 patch → 任务失败。
+
+#### 设计选择
+
+采用 [DD-W4-D7-07](../docs/design_decisions/DD-W4-D7-07.md)：
+
+```text
+ModelRequest
+→ OpenAI-compatible Provider Adapter
+→ ModelTurn
+→ Runtime-owned ToolCall
+→ ToolRegistry / Runtime Tool
+→ SafeExecutionService
+→ ToolResult
+→ native role=tool
+→ next ModelRequest
+```
+
+关键不变量：
+
+- `provider_call_id` 是 opaque transport correlation；`runtime_call_id` 在
+  Runtime schema validation 后生成。两者共同持久化但不能交叉信任。
+- native tool calls 优先；同一 turn 即使同时含 textual action，也只执行
+  native action 一次。
+- JSON、fenced JSON、DSML 与 bounded protocol repair 保留为 fallback。
+- `finish_reason=length` 直接分类 `output_truncated`，不进入 JSON parser，
+  不调用 backend，也不消耗 protocol repair。
+- `content=None + tool_calls` 是合法 turn；empty content + empty calls 才是
+  bounded transient/incomplete provider turn。
+- `context_budget` 明确为 input budget，并满足
+  `max_input <= context_window - max_output - safety_headroom`。
+- native `apply_patch` / `run_tests` 不绕过既有 Safe Execution boundary。
+
+#### 生产修改
+
+- 新增 provider-neutral `ModelRequest`、`ModelTurn`、`ModelUsage`、
+  `ModelFinishState` 与 input budget validation。
+- `ToolCall` / `ToolResult` / `Message` 最小扩展双 ID，没有复制第二套业务
+  ToolCall schema。
+- `codeteam.llm.openai_compatible` 接管 HTTP payload、native schema、response
+  parsing、capability fallback、finish/retry metadata 和 provider manifest；
+  `run_command.py` 不再反向导入 `agent_eval_command.py` 的 Provider factory。
+- AgentLoop 变为 native-first，legacy `complete()` 通过 compatibility adapter
+  继续支持现有 fake/planner/text provider。
+- native assistant/tool chain 进入 canonical durable messages；audit evidence
+  增加 response ID、finish state/reason、actual mode、usage、incomplete reason、
+  system fingerprint 和双 ID 映射。
+- Session durable state 保存输出预算、context window、headroom、native/reasoning
+  配置；resume 与 recent-tail selection 不拆散 native turn group。
+- structured compaction 不再永久保留完整前两条消息，并按完整 serialized
+  messages + tools 的 UTF-8 估算做输入预算检查；native assistant/tool group
+  整体保留或整体丢弃。
+- CLI 增加 `--max-output-tokens`、`--model-context-window`、
+  `--safety-headroom-tokens`、`--native-tools/--text-actions` 与
+  `--reasoning/--no-reasoning`。
+
+#### 离线验证
+
+```text
+.venv/bin/python -m pytest -q
+1308 passed, 6 skipped in 33.52s
+```
+
+新增回归覆盖 native happy path、tool result round-trip、empty/native、
+empty/incomplete、length、malformed args、unknown tool、native+text 去重、
+fallback compatibility、SafeExecution patch/command、usage/finish evidence、
+Session resume、compaction atomicity 和 input/output budget。
+
+静态门与 diff gate 在本轮收尾命令中执行并记录于最终交付；真实 Provider
+未调用，API key 未读取、打印或持久化。
+
+#### 未运行项与仍未解决问题
+
+```text
+B01 real-provider smoke: NOT_RUN_BY_CODER
+11-task benchmark: NOT_RUN
+Native Tool Transport Success Rate: NOT_RUN
+Protocol Parse Failure Rate: NOT_RUN
+Provider Incomplete Turn Rate: NOT_RUN
+ToolCall → Runtime Execution Rate: NOT_RUN
+Native vs textual ablation: NOT_RUN
+```
+
+第二刀仍然 pending：Runtime completion ownership / `READY_TO_FINALIZE`。
+本轮没有修改 completion state machine、submit-result semantics 或
+repeated-action completion handshake，不能宣称 SingleAgent 已完全解决。

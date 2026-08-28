@@ -716,12 +716,13 @@ def test_provider_auto_requests_json_object_mode_with_zero_temperature(
     assert payloads[0]["response_format"] == {"type": "json_object"}
     assert payloads[0]["temperature"] == 0.0
     manifest = agent_eval_command._provider_manifest(config)
-    assert manifest == {
-        "response_mode_requested": "auto",
-        "response_mode_actual": "json_object",
-        "response_mode_fallback": False,
-        "temperature": 0.0,
-    }
+    assert manifest["response_mode_requested"] == "auto"
+    assert manifest["response_mode_actual"] == "json_object"
+    assert manifest["response_mode_fallback"] is False
+    assert manifest["temperature"] == 0.0
+    assert manifest["max_output_tokens"] == 4096
+    assert manifest["max_input_tokens"] == 27648
+    assert manifest["native_tools_actual"] is False
     assert "secret-key" not in json.dumps(manifest)
 
 

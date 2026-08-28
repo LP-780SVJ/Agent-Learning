@@ -10,17 +10,13 @@ from pathlib import Path
 
 import typer
 
-from codeteam.agent.runtime import CodingAgentRuntime
+from codeteam.agent.runtime import CodingAgentRuntime, durable_recent_messages
 from codeteam.agent.runtime_models import (
     CodingAgentRunRequest,
     CompactionMode,
     RuntimeStatus,
 )
 from codeteam.agent.runtime_tools import render_workspace_diff
-from codeteam.cli.agent_eval_command import (
-    _resolve_llm_config,
-    make_runtime_model_client,
-)
 from codeteam.cli.render import render_error, render_json, render_text
 from codeteam.cli.requests import (
     DiffRequest,
@@ -41,6 +37,10 @@ from codeteam.git.workspace import GitWorkspace
 from codeteam.git.worktree import WorktreeManager
 from codeteam.git.worktree_paths import repository_worktree_root
 from codeteam.llm.mock import MockModelClient
+from codeteam.llm.openai_compatible import (
+    build_openai_compatible_client,
+    resolve_llm_config,
+)
 from codeteam.sandbox.preflight import SandboxPreflight, SandboxPreflightResult
 from codeteam.session.errors import (
     RepositoryMismatchError,
@@ -63,6 +63,8 @@ from codeteam.session.service import SessionService
 from codeteam.session.store import JsonSessionStore
 from codeteam.task.models import create_task_spec
 from codeteam.task.state import TaskStatus
+
+SECRETS_PATH = Path(__file__).resolve().parents[2] / "secrets.local.env"
 
 
 def run_agent_task(request: RunRequest) -> None:
@@ -128,6 +130,11 @@ def run_agent_task(request: RunRequest) -> None:
                 "task_status": TaskStatus.IMPLEMENTING,
                 "runtime_state": AgentRuntimeState(
                     context_budget=request.context_budget,
+                    max_output_tokens=request.max_output_tokens,
+                    model_context_window=request.model_context_window,
+                    safety_headroom_tokens=request.safety_headroom_tokens,
+                    native_tools=request.native_tools,
+                    reasoning_enabled=request.reasoning_enabled,
                     max_steps=request.max_steps,
                     max_tool_calls=request.max_tool_calls,
                     max_repairs=request.max_repairs,
@@ -162,7 +169,7 @@ def run_agent_task(request: RunRequest) -> None:
                             ),
                             "protocol_repair_streak": state.protocol_repair_streak,
                             "workspace_version": evidence.workspace_version,
-                            "recent_messages": tuple(state.messages[-24:]),
+                            "recent_messages": durable_recent_messages(state.messages),
                             "last_verification": last_verification,
                         }
                     ),
@@ -251,6 +258,11 @@ def run_agent_task(request: RunRequest) -> None:
         provider_id=provider_id,
         model_id=model_id,
         context_budget=request.context_budget,
+        max_output_tokens=request.max_output_tokens,
+        model_context_window=request.model_context_window,
+        safety_headroom_tokens=request.safety_headroom_tokens,
+        native_tools=request.native_tools,
+        reasoning_enabled=request.reasoning_enabled,
         max_steps=request.max_steps,
         max_tool_calls=request.max_tool_calls,
         max_repairs=request.max_repairs,
@@ -348,12 +360,12 @@ def _build_model_client(
     if effective_provider != "openai-compatible":
         raise ValueError(f"Unsupported provider: {effective_provider}")
     try:
-        config = _resolve_llm_config()
+        config = resolve_llm_config(SECRETS_PATH)
     except SystemExit as error:
         raise ValueError(str(error)) from error
     if model_id is not None:
         config["CODETEAM_LLM_MODEL"] = model_id
-    client = make_runtime_model_client(config)
+    client = build_openai_compatible_client(config)
     return effective_provider, config["CODETEAM_LLM_MODEL"], client
 
 
@@ -499,7 +511,9 @@ def resume_agent_session(request: ResumeRequest) -> None:
                             "workspace_version": (
                                 state.workspace_version + evidence.workspace_version
                             ),
-                            "recent_messages": tuple(loop_state.messages[-24:]),
+                            "recent_messages": durable_recent_messages(
+                                loop_state.messages
+                            ),
                             "last_verification": (
                                 evidence.verification[-1].model_dump(mode="json")
                                 if evidence.verification
@@ -609,6 +623,11 @@ def resume_agent_session(request: ResumeRequest) -> None:
             provider_id=provider_id,
             model_id=model_id,
             context_budget=state.context_budget,
+            max_output_tokens=state.max_output_tokens,
+            model_context_window=state.model_context_window,
+            safety_headroom_tokens=state.safety_headroom_tokens,
+            native_tools=state.native_tools,
+            reasoning_enabled=state.reasoning_enabled,
             max_steps=remaining_steps,
             max_tool_calls=remaining_tool_calls,
             max_repairs=max(0, remaining_repairs),

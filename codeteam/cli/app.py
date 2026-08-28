@@ -166,6 +166,26 @@ def agent_eval(
         int,
         typer.Option("--context-budget", help="Runtime context token budget"),
     ] = 4096,
+    max_output_tokens: Annotated[
+        int,
+        typer.Option("--max-output-tokens", min=1),
+    ] = 4096,
+    model_context_window: Annotated[
+        int,
+        typer.Option("--model-context-window", min=1),
+    ] = 32768,
+    safety_headroom_tokens: Annotated[
+        int,
+        typer.Option("--safety-headroom-tokens", min=0),
+    ] = 1024,
+    native_tools: Annotated[
+        bool,
+        typer.Option("--native-tools/--text-actions"),
+    ] = True,
+    reasoning_enabled: Annotated[
+        bool,
+        typer.Option("--reasoning/--no-reasoning"),
+    ] = False,
     keep_workspaces: Annotated[
         bool,
         typer.Option("--keep-workspaces", help="保留每个 task 的临时 workspace"),
@@ -190,6 +210,11 @@ def agent_eval(
         task_id=task_id,
         limit=limit,
         context_budget=context_budget,
+        max_output_tokens=max_output_tokens,
+        model_context_window=model_context_window,
+        safety_headroom_tokens=safety_headroom_tokens,
+        native_tools=native_tools,
+        reasoning_enabled=reasoning_enabled,
         keep_workspaces=keep_workspaces,
         worktree_root=str(worktree_root) if worktree_root is not None else None,
     )
@@ -222,6 +247,26 @@ def run(
         int,
         typer.Option("--context-budget", min=1),
     ] = 4096,
+    max_output_tokens: Annotated[
+        int,
+        typer.Option("--max-output-tokens", min=1),
+    ] = 4096,
+    model_context_window: Annotated[
+        int,
+        typer.Option("--model-context-window", min=1),
+    ] = 32768,
+    safety_headroom_tokens: Annotated[
+        int,
+        typer.Option("--safety-headroom-tokens", min=0),
+    ] = 1024,
+    native_tools: Annotated[
+        bool,
+        typer.Option("--native-tools/--text-actions"),
+    ] = True,
+    reasoning_enabled: Annotated[
+        bool,
+        typer.Option("--reasoning/--no-reasoning"),
+    ] = False,
     max_steps: Annotated[int, typer.Option("--max-steps", min=1)] = 20,
     max_tool_calls: Annotated[
         int,
@@ -253,6 +298,11 @@ def run(
             provider_id=provider_id,
             model_id=model_id,
             context_budget=context_budget,
+            max_output_tokens=max_output_tokens,
+            model_context_window=model_context_window,
+            safety_headroom_tokens=safety_headroom_tokens,
+            native_tools=native_tools,
+            reasoning_enabled=reasoning_enabled,
             max_steps=max_steps,
             max_tool_calls=max_tool_calls,
             max_repairs=max_repairs,

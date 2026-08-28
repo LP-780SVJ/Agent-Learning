@@ -29,10 +29,10 @@ from codeteam.schemas.messages import Message
 from codeteam.task.models import TaskSpec
 from codeteam.task.state import TaskStatus
 
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2})
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
 """Loader 允许加载的 schema 代数。旧版本 ≠ 损坏（未来走 Migration）。"""
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 _SENSITIVE_METADATA_KEY_MARKERS = frozenset(
     {
@@ -55,6 +55,12 @@ def _is_sensitive_metadata_key(key: object) -> bool:
     if not isinstance(key, str):
         return False
     normalized = key.lower().replace("-", "_").replace(" ", "_")
+    if normalized in {
+        "max_output_tokens",
+        "safety_headroom_tokens",
+        "model_context_window",
+    }:
+        return False
     return any(
         marker in normalized for marker in _SENSITIVE_METADATA_KEY_MARKERS
     ) or normalized in {"auth", "key"} or normalized.endswith("_key")
@@ -208,6 +214,11 @@ class AgentRuntimeState(BaseModel):
     last_verification: dict[str, Any] | None = None
     compaction_mode: str = "structured"
     context_budget: int = 4096
+    max_output_tokens: int = 4096
+    model_context_window: int = 32768
+    safety_headroom_tokens: int = 1024
+    native_tools: bool = True
+    reasoning_enabled: bool = False
     max_steps: int = 20
     max_tool_calls: int = 40
     max_repairs: int = 3

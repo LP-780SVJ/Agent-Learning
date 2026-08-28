@@ -24,11 +24,13 @@ from codeteam.agent.runtime_tools import RuntimeEvidence
 from codeteam.execution.models import CommandResult, CommandStatus
 from codeteam.execution.safe_execution_service import SafeExecutionService
 from codeteam.git.workspace import GitWorkspace
+from codeteam.llm.base import ModelFinishState, ModelRequest, ModelTurn
 from codeteam.sandbox.preflight import (
     DockerSandboxPreflight,
     SandboxPreflightResult,
 )
 from codeteam.schemas.messages import Message
+from codeteam.schemas.tool_calls import ToolCall
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +73,31 @@ class ScriptedModel:
     def complete(self, messages: list[Message]) -> str:
         self.requests.append(messages)
         return json.dumps(self.outputs.pop(0))
+
+
+class NativeScriptedModel:
+    def __init__(self, turns: list[ModelTurn]) -> None:
+        self.turns = turns
+        self.requests: list[ModelRequest] = []
+
+    def turn(self, request: ModelRequest) -> ModelTurn:
+        self.requests.append(request)
+        return self.turns.pop(0)
+
+
+class RecordingSafeExecution:
+    def __init__(self, inner: SafeExecutionService) -> None:
+        self.inner = inner
+        self.patch_calls = 0
+        self.command_calls = 0
+
+    def execute_patch(self, request):
+        self.patch_calls += 1
+        return self.inner.execute_patch(request)
+
+    def execute_command(self, request):
+        self.command_calls += 1
+        return self.inner.execute_command(request)
 
 
 class FailedPreflight:
@@ -153,6 +180,96 @@ def _call(index: int, name: str, arguments: dict) -> dict:
             {"call_id": f"call-{index}", "name": name, "arguments": arguments}
         ]
     }
+
+
+def _native_call(index: int, name: str, arguments: dict) -> ModelTurn:
+    return ModelTurn(
+        text=None,
+        tool_calls=(
+            ToolCall(
+                provider_call_id=f"provider-call-{index}",
+                name=name,
+                arguments=arguments,
+            ),
+        ),
+        finish_state=ModelFinishState.TOOL_CALLS,
+        finish_reason="tool_calls",
+        model="mock-model",
+    )
+
+
+def test_native_patch_test_diff_closes_through_safe_execution(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    safe_execution = RecordingSafeExecution(
+        SafeExecutionService(sandbox_runner=PassingSandbox())
+    )
+    model = NativeScriptedModel(
+        [
+            _native_call(
+                1,
+                "apply_patch",
+                {
+                    "replacements": [
+                        {
+                            "path": "app.py",
+                            "old_text": "VALUE = 1",
+                            "new_text": "VALUE = 2",
+                        }
+                    ]
+                },
+            ),
+            _native_call(
+                2,
+                "run_tests",
+                {"argv": ["python", "-m", "pytest", "tests"]},
+            ),
+            _native_call(3, "git_diff", {}),
+            ModelTurn(
+                text=json.dumps(
+                    {
+                        "status": "completed",
+                        "summary": "fixed",
+                        "tests_passed": True,
+                        "error": None,
+                        "user_input_request": None,
+                    }
+                ),
+                finish_state=ModelFinishState.STOP,
+                model="mock-model",
+            ),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=safe_execution,
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="native-safe",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            verification_commands=(("python", "-m", "pytest", "tests"),),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert safe_execution.patch_calls == 1
+    assert safe_execution.command_calls == 1
+    assert (repo / "app.py").read_text() == "VALUE = 2\n"
+    second_request = model.requests[1]
+    assistant, tool = second_request.messages[-2:]
+    assert assistant.tool_calls is not None
+    assert assistant.tool_calls[0].call_id == "step-1-call-1"
+    assert assistant.tool_calls[0].provider_call_id == "provider-call-1"
+    assert tool.role == "tool"
+    assert tool.tool_call_id == "step-1-call-1"
+    assert tool.provider_call_id == "provider-call-1"
 
 
 def test_preflight_failure_pauses_before_provider_call(tmp_path: Path) -> None:

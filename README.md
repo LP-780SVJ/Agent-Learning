@@ -16,7 +16,7 @@ The first four weeks are now at a closeout baseline.
 
 | Area | Status | Evidence |
 |---|---|---|
-| Agent loop and tool protocol | Implemented | Unit tests for loop limits, tool calls, final output, usage, errors |
+| Agent loop and tool protocol | Native Agent Turn implemented offline | `ModelRequest → ModelTurn`, native tool calls, textual fallback |
 | Context engine and retrieval | Implemented | Week2 and medium repo retrieval evals |
 | Git patch/worktree/checkpoint | Implemented | `tests/git/` |
 | Command policy and approval | Implemented | `tests/execution/` |
@@ -25,18 +25,25 @@ The first four weeks are now at a closeout baseline.
 | Durable session and resume | Implemented | `tests/session/` |
 | CLI product layer | Implemented | `tests/cli/`, subprocess E2E |
 | Unified Coding Agent Runtime | Implemented | `codeteam/agent/runtime.py`, scripted-model integration tests |
-| Provider action normalization | Implemented | JSON, fenced JSON, DeepSeek DSML, bounded protocol repair |
+| Provider action normalization | Native-first + fallback | OpenAI-compatible native tools; JSON, fenced JSON, DSML fallback |
 | Agent EvalRunner / Grader | Implemented V2 | Same Runtime as `run`; hidden oracle remains grader-only |
-| 11-task coding development benchmark | Null preflight 0/11; real run pending | `evals/week4/agent_task_suite_v1.jsonl` |
+| 11-task coding development benchmark | NOT_RUN after Agent Turn change | Wait for user B01 smoke and Completion Ownership fix |
 
 Latest closeout evidence:
 
 ```text
-normal sandbox:      1292 passed, 6 skipped
+normal sandbox:      1308 passed, 6 skipped
 Docker integration:  42 passed in prior elevated closeout run
 ```
 
-`codeteam run` now uses the real provider-neutral `CodingAgentRuntime`. It creates a linked worktree from request-time `HEAD`, builds initial context, normalizes supported provider response dialects into one action protocol, lets the model inspect and search further, applies patches through the safe patch lane, runs visible verification in Docker, supports local repair turns, inspects the final Git state, and keeps the worktree for review. `agent-eval` is a thin batch shell over the same Runtime; hidden acceptance remains outside the Agent in `AgentGrader`.
+`codeteam run` now uses the real provider-neutral `CodingAgentRuntime`. Its
+production model boundary is `ModelRequest → Provider Adapter → ModelTurn` and
+prefers native tool calling. The JSON/fenced-JSON/DSML dialect firewall remains
+as compatibility fallback. It creates a linked worktree from request-time
+`HEAD`, builds initial context, applies patches through the safe patch lane,
+runs visible verification in Docker, and keeps the worktree for review.
+`agent-eval` remains a thin batch shell over the same Runtime; hidden acceptance
+stays outside the Agent in `AgentGrader`.
 
 ## Quick Start
 
@@ -89,6 +96,9 @@ CODETEAM_LLM_RESPONSE_MODE=auto
 CODETEAM_LLM_TEMPERATURE=0
 ```
 
+Native tools and reasoning control are per-run CLI options; the documented B01
+command explicitly uses `--native-tools --no-reasoning`.
+
 `--provider` and `--model` must be supplied together when overriding the
 configured defaults. The currently executable production provider is
 `openai-compatible`; the model registry and switching layer remain
@@ -99,19 +109,27 @@ provider-neutral extension points.
 - A run creates `codeteam/<task-id>` from request-time `HEAD` below
   `~/.codeteam/worktrees/repos/<repo>-<path-hash>/`; it never edits, commits,
   or merges the caller's worktree. Sessions persist the exact worktree path.
-- The model receives an initial context snapshot and can then call
+- The model receives an input-budgeted initial context snapshot and existing
+  ToolRegistry schemas in `ModelRequest`, then can call
   `list_files`, `read_file`, `search_code`, `apply_patch`, `run_tests`,
   `git_status`, and `git_diff` within the task worktree.
-- Exact assistant responses are retained in a separate `model_outputs.jsonl`
-  audit stream. Model-visible history contains only canonical JSON. The Agent
-  protocol layer accepts bare JSON, a complete Markdown JSON fence, or a
-  validated DeepSeek DSML envelope and assigns its own tool-call IDs.
+- Production prefers provider-native tool calls. Exact text and structured turn
+  evidence are retained in `model_outputs.jsonl`; Model-visible history stores
+  structured assistant calls and real `role=tool` results. Runtime-owned
+  `step-n-call-m` and opaque provider call IDs remain separate and durable.
+  Bare JSON, a complete Markdown JSON fence, and validated DeepSeek DSML remain
+  accepted only as fallback, and the Runtime still assigns its own call IDs.
 - Invalid action formats receive at most two consecutive schema-only repair
   turns. A valid action resets the streak; lifetime attempts remain separately
   counted and both values survive Session resume.
-- OpenAI-compatible calls default to temperature `0` and negotiate JSON object
-  mode. `auto` falls back to text only after an explicit unsupported 400 and
-  records the actual mode in the evaluation manifest.
+- OpenAI-compatible calls default to temperature `0`, native tools enabled,
+  reasoning disabled, and explicit `max_tokens`. An explicit unsupported-tools
+  400 falls back to JSON object/text capability negotiation and records the
+  actual mode in the evaluation manifest.
+- `--context-budget` is the maximum input budget. It must be no greater than
+  `--model-context-window - --max-output-tokens -
+  --safety-headroom-tokens`; oversized serialized messages plus tool schemas
+  fail before HTTP.
 - Patch application accepts unified diff, complete-file edits, or compact exact
   replacements. Every representation becomes a local diff and passes through
   path validation, checkpoint creation, the safe patch lane, and final
@@ -149,8 +167,8 @@ CLI
   -> Worktree + durable Session
   -> CodingAgentRuntime
        -> initial Context Engine snapshot
-       -> provider response dialect firewall
-       -> provider-neutral JSON action loop
+       -> ModelRequest -> Provider Adapter -> ModelTurn
+       -> native action loop / textual dialect firewall fallback
        -> list/read/search/apply_patch/run_tests/git_status/git_diff
        -> final diff + visible verification gate
   -> Domain modules
@@ -185,9 +203,9 @@ codeteam/
 ├── repair/                        # repair loop and attempt models
 ├── failures/                      # typed failure classification and recovery policy
 ├── session/                       # durable session, store, event log, resume
-├── llm/                           # provider-neutral model client pieces
+├── llm/                           # ModelRequest/ModelTurn + provider adapters
 ├── agent/                         # unified coding runtime, tools, edits, orchestration
-│   ├── protocol.py                # JSON/fence/DSML -> canonical action
+│   ├── protocol.py                # fallback JSON/fence/DSML -> canonical action
 │   ├── runtime.py                 # model/action/tool/verification execution loop
 │   ├── runtime_models.py          # runtime request, status, evidence, result
 │   ├── runtime_tools.py           # seven worktree-scoped coding tools
@@ -208,9 +226,9 @@ Detailed architecture notes are maintained in:
 Week1 builds the minimal but reliable runtime loop:
 
 ```text
-messages
-  -> model_client.complete()
-  -> parse tool calls or final output
+ModelRequest(messages, tools, budgets)
+  -> model_client.turn()
+  -> native ModelTurn tool calls, or textual fallback parsing
   -> ToolRegistry.execute()
   -> append ToolResult
   -> check limits / repeated action / no-progress
@@ -302,7 +320,12 @@ Capabilities:
 - One `CodingAgentRuntime` shared by `run` and `agent-eval`.
 - `agent-eval` prepares fresh repositories/worktrees and invokes the independent hidden-oracle Grader only after the Runtime stops.
 
-Important limitation: the 11 tasks are now explicitly a `dev` suite, not held-out evidence. The Runtime is a complete simple-task loop, but its real-model reliability still needs the user-run baseline and ablations below. Null preflight proves harness discrimination; the non-blind Codex reference proves task solvability, not model quality.
+Important limitation: the 11 tasks are explicitly a `dev` suite, not held-out
+evidence. The native Agent Turn path has offline coverage only. The user must
+run B01 first; the 11-task benchmark and native/text ablation remain `NOT_RUN`
+until B01 is stable and Completion Ownership is fixed. Null preflight proves
+harness discrimination; the non-blind Codex reference proves task solvability,
+not model quality.
 
 ## Evaluation
 
@@ -349,7 +372,9 @@ public oracle: 11/11 task tests fail on pristine state
 null V3:       0/11 success
 Codex reference: 11/11 success (non-blind oracle-informed solvability check)
 real LLM V2:  first unified Runtime run 0/11 due protocol integration failure
-protocol fix: offline replay accepts all 11 first responses; real rerun pending
+agent-turn fix: offline native action loop passes; B01 NOT_RUN_BY_CODER
+11-task benchmark: NOT_RUN
+native/text ablation: NOT_RUN
 ```
 
 Legacy `LLMPatchGenerator` and `PatchActor` remain only for compatibility tests
@@ -363,61 +388,54 @@ and provider failures must be reported separately from Agent failures.
 All 11 tasks are a development benchmark. Their results measure regression and
 engineering progress, not blind held-out generalization.
 
-### Real-model benchmark commands
+### User-run B01 native-tool smoke
 
-Run one task first as a provider/runtime smoke test:
+The coder does not call a real LLM or read/print/persist the API key. Configure
+`CODETEAM_LLM_BASE_URL`, `CODETEAM_LLM_API_KEY`, and `CODETEAM_LLM_MODEL` in the
+environment or ignored `secrets.local.env`, then run this personally:
 
 ```bash
-RUN_DIR="evals/week4/agent_runs/real_llm_smoke_$(date +%Y%m%d_%H%M%S)"
+RUN_DIR="evals/week4/agent_runs/native_tool_b01_$(date +%Y%m%d_%H%M%S)"
 .venv/bin/python -m codeteam.cli.app agent-eval \
   --suite evals/week4/agent_task_suite_v1.jsonl \
   --output "$RUN_DIR" \
   --actor llm \
   --mode baseline \
   --task-id B01 \
-  --context-budget 4096 \
+  --context-budget 8192 \
+  --max-output-tokens 4096 \
+  --model-context-window 32768 \
+  --safety-headroom-tokens 1024 \
+  --native-tools \
+  --no-reasoning \
   --worktree-root "$HOME/.codeteam/worktrees" \
   --keep-workspaces
 ```
 
-Then run the complete 11-task baseline:
+Inspect these fields after the run:
 
-```bash
-RUN_DIR="evals/week4/agent_runs/real_llm_baseline_$(date +%Y%m%d_%H%M%S)"
-.venv/bin/python -m codeteam.cli.app agent-eval \
-  --suite evals/week4/agent_task_suite_v1.jsonl \
-  --output "$RUN_DIR" \
-  --actor llm \
-  --mode baseline \
-  --context-budget 4096 \
-  --worktree-root "$HOME/.codeteam/worktrees" \
-  --keep-workspaces
-```
+- `manifest.json`: `provider_runtime.native_tools_requested/actual`,
+  `response_mode_actual`, `reasoning_enabled`, `max_output_tokens`, input budget
+  and sandbox/worktree roots.
+- result/summary: actor status, failure category, steps, tool calls, patch
+  attempts, verification, changed files, provider/environment blocking.
+- `_artifacts/B01/model_outputs.jsonl`: `finish_state`, `finish_reason`,
+  `actual_response_mode`, usage, response ID, native tool calls, and stable
+  `provider_call_id ↔ runtime_call_id` mappings.
+- `_artifacts/B01/runtime_messages.json`: structured assistant call followed by
+  real `role=tool`, then the next model turn; no textual protocol parse failure
+  on the native happy path.
+- kept worktree: source patch exists and all patch/test side effects came
+  through the existing SafeExecutionService evidence.
 
-Run the four ablations after the baseline is provider-stable:
+Do not run the 11-task real benchmark or real native/text ablation yet. Their
+status in this revision is `NOT_RUN`; Fake Provider test pass rates are not
+benchmark scores.
 
-```bash
-RUN_DIR="evals/week4/agent_runs/real_llm_ablations_$(date +%Y%m%d_%H%M%S)"
-.venv/bin/python -m codeteam.cli.app agent-eval \
-  --suite evals/week4/agent_task_suite_v1.jsonl \
-  --output "$RUN_DIR" \
-  --actor llm \
-  --mode ablations \
-  --context-budget 4096 \
-  --worktree-root "$HOME/.codeteam/worktrees" \
-  --keep-workspaces
-```
-
-The ablation modes are direct execution without planning, single-shot without
-repair, no compaction, and naive tail-only compaction. Compare task success,
-hidden acceptance, visible verification, safety, provider-blocked count, steps,
-tool calls, repair attempts, tokens, cost, and latency. Canonical Runtime
-messages, raw model-output JSONL, final diffs, and verification evidence are
-written below each ignored run directory for failure analysis.
-
-Also inspect `protocol_repair_attempt_count` and `protocol_failed_count`. A run
-that never reaches a tool because of response-dialect mismatch is an integration
-failure, not a coding-capability score.
+Future ablation A is native tool calling and B is the existing textual codec,
+with task/model/temperature/output budget held constant. Compare transport
+success, parse failure, Runtime execution reached, and task completion only
+after the baseline is repeatable.
 
 `--output` stores only reports and audit artifacts. Execution repositories live
 under the resolved worktree root. `environment_blocked_count` is reported
@@ -461,13 +479,17 @@ When running inside a restricted terminal sandbox, Docker tests may skip. In a u
 - Full-project mypy still has historical import-chain/stub/type debt.
 - Full-project ruff has historical style/lint findings; touched-module ruff gates pass, but repo-wide cleanup should be a separate maintenance branch.
 - Earlier real LLM runs predate canonical evidence and discriminative public
-  tests; the V3 suite needs a fresh B01 smoke and then an 11-task baseline.
-- The unified Runtime is implemented, but the real-model 11-task baseline has
-  not yet been rerun after the protocol fix; ablations must wait for a stable
-  baseline.
-- Provider dialect normalization covers formats observed from the configured
-  model, not arbitrary future provider syntaxes; new dialects require explicit
-  decoders and adversarial tests.
+  tests; the V3 suite needs the user-run native B01 smoke. B01 is
+  `NOT_RUN_BY_CODER`; benchmark and ablation are `NOT_RUN`.
+- Runtime completion ownership / `READY_TO_FINALIZE` is still pending. The
+  Runtime may still report repeated-action failure after objective gates pass;
+  this change intentionally did not redesign the completion state machine.
+- Native tool calling is implemented for the OpenAI-compatible adapter and
+  falls back explicitly when unsupported. New Provider wire protocols still
+  require adapters; full reasoning-content continuation is not implemented.
+- Input budgeting counts complete serialized UTF-8 request structure and tools,
+  but still uses a replaceable approximate counter rather than a
+  provider-exact tokenizer.
 - Docker remains a hard execution dependency for production verification; unavailable Docker pauses instead of falling back to host shell.
 - Retrieval evaluation is still mostly Python and local fixtures, not a broad multi-language external benchmark.
 - Medium repo results show the context engine still needs better semantic retrieval and cross-module expansion.
@@ -489,10 +511,13 @@ Important directories:
 
 Recommended order:
 
-1. Run one real-model smoke task, then the 11-task dev baseline.
-2. Run ablations: plan-first vs direct, repair vs single shot, and structured vs none/naive compaction.
-3. Inspect Runtime artifacts and classify provider, retrieval, patch, verification, safety, and budget failures.
-4. Ask the reviewer to inspect the unified Runtime changes and the new evaluation evidence.
-5. Fix any newly confirmed P0/P1/P2 findings before using the Runtime as the Week5 multi-agent executor.
-6. Improve retrieval on medium repo business/cross-module/doc/config misses.
-7. Tackle full-project ruff and mypy as separate cleanup/type-hardening branches.
+1. User runs only the documented B01 native-tool smoke and returns its manifest,
+   result, model-output evidence, runtime messages, and kept worktree evidence.
+2. Fix any real Provider adapter issue exposed by B01 without weakening the
+   SafeExecution or dual-ID boundaries.
+3. Implement the second knife: Runtime completion ownership /
+   `READY_TO_FINALIZE`, without conflating it with action transport.
+4. Only after two repeatable B01 runs, run the 11-task dev baseline and then the
+   controlled native-vs-text transport ablation.
+5. Improve retrieval on medium-repo business/cross-module/doc/config misses and
+   keep repo-wide lint/type cleanup as separate maintenance work.

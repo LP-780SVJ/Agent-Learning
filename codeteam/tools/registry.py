@@ -28,6 +28,8 @@ class ToolRegistry:
         ]
 
     def execute(self, call: ToolCall) -> ToolResult:
+        if call.call_id is None:
+            raise ValueError("Runtime call_id must be assigned before tool execution.")
         try:
             tool = self.get(call.name)
             args = tool.args_schema.model_validate(call.arguments)
@@ -35,6 +37,7 @@ class ToolRegistry:
 
             return ToolResult(
                 call_id=call.call_id,
+                provider_call_id=call.provider_call_id,
                 name=call.name,
                 content=str(output),
                 success=True,
@@ -42,6 +45,7 @@ class ToolRegistry:
         except Exception as error:  # noqa: BLE001 - tool failures are observations
             return ToolResult(
                 call_id=call.call_id,
+                provider_call_id=call.provider_call_id,
                 name=call.name,
                 content="",
                 success=False,

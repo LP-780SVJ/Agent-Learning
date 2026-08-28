@@ -16,6 +16,11 @@ class RunRequest(BaseModel):
     provider_id: str | None = None
     model_id: str | None = None
     context_budget: int = Field(default=4096, gt=0)
+    max_output_tokens: int = Field(default=4096, gt=0)
+    model_context_window: int = Field(default=32768, gt=0)
+    safety_headroom_tokens: int = Field(default=1024, ge=0)
+    native_tools: bool = True
+    reasoning_enabled: bool = False
     max_steps: int = Field(default=20, gt=0)
     max_tool_calls: int = Field(default=40, gt=0)
     max_repairs: int = Field(default=3, ge=0)
@@ -26,6 +31,15 @@ class RunRequest(BaseModel):
     def _check_provider_pair(self) -> RunRequest:
         if (self.provider_id is None) != (self.model_id is None):
             raise ValueError("provider_id 和 model_id 必须同时提供")
+        if self.context_budget > (
+            self.model_context_window
+            - self.max_output_tokens
+            - self.safety_headroom_tokens
+        ):
+            raise ValueError(
+                "context_budget must reserve max_output_tokens and "
+                "safety_headroom_tokens"
+            )
         return self
 
 

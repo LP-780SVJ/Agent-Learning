@@ -21,7 +21,15 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, cast
 
-from codeteam.llm.base import ModelClient, ModelResponse
+from codeteam.llm.base import (
+    LegacyModelClient,
+    ModelClient,
+    ModelFinishState,
+    ModelRequest,
+    ModelResponse,
+    ModelTurn,
+    ModelUsage,
+)
 from codeteam.llm.registry import (
     ModelMetadata,
     ModelSelection,
@@ -77,19 +85,56 @@ class _MeteredClient:
     成功且响应为 ModelResponse 时可得（诚实降级为 0）。
     """
 
-    def __init__(self, inner: ModelClient, box: dict[str, int]) -> None:
+    def __init__(
+        self,
+        inner: ModelClient | LegacyModelClient,
+        box: dict[str, int],
+    ) -> None:
         self._inner = inner
         self._box = box
 
     def complete(self, messages: list[Message]) -> str | ModelResponse:
         self._box["model_calls"] += 1
-        result = self._inner.complete(messages)
+        complete_method = getattr(self._inner, "complete", None)
+        if not callable(complete_method):
+            raise TypeError("This model client does not provide legacy complete().")
+        result: str | ModelResponse = complete_method(messages)
         # Protocol 声明 str；真实/测试 client 可返回 ModelResponse
         # （agent_loop._normalize_model_response 同款兼容）——两种
         # 形态都计调用次数，token 计量仅结构化形态可得
         if isinstance(result, ModelResponse):
             self._box["input_tokens"] += result.input_tokens
             self._box["output_tokens"] += result.output_tokens
+        return result
+
+    def turn(self, request: ModelRequest) -> ModelTurn:
+        self._box["model_calls"] += 1
+        turn_method = getattr(self._inner, "turn", None)
+        if callable(turn_method):
+            result: ModelTurn = turn_method(request)
+        else:
+            complete_method = getattr(self._inner, "complete", None)
+            if not callable(complete_method):
+                raise TypeError("Model client provides neither turn() nor complete().")
+            legacy: str | ModelResponse = complete_method(list(request.messages))
+            if isinstance(legacy, str):
+                result = ModelTurn(
+                    text=legacy,
+                    finish_state=ModelFinishState.STOP,
+                    model="mock-model",
+                )
+            else:
+                result = ModelTurn(
+                    text=legacy.content,
+                    finish_state=ModelFinishState.STOP,
+                    model=legacy.model,
+                    usage=ModelUsage(
+                        input_tokens=legacy.input_tokens,
+                        output_tokens=legacy.output_tokens,
+                    ),
+                )
+        self._box["input_tokens"] += result.usage.input_tokens
+        self._box["output_tokens"] += result.usage.output_tokens
         return result
 
 

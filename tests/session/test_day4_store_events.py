@@ -121,7 +121,7 @@ def test_store_migrates_schema_v1_with_runtime_defaults(
 
     migrated = store.load(session.manifest.session_id)
 
-    assert migrated.manifest.schema_version == 2
+    assert migrated.manifest.schema_version == 3
     assert migrated.runtime_state.step_count == 0
     assert migrated.runtime_state.recent_messages == ()
 

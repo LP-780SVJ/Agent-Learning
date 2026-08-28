@@ -93,10 +93,28 @@ class EvalRunConfig(BaseModel):
     repair_enabled: bool = True
     compaction_mode: str = "structured"
     context_budget: int = Field(default=4096, gt=0)
+    max_output_tokens: int = Field(default=4096, gt=0)
+    model_context_window: int = Field(default=32768, gt=0)
+    safety_headroom_tokens: int = Field(default=1024, ge=0)
+    native_tools: bool = True
+    reasoning_enabled: bool = False
     task_timeout_seconds: int = Field(default=900, gt=0)
     max_steps: int = Field(default=20, gt=0)
     max_repairs: int = Field(default=3, ge=0)
     max_protocol_repairs: int = Field(default=2, ge=0, le=2)
+
+    @model_validator(mode="after")
+    def validate_model_budget(self) -> EvalRunConfig:
+        if self.context_budget > (
+            self.model_context_window
+            - self.max_output_tokens
+            - self.safety_headroom_tokens
+        ):
+            raise ValueError(
+                "context_budget must reserve max_output_tokens and "
+                "safety_headroom_tokens"
+            )
+        return self
 
 
 class PatchActorResult(BaseModel):
