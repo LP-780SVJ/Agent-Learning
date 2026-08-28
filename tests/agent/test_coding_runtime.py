@@ -29,6 +29,11 @@ from codeteam.sandbox.preflight import (
     DockerSandboxPreflight,
     SandboxPreflightResult,
 )
+from codeteam.sandbox.verification_preflight import (
+    DockerVerificationEnvironmentPreflight,
+    VerificationEnvironmentCheckResult,
+    VerificationEnvironmentMetadata,
+)
 from codeteam.schemas.messages import Message
 from codeteam.schemas.tool_calls import ToolCall
 
@@ -39,6 +44,20 @@ def _sandbox_preflight_available(monkeypatch: pytest.MonkeyPatch) -> None:
         DockerSandboxPreflight,
         "check",
         lambda self, workspace_root: SandboxPreflightResult(available=True),
+    )
+    monkeypatch.setattr(
+        DockerVerificationEnvironmentPreflight,
+        "check",
+        lambda self, workspace_root, requirement: VerificationEnvironmentCheckResult(
+            available=True,
+            category="verification_toolchain_ready",
+            metadata=VerificationEnvironmentMetadata(
+                configured_image="codeteam-sandbox:latest",
+                python_version="Python test-double",
+                pytest_version="pytest test-double",
+                capabilities=requirement.capabilities,
+            ),
+        ),
     )
 
 

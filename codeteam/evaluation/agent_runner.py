@@ -216,6 +216,13 @@ class AgentEvalRunner:
                     sandbox_preflight_category=(
                         actor_result.sandbox_preflight_category
                     ),
+                    verification_preflight_available=(
+                        actor_result.verification_preflight_available
+                    ),
+                    verification_preflight_category=(
+                        actor_result.verification_preflight_category
+                    ),
+                    verification_environment=actor_result.verification_environment,
                 )
             )
 
@@ -275,9 +282,33 @@ class AgentEvalRunner:
                             "task_id": result.task_id,
                             "available": result.sandbox_preflight_available,
                             "category": result.sandbox_preflight_category,
+                            "sandbox": {
+                                "available": result.sandbox_preflight_available,
+                                "category": result.sandbox_preflight_category,
+                            },
+                            "verification_environment": {
+                                "available": result.verification_preflight_available,
+                                "category": result.verification_preflight_category,
+                                "metadata": (
+                                    result.verification_environment.model_dump(
+                                        mode="json"
+                                    )
+                                    if result.verification_environment is not None
+                                    else None
+                                ),
+                            },
                         }
                         for result in results
                     ],
+                    "verification_contract": {
+                        "logical_capabilities": ["python", "pytest"],
+                        "runtime_execution": "docker",
+                        "runtime_python": "python",
+                        "grader_execution": "trusted_host_subprocess",
+                        "grader_environment": (
+                            self.grader.verification_environment_metadata()
+                        ),
+                    },
                     "pristine_oracle_check": True,
                     "provider_runtime": (
                         self.provider_metadata()
@@ -649,7 +680,10 @@ def _runtime_to_actor_result(
         status = PatchActorStatus.PROVIDER_BLOCKED
     elif result.failure_category == "no_patch":
         status = PatchActorStatus.NO_PATCH
-    elif result.failure_category == "sandbox_unavailable":
+    elif result.failure_category in {
+        "sandbox_unavailable",
+        "verification_environment_failed",
+    }:
         status = PatchActorStatus.ENVIRONMENT_BLOCKED
     elif result.failure_category in {"patch_failed", "security_failure"}:
         status = PatchActorStatus.PATCH_FAILED
@@ -676,6 +710,9 @@ def _runtime_to_actor_result(
         changed_files=result.changed_files,
         sandbox_preflight_available=result.sandbox_preflight_available,
         sandbox_preflight_category=result.sandbox_preflight_category,
+        verification_preflight_available=result.verification_preflight_available,
+        verification_preflight_category=result.verification_preflight_category,
+        verification_environment=result.verification_environment,
         applied_patch=bool(result.changed_files),
         error=result.error,
         failure_category=result.failure_category,

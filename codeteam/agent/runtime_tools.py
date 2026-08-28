@@ -15,7 +15,10 @@ from codeteam.agent.editing import (
     file_edits_to_patch,
     text_replacements_to_patch,
 )
-from codeteam.agent.runtime_models import VerificationEvidence
+from codeteam.agent.runtime_models import (
+    VerificationEvidence,
+    VerificationOutcomeCategory,
+)
 from codeteam.agent.verification import (
     DEFAULT_TEST_TIMEOUT_SECONDS,
     normalize_allowed_verification_commands,
@@ -31,6 +34,10 @@ from codeteam.execution.safe_execution_service import (
     SafePatchExecutionRequest,
 )
 from codeteam.git.workspace import GitWorkspace
+from codeteam.sandbox.models import SandboxProfile
+from codeteam.sandbox.verification_preflight import (
+    classify_verification_environment_failure,
+)
 from codeteam.tools.base import RegisteredTool
 from codeteam.tools.files import create_file_tools
 from codeteam.tools.registry import ToolRegistry
@@ -77,6 +84,7 @@ class RuntimeEvidence:
     repair_attempts: int = 0
     patch_attempts: int = 0
     paused_reason: str | None = None
+    paused_category: str | None = None
     checkpoint_ids: list[str] = field(default_factory=list)
     repair_duration_ms: int = 0
     required_verification_commands: tuple[tuple[str, ...], ...] = ()
@@ -104,6 +112,7 @@ def create_runtime_tools(
     checkpoint_state_root: Path,
     safe_execution: SafeExecutionService,
     evidence: RuntimeEvidence,
+    sandbox_profile: SandboxProfile | None = None,
     allowed_verification_commands: tuple[tuple[str, ...], ...] = (),
     required_verification_commands: tuple[tuple[str, ...], ...] = (),
     max_repairs: int = 3,
@@ -116,6 +125,7 @@ def create_runtime_tools(
         required_verification_commands
     )
     evidence.required_verification_commands = canonical_required_commands
+    execution_profile = sandbox_profile or SandboxProfile()
     registry = ToolRegistry()
     for tool in create_file_tools(root):
         if tool.name in {"list_files", "read_file", "search_code"}:
@@ -192,17 +202,35 @@ def create_runtime_tools(
                     agent_id="coding-agent-runtime",
                     reason="Agent-visible verification",
                     timeout_seconds=parsed.timeout_seconds,
-                )
+                ),
+                sandbox_profile=execution_profile,
             )
         )
         command = result.command_result
+        environment_failure_category = (
+            classify_verification_environment_failure(argv, command)
+            if command is not None
+            else None
+        )
+        passed = (
+            result.status is SafeExecutionStatus.COMPLETED
+            and command is not None
+            and command.exit_code == 0
+        )
+        if passed:
+            outcome_category = VerificationOutcomeCategory.PASSED
+        elif (
+            environment_failure_category is not None
+            or result.status is SafeExecutionStatus.SANDBOX_FAILED
+        ):
+            outcome_category = VerificationOutcomeCategory.ENVIRONMENT_FAILED
+        else:
+            outcome_category = VerificationOutcomeCategory.TEST_FAILED
         item = VerificationEvidence(
             argv=argv,
-            passed=(
-                result.status is SafeExecutionStatus.COMPLETED
-                and command is not None
-                and command.exit_code == 0
-            ),
+            passed=passed,
+            category=outcome_category,
+            environment_failure_category=environment_failure_category,
             exit_code=command.exit_code if command else None,
             duration_ms=command.duration_ms if command else 0.0,
             stdout=command.stdout if command else "",
@@ -218,6 +246,12 @@ def create_runtime_tools(
             SafeExecutionStatus.SANDBOX_FAILED,
         }:
             evidence.paused_reason = result.error or result.status.value
+        if environment_failure_category is not None:
+            evidence.paused_category = "verification_environment_failed"
+            evidence.paused_reason = (
+                "Verification environment failed during required command "
+                f"execution ({environment_failure_category})."
+            )
         return item.model_dump_json()
 
     def git_status(_: BaseModel) -> str:

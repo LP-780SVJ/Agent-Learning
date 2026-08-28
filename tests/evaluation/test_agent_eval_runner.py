@@ -30,6 +30,7 @@ from codeteam.evaluation.agent_models import (
 from codeteam.evaluation.agent_runner import (
     AgentEvalDatasetError,
     AgentEvalRunner,
+    _runtime_to_actor_result,
     _visible_verification_argv,
     load_agent_eval_tasks,
     summarize_agent_eval_results,
@@ -40,6 +41,9 @@ from codeteam.evaluation.patch_actor import (
     patch_from_structured_file_edits,
 )
 from codeteam.git.workspace import GitWorkspace
+from codeteam.sandbox.verification_preflight import (
+    VerificationEnvironmentMetadata,
+)
 from codeteam.schemas.messages import Message
 from codeteam.task.models import create_task_spec
 
@@ -84,6 +88,34 @@ class EnvironmentBlockedRuntime:
             sandbox_preflight_available=False,
             sandbox_preflight_category="workspace_mount_unavailable",
         )
+
+
+def test_verification_environment_failure_maps_to_environment_blocked() -> None:
+    runtime_result = CodingAgentRunResult(
+        task_id="T01",
+        status=RuntimeStatus.PAUSED,
+        summary="verification toolchain unavailable",
+        workspace_root=Path("/tmp/workspace"),
+        failure_category="verification_environment_failed",
+        error="No module named pytest",
+        sandbox_preflight_available=True,
+        verification_preflight_available=False,
+        verification_preflight_category="pytest_unavailable",
+        verification_environment=VerificationEnvironmentMetadata(
+            configured_image="codeteam-sandbox:latest",
+            python_version="Python 3.11.15",
+        ),
+    )
+
+    actor = _runtime_to_actor_result(
+        runtime_result,
+        EvalRunConfig(run_id="verification-blocked"),
+    )
+
+    assert actor.status is PatchActorStatus.ENVIRONMENT_BLOCKED
+    assert actor.failure_category == "verification_environment_failed"
+    assert actor.verification_preflight_available is False
+    assert actor.verification_preflight_category == "pytest_unavailable"
 
 
 def test_prepare_workspace_applies_verified_setup_patch(tmp_path: Path) -> None:
@@ -176,7 +208,20 @@ def test_eval_separates_execution_root_and_reports_environment_block(
             "task_id": "T01",
             "available": False,
             "category": "workspace_mount_unavailable",
+            "sandbox": {
+                "available": False,
+                "category": "workspace_mount_unavailable",
+            },
+            "verification_environment": {
+                "available": None,
+                "category": None,
+                "metadata": None,
+            },
         }
+    ]
+    assert manifest["verification_contract"]["logical_capabilities"] == [
+        "python",
+        "pytest",
     ]
 
 

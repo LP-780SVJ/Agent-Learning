@@ -43,6 +43,47 @@ class AgentGrader:
         self.hidden_root = (hidden_root or self.project_root / "eval_hidden" / "week4").resolve()
         self.python = self.project_root / ".venv" / "bin" / "python"
 
+    def verification_environment_metadata(self) -> dict[str, object]:
+        """Record the trusted-host side of the logical Python+pytest contract."""
+
+        python = self._run_metadata_probe((str(self.python), "--version"))
+        pytest = self._run_metadata_probe(
+            (str(self.python), "-m", "pytest", "--version")
+        )
+        return {
+            "python_executable": str(self.python),
+            "python_version": python[0],
+            "pytest_version": pytest[0],
+            "python_probe_error": python[1],
+            "pytest_probe_error": pytest[1],
+        }
+
+    def _run_metadata_probe(
+        self,
+        argv: tuple[str, ...],
+    ) -> tuple[str | None, str | None]:
+        try:
+            result = subprocess.run(  # noqa: UP022
+                list(argv),
+                cwd=self.project_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                shell=False,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return None, f"{type(error).__name__}: {error}"
+        detail = (result.stdout or result.stderr).strip().splitlines()
+        version = detail[0] if result.returncode == 0 and detail else None
+        probe_error = (
+            None
+            if result.returncode == 0
+            else (detail[0] if detail else "probe failed")
+        )
+        return version, probe_error
+
     def grade(
         self,
         *,

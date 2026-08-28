@@ -6,6 +6,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, model_validator
 
 from codeteam.llm.base import ModelFinishState, ModelResponseMode
+from codeteam.sandbox.verification_preflight import VerificationEnvironmentMetadata
 from codeteam.schemas.messages import Message
 from codeteam.schemas.tool_calls import ToolCall
 
@@ -20,6 +21,12 @@ class CompactionMode(str, Enum):
     STRUCTURED = "structured"
     NONE = "none"
     NAIVE = "naive"
+
+
+class VerificationOutcomeCategory(str, Enum):
+    PASSED = "passed"
+    TEST_FAILED = "test_failed"
+    ENVIRONMENT_FAILED = "verification_environment_failed"
 
 
 class CodingAgentRunRequest(BaseModel):
@@ -63,6 +70,8 @@ class CodingAgentRunRequest(BaseModel):
 class VerificationEvidence(BaseModel):
     argv: tuple[str, ...]
     passed: bool
+    category: VerificationOutcomeCategory = VerificationOutcomeCategory.TEST_FAILED
+    environment_failure_category: str | None = None
     exit_code: int | None = None
     duration_ms: float = 0.0
     stdout: str = ""
@@ -117,6 +126,9 @@ class CodingAgentRunResult(BaseModel):
     error: str | None = None
     sandbox_preflight_available: bool | None = None
     sandbox_preflight_category: str | None = None
+    verification_preflight_available: bool | None = None
+    verification_preflight_category: str | None = None
+    verification_environment: VerificationEnvironmentMetadata | None = None
     messages: tuple[Message, ...] = ()
     model_outputs: tuple[ModelOutputEvidence, ...] = ()
     events: tuple[str, ...] = ()

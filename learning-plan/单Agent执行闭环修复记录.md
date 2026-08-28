@@ -3,7 +3,7 @@
 > 文档状态：持续维护  
 > 首次建立：2026-08-27  
 > 当前分支：`week4`  
-> 当前记录终点：Model Client 已升级为 Agent Turn；等待用户执行 B01 native-tool smoke
+> 当前记录终点：Agent Turn 已通过用户 B01 暴露真实 verification toolchain 缺口；第一刀半已离线与 Docker 验证，等待用户复验 B01
 > 维护范围：从第一次真实 15-task benchmark 开始，持续记录单 Agent 生产闭环的故障、修复、实验和架构演进
 
 ## 1. 文档目的
@@ -959,3 +959,120 @@ Native vs textual ablation: NOT_RUN
 第二刀仍然 pending：Runtime completion ownership / `READY_TO_FINALIZE`。
 本轮没有修改 completion state machine、submit-result semantics 或
 repeated-action completion handshake，不能宣称 SingleAgent 已完全解决。
+
+### 2026-08-29：第一刀半——Verification Environment Contract
+
+#### 真实 Failure Case
+
+第一刀之后，用户亲自运行 B01，native transport 已经稳定工作：
+
+```text
+native_tools_actual=true
+response_mode_actual=native_tools
+protocol_repair_attempt_count=0
+protocol_failed_count=0
+read_file → apply_patch → real Git diff
+```
+
+模型正确地把 expired refresh token 的 generic error 改为异常消息。之后
+Runtime 执行 authoritative task command：
+
+```text
+python -m pytest tests/task_verification/test_b01.py -q
+```
+
+Docker 返回：
+
+```text
+/usr/local/bin/python: No module named pytest
+```
+
+Agent 根据 `AGENTS.md` 尝试 `uv run pytest`，但 exact verification allowlist
+正确拒绝替代命令；再次执行 required command 仍然缺 pytest，最终形成
+`REPEATED_ACTION`。可信宿主机 Grader 随后证明 public task verification、
+regression、hidden acceptance 和 security 全部通过。
+
+完整 Failure Case：
+[FC-W4-D7-01](../docs/failure_cases/FC-W4-D7-01.md)。
+
+#### 根因
+
+```text
+Verification command contract
+!=
+Verification environment capability
+```
+
+旧 `DockerSandboxPreflight` 的固定 `test -d /workspace` 只能证明 Docker CLI、
+daemon、image、mount 与 container startup。`No module named pytest` 的 exit 1
+却被当作普通 `VerificationEvidence(passed=False)`，因此基础设施错误进入了
+Agent code repair/no-progress 路径。
+
+确认的 Root Cause：
+
+> Runtime verification commands and the sandbox verification environment did
+> not share an explicit compatibility contract.
+
+#### 设计选择
+
+采用 [DD-W4-D7-08](../docs/design_decisions/DD-W4-D7-08.md)：
+
+```text
+Sandbox Infrastructure Preflight
+  → test -d /workspace
+
+Verification Environment Preflight
+  → python --version
+  → python -m pytest --version
+
+Task Verification
+  → exact command → SafeExecutionService → Docker
+```
+
+项目新增 `docker/sandbox/`：Python `3.11.15-slim-bookworm` 同时固定 tag 与
+digest，pytest `9.1.1` 及直接运行依赖使用精确版本。build context 只包含
+Dockerfile 与 requirements，不复制 host `.venv`、仓库或 secrets；Runtime
+期间不联网安装、不 pull、不自动重建镜像。
+
+关键不变量：
+
+- verification preflight 失败时 Provider calls、steps、tool calls、tokens、
+  cost 与 repairs 都为 0；
+- fixed probe 由 Runtime 构造，不接受模型/任务的任意 argv，也不放宽
+  `python -c` CommandPolicy；
+- `No module named pytest` 分类为 `verification_environment_failed /
+  pytest_unavailable`，不再演化成 repair 或 repeated action；
+- 普通 pytest assertion failure 仍是 `test_failed`，继续作为代码修复反馈；
+- Runtime Docker 与 trusted-host Grader 可以使用不同物理 Python，但 manifest
+  同时保存 logical capabilities、image identity 和双方版本证据；
+- task-specific command authoritative；AGENTS discovered command 只是一般指导。
+
+#### 验证结果
+
+```text
+相关 Sandbox/Execution/Verification/Agent/Evaluation/CLI:
+374 passed, 8 skipped in 19.04s
+
+最终普通 sandbox 全量:
+1322 passed, 8 skipped in 29.77s
+
+真实 Docker（最终 digest-pinned image）:
+58 passed in 2.78s
+```
+
+真实 Docker 覆盖 image ID、Python `3.11.15`、pytest `9.1.1`、只读 root、
+无网络、workspace mount 和 Docker socket 不可见。普通 sandbox 的 8 个 skip
+是受限执行环境无法访问 Docker socket；提升权限后的真实 Docker suite 无 skip。
+
+#### 未运行项与边界
+
+```text
+Post-fix B01: NOT_RUN_BY_CODER / pending user validation
+11-task benchmark: NOT_RUN
+Native/text ablation: NOT_RUN
+Completion Ownership / READY_TO_FINALIZE: pending
+```
+
+本轮只保证 Week4 Python + pytest 最小 contract。仓库未来需要的第三方运行依赖、
+Node/Java/Rust/uv 等必须通过后续显式环境契约扩展；没有新增动态 provisioning、
+PackageInstaller 或通用 DependencyResolver。

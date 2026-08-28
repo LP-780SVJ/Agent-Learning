@@ -11,6 +11,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
 
+from codeteam.sandbox.verification_preflight import VerificationEnvironmentMetadata
+
 
 class AgentEvalSplit(str, Enum):
     DEV = "dev"
@@ -148,6 +150,9 @@ class PatchActorResult(BaseModel):
     events: tuple[str, ...] = ()
     sandbox_preflight_available: bool | None = None
     sandbox_preflight_category: str | None = None
+    verification_preflight_available: bool | None = None
+    verification_preflight_category: str | None = None
+    verification_environment: VerificationEnvironmentMetadata | None = None
 
 
 class GraderCommandResult(BaseModel):
@@ -226,6 +231,9 @@ class AgentEvalTaskResult(BaseModel):
     error: str | None = None
     sandbox_preflight_available: bool | None = None
     sandbox_preflight_category: str | None = None
+    verification_preflight_available: bool | None = None
+    verification_preflight_category: str | None = None
+    verification_environment: VerificationEnvironmentMetadata | None = None
 
 
 class AgentEvalRunSummary(BaseModel):

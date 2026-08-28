@@ -41,7 +41,14 @@ from codeteam.llm.openai_compatible import (
     build_openai_compatible_client,
     resolve_llm_config,
 )
+from codeteam.sandbox.models import DEFAULT_SANDBOX_IMAGE
 from codeteam.sandbox.preflight import SandboxPreflight, SandboxPreflightResult
+from codeteam.sandbox.verification_preflight import (
+    VerificationEnvironmentCheckResult,
+    VerificationEnvironmentMetadata,
+    VerificationEnvironmentPreflight,
+    VerificationEnvironmentRequirement,
+)
 from codeteam.session.errors import (
     RepositoryMismatchError,
     SessionAlreadyActiveError,
@@ -250,6 +257,7 @@ def run_agent_task(request: RunRequest) -> None:
         state_callback=persist_state,
         operation_callback=persist_operation,
         sandbox_preflight=_test_sandbox_preflight(),
+        verification_preflight=_test_verification_preflight(),
     )
     runtime_request = CodingAgentRunRequest(
         task_id=task_id,
@@ -614,6 +622,7 @@ def resume_agent_session(request: ResumeRequest) -> None:
         state_callback=persist_state,
         operation_callback=persist_operation,
         sandbox_preflight=_test_sandbox_preflight(),
+        verification_preflight=_test_verification_preflight(),
     )
     result = runtime.run(
         CodingAgentRunRequest(
@@ -910,4 +919,29 @@ class _AvailableTestPreflight:
 def _test_sandbox_preflight() -> SandboxPreflight | None:
     if os.environ.get("CODETEAM_CLI_TEST_WAIT_AFTER_SESSION") == "1":
         return _AvailableTestPreflight()
+    return None
+
+
+class _AvailableTestVerificationPreflight:
+    def check(
+        self,
+        workspace_root: Path,
+        requirement: VerificationEnvironmentRequirement,
+    ) -> VerificationEnvironmentCheckResult:
+        del workspace_root
+        return VerificationEnvironmentCheckResult(
+            available=True,
+            category="verification_toolchain_ready",
+            metadata=VerificationEnvironmentMetadata(
+                configured_image=DEFAULT_SANDBOX_IMAGE,
+                python_version="Python test-double",
+                pytest_version="pytest test-double",
+                capabilities=requirement.capabilities,
+            ),
+        )
+
+
+def _test_verification_preflight() -> VerificationEnvironmentPreflight | None:
+    if os.environ.get("CODETEAM_CLI_TEST_WAIT_AFTER_SESSION") == "1":
+        return _AvailableTestVerificationPreflight()
     return None

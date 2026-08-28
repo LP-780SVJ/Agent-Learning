@@ -22,7 +22,13 @@ from codeteam.execution.safe_execution_service import SafeExecutionService
 from codeteam.git.workspace import GitWorkspace
 from codeteam.limits import AgentLoopLimits
 from codeteam.llm.base import LegacyModelClient, ModelClient
+from codeteam.sandbox.models import SandboxProfile
 from codeteam.sandbox.preflight import DockerSandboxPreflight, SandboxPreflight
+from codeteam.sandbox.verification_preflight import (
+    DockerVerificationEnvironmentPreflight,
+    VerificationEnvironmentPreflight,
+    VerificationEnvironmentRequirement,
+)
 from codeteam.schemas.final_output import CompletionStatus
 from codeteam.schemas.messages import Message
 from codeteam.state import AgentLoopState, StopReason
@@ -46,13 +52,25 @@ class CodingAgentRuntime:
         state_callback: StateCallback | None = None,
         operation_callback: OperationCallback | None = None,
         sandbox_preflight: SandboxPreflight | None = None,
+        verification_preflight: VerificationEnvironmentPreflight | None = None,
+        sandbox_profile: SandboxProfile | None = None,
     ) -> None:
         self._model_client = model_client
         self._safe_execution = safe_execution or SafeExecutionService()
         self._context_service = context_service or ContextApplicationService()
         self._state_callback = state_callback
         self._operation_callback = operation_callback
-        self._sandbox_preflight = sandbox_preflight or DockerSandboxPreflight()
+        self._sandbox_profile = sandbox_profile or SandboxProfile()
+        preflight_profile = self._sandbox_profile.model_copy(
+            update={"workspace_write": False}
+        )
+        self._sandbox_preflight = sandbox_preflight or DockerSandboxPreflight(
+            profile=preflight_profile
+        )
+        self._verification_preflight = (
+            verification_preflight
+            or DockerVerificationEnvironmentPreflight(profile=preflight_profile)
+        )
 
     def run(self, request: CodingAgentRunRequest) -> CodingAgentRunResult:
         root = request.workspace_root.resolve(strict=True)
@@ -72,13 +90,38 @@ class CodingAgentRuntime:
                     AgentEventType.SANDBOX_PREFLIGHT_FAILED.value,
                 ),
             )
+        required_verification_commands = (
+            request.task_verification_commands or request.verification_commands
+        )
+        verification_preflight = self._verification_preflight.check(
+            root,
+            VerificationEnvironmentRequirement.from_commands(
+                required_verification_commands
+            ),
+        )
+        if not verification_preflight.available:
+            return CodingAgentRunResult(
+                task_id=request.task_id,
+                status=RuntimeStatus.PAUSED,
+                summary="Verification environment is unavailable.",
+                workspace_root=root,
+                failure_category="verification_environment_failed",
+                error=verification_preflight.error,
+                sandbox_preflight_available=True,
+                verification_preflight_available=False,
+                verification_preflight_category=verification_preflight.category,
+                verification_environment=verification_preflight.metadata,
+                events=(
+                    AgentEventType.SANDBOX_PREFLIGHT_STARTED.value,
+                    AgentEventType.SANDBOX_PREFLIGHT_PASSED.value,
+                    AgentEventType.VERIFICATION_PREFLIGHT_STARTED.value,
+                    AgentEventType.VERIFICATION_PREFLIGHT_FAILED.value,
+                ),
+            )
         checkpoint_root = request.checkpoint_state_root or (
             root.parent / ".codeteam" / "checkpoints" / request.task_id
         )
         evidence = RuntimeEvidence()
-        required_verification_commands = (
-            request.task_verification_commands or request.verification_commands
-        )
         allowed_verification_commands = tuple(
             dict.fromkeys(
                 (*request.task_verification_commands, *request.verification_commands)
@@ -90,6 +133,7 @@ class CodingAgentRuntime:
             checkpoint_state_root=checkpoint_root,
             safe_execution=self._safe_execution,
             evidence=evidence,
+            sandbox_profile=self._sandbox_profile,
             allowed_verification_commands=allowed_verification_commands,
             required_verification_commands=required_verification_commands,
             max_repairs=request.max_repairs,
@@ -197,11 +241,16 @@ class CodingAgentRuntime:
             failure_category=category,
             error=error,
             sandbox_preflight_available=True,
+            verification_preflight_available=True,
+            verification_preflight_category=verification_preflight.category,
+            verification_environment=verification_preflight.metadata,
             messages=tuple(loop.messages),
             model_outputs=tuple(loop.model_outputs),
             events=(
                 AgentEventType.SANDBOX_PREFLIGHT_STARTED.value,
                 AgentEventType.SANDBOX_PREFLIGHT_PASSED.value,
+                AgentEventType.VERIFICATION_PREFLIGHT_STARTED.value,
+                AgentEventType.VERIFICATION_PREFLIGHT_PASSED.value,
                 *(event.event_type.value for event in loop.events),
             ),
         )
@@ -297,6 +346,12 @@ class CodingAgentRuntime:
                 "in tool arguments. Use python -m pytest. Commands are argv arrays; shell "
                 "strings, pipes, and redirection are unavailable."
             ),
+            "verification_command_priority": (
+                "Task-specific verification commands supplied by the Runtime are "
+                "authoritative for completion. Repository-discovered commands are "
+                "general guidance and are not substitutes unless the Runtime lists "
+                "them as visible verification commands."
+            ),
         }
         user = {
             "task": request.task,
@@ -322,7 +377,11 @@ class CodingAgentRuntime:
     @staticmethod
     def _finalize(loop, evidence, changed_files, diff):
         if evidence.paused_reason:
-            return RuntimeStatus.PAUSED, "execution_paused", evidence.paused_reason
+            return (
+                RuntimeStatus.PAUSED,
+                evidence.paused_category or "execution_paused",
+                evidence.paused_reason,
+            )
         if loop.stop_reason is StopReason.PROVIDER_ERROR:
             return RuntimeStatus.FAILED, "provider_blocked", loop.error
         if loop.stop_reason is StopReason.INTERNAL_ERROR:

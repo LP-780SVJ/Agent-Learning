@@ -21,6 +21,7 @@ The first four weeks are now at a closeout baseline.
 | Git patch/worktree/checkpoint | Implemented | `tests/git/` |
 | Command policy and approval | Implemented | `tests/execution/` |
 | Docker sandbox boundary | Implemented | `tests/sandbox/`, real Docker run passed with terminal access |
+| Verification environment contract | Python + pytest implemented | Separate toolchain preflight before Provider execution |
 | Repair and failure recovery | Implemented foundation | `tests/repair/`, `tests/failures/`, `tests/agent/` |
 | Durable session and resume | Implemented | `tests/session/` |
 | CLI product layer | Implemented | `tests/cli/`, subprocess E2E |
@@ -32,8 +33,8 @@ The first four weeks are now at a closeout baseline.
 Latest closeout evidence:
 
 ```text
-normal sandbox:      1308 passed, 6 skipped
-Docker integration:  42 passed in prior elevated closeout run
+normal sandbox:      1322 passed, 8 skipped
+Docker integration:  58 passed with the project-owned image
 ```
 
 `codeteam run` now uses the real provider-neutral `CodingAgentRuntime`. Its
@@ -44,6 +45,13 @@ as compatibility fallback. It creates a linked worktree from request-time
 runs visible verification in Docker, and keeps the worktree for review.
 `agent-eval` remains a thin batch shell over the same Runtime; hidden acceptance
 stays outside the Agent in `AgentGrader`.
+
+The Runtime now separates Docker infrastructure availability from verification
+toolchain readiness. Before the first Provider request it first proves that the
+configured image can start with the real worktree mount, then runs fixed
+`python --version` and `python -m pytest --version` probes. Missing Python or
+pytest returns `verification_environment_failed` with zero model calls instead
+of becoming a test failure, repair loop, or repeated action.
 
 ## Quick Start
 
@@ -140,6 +148,11 @@ provider-neutral extension points.
   the real worktree mount. Missing CLI/daemon/image and invisible bind sources
   return `PAUSED + sandbox_unavailable` with zero model tokens or cost. A
   backend failure during verification also pauses immediately.
+- A second read-only verification preflight uses the same configured image and
+  records the image ID/digest, Python version, pytest version, probe argv, and
+  failure category. Its probe argv is Runtime-owned and never comes from the
+  model. Agent-issued `run_tests` still goes through CommandPolicy, the exact
+  task allowlist, SafeExecutionService, and Docker.
 - Verification argv and `cwd` are workspace-relative (`tests/auth`, `.`). The
   Runtime canonicalizes legacy `/workspace/...` inputs before policy checks,
   while Docker alone owns the host-worktree to `/workspace` mapping.
@@ -169,6 +182,7 @@ CLI
        -> initial Context Engine snapshot
        -> ModelRequest -> Provider Adapter -> ModelTurn
        -> native action loop / textual dialect firewall fallback
+       -> sandbox infrastructure preflight -> verification environment preflight
        -> list/read/search/apply_patch/run_tests/git_status/git_diff
        -> final diff + visible verification gate
   -> Domain modules
@@ -322,8 +336,9 @@ Capabilities:
 
 Important limitation: the 11 tasks are explicitly a `dev` suite, not held-out
 evidence. The native Agent Turn path has offline coverage only. The user must
-run B01 first; the 11-task benchmark and native/text ablation remain `NOT_RUN`
-until B01 is stable and Completion Ownership is fixed. Null preflight proves
+rerun B01 after the verification environment fix; that validation is
+`NOT_RUN_BY_CODER`. The 11-task benchmark and native/text ablation remain
+`NOT_RUN` until B01 is stable and Completion Ownership is fixed. Null preflight proves
 harness discrimination; the non-blind Codex reference proves task solvability,
 not model quality.
 
@@ -373,6 +388,8 @@ null V3:       0/11 success
 Codex reference: 11/11 success (non-blind oracle-informed solvability check)
 real LLM V2:  first unified Runtime run 0/11 due protocol integration failure
 agent-turn fix: offline native action loop passes; B01 NOT_RUN_BY_CODER
+prior user B01: native patch correct; Docker lacked pytest; external grader passed
+verification-contract fix: offline + real Docker passed; post-fix B01 NOT_RUN_BY_CODER
 11-task benchmark: NOT_RUN
 native/text ablation: NOT_RUN
 ```
@@ -388,14 +405,14 @@ and provider failures must be reported separately from Agent failures.
 All 11 tasks are a development benchmark. Their results measure regression and
 engineering progress, not blind held-out generalization.
 
-### User-run B01 native-tool smoke
+### User-run B01 verification-contract smoke
 
 The coder does not call a real LLM or read/print/persist the API key. Configure
 `CODETEAM_LLM_BASE_URL`, `CODETEAM_LLM_API_KEY`, and `CODETEAM_LLM_MODEL` in the
 environment or ignored `secrets.local.env`, then run this personally:
 
 ```bash
-RUN_DIR="evals/week4/agent_runs/native_tool_b01_$(date +%Y%m%d_%H%M%S)"
+RUN_DIR="evals/week4/agent_runs/verification_contract_b01_$(date +%Y%m%d_%H%M%S)"
 .venv/bin/python -m codeteam.cli.app agent-eval \
   --suite evals/week4/agent_task_suite_v1.jsonl \
   --output "$RUN_DIR" \
@@ -417,6 +434,9 @@ Inspect these fields after the run:
 - `manifest.json`: `provider_runtime.native_tools_requested/actual`,
   `response_mode_actual`, `reasoning_enabled`, `max_output_tokens`, input budget
   and sandbox/worktree roots.
+- `manifest.json`: separate sandbox and verification-environment preflight
+  results, configured image, image ID/digest, Runtime Python/pytest versions,
+  and trusted-host Grader Python/pytest evidence.
 - result/summary: actor status, failure category, steps, tool calls, patch
   attempts, verification, changed files, provider/environment blocking.
 - `_artifacts/B01/model_outputs.jsonl`: `finish_state`, `finish_reason`,
@@ -460,12 +480,22 @@ Common commands:
 .venv/bin/python -m pytest tests/evaluation/test_week4_public_oracles.py -q
 ```
 
+Build the project-owned verification image before production/evaluation runs:
+
+```bash
+docker build -t codeteam-sandbox:latest -f docker/sandbox/Dockerfile docker/sandbox
+```
+
+The build context contains only the digest-pinned Python 3.11 Dockerfile and
+the exact Python/pytest requirements. It does not copy the repository, host
+`.venv`, or secret files, and Runtime never installs dependencies dynamically.
+
 `pytest.ini` excludes `tests/fixtures/` so fixture repository tests are not collected as project tests.
 
 Docker integration tests require:
 
 - Docker CLI and daemon available.
-- Local image `codeteam-sandbox:latest`.
+- Project-built image `codeteam-sandbox:latest` from `docker/sandbox/`.
 - A host directory visible to Docker.
 
 The Runtime preflight checks all three before spending Provider tokens. For
@@ -491,6 +521,9 @@ When running inside a restricted terminal sandbox, Docker tests may skip. In a u
   but still uses a replaceable approximate counter rather than a
   provider-exact tokenizer.
 - Docker remains a hard execution dependency for production verification; unavailable Docker pauses instead of falling back to host shell.
+- The verification image currently guarantees only Python 3.11 + pytest 9.1.1.
+  It does not infer or install arbitrary repository dependencies or non-Python
+  toolchains; those require a future explicit environment contract.
 - Retrieval evaluation is still mostly Python and local fixtures, not a broad multi-language external benchmark.
 - Medium repo results show the context engine still needs better semantic retrieval and cross-module expansion.
 
@@ -511,7 +544,8 @@ Important directories:
 
 Recommended order:
 
-1. User runs only the documented B01 native-tool smoke and returns its manifest,
+1. User builds the documented image, runs only the B01 verification-contract
+   smoke, and returns its manifest,
    result, model-output evidence, runtime messages, and kept worktree evidence.
 2. Fix any real Provider adapter issue exposed by B01 without weakening the
    SafeExecution or dual-ID boundaries.
