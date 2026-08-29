@@ -223,6 +223,11 @@ class AgentEvalRunner:
                         actor_result.verification_preflight_category
                     ),
                     verification_environment=actor_result.verification_environment,
+                    completion_ready=actor_result.completion_ready,
+                    post_ready_tool_calls=actor_result.post_ready_tool_calls,
+                    verification_workspace_mutations=(
+                        actor_result.verification_workspace_mutations
+                    ),
                 )
             )
 
@@ -555,6 +560,12 @@ def summarize_agent_eval_results(
     run_id: str,
     mode,
 ) -> AgentEvalRunSummary:
+    failure_category_counts: dict[str, int] = {}
+    for result in results:
+        if result.failure_category is not None:
+            failure_category_counts[result.failure_category] = (
+                failure_category_counts.get(result.failure_category, 0) + 1
+            )
     return AgentEvalRunSummary(
         run_id=run_id,
         mode=mode,
@@ -585,6 +596,23 @@ def summarize_agent_eval_results(
         ),
         pristine_task_verification_passed_count=sum(
             result.pristine_task_verification_passed for result in results
+        ),
+        actor_completed_count=sum(
+            result.actor_status is PatchActorStatus.COMPLETED for result in results
+        ),
+        within_budget_count=sum(result.within_budget for result in results),
+        failure_category_counts=failure_category_counts,
+        completion_ready_count=sum(result.completion_ready for result in results),
+        completion_ready_but_actor_failed_count=sum(
+            result.completion_ready
+            and result.actor_status is not PatchActorStatus.COMPLETED
+            for result in results
+        ),
+        post_ready_tool_call_count=sum(
+            result.post_ready_tool_calls for result in results
+        ),
+        verification_workspace_mutation_count=sum(
+            result.verification_workspace_mutations for result in results
         ),
     )
 
@@ -717,6 +745,11 @@ def _runtime_to_actor_result(
         error=result.error,
         failure_category=result.failure_category,
         events=result.events,
+        completion_ready=result.completion_ready,
+        post_ready_tool_calls=result.post_ready_tool_calls,
+        verification_workspace_mutations=(
+            result.verification_workspace_mutations
+        ),
     )
 
 

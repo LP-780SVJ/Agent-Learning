@@ -1076,3 +1076,102 @@ Completion Ownership / READY_TO_FINALIZE: pending
 本轮只保证 Week4 Python + pytest 最小 contract。仓库未来需要的第三方运行依赖、
 Node/Java/Rust/uv 等必须通过后续显式环境契约扩展；没有新增动态 provisioning、
 PackageInstaller 或通用 DependencyResolver。
+
+### 2026-08-29：第二刀——Scratch Isolation + Versioned Completion
+
+#### 历史证据，不是本轮重跑
+
+本轮以用户已有的
+`evals/week4/agent_runs/verification_contract_11task_20260829_134620/`
+为 pre-fix 基线：11 tasks 中 actor success 5、acceptance 9、task verification
+10、regression 10、security 11，provider/environment blocked 都为 0。Coder 没有
+运行 B01、11-task、benchmark、ablation 或任何真实 LLM 命令。
+
+两个 failure case 决定本轮边界：
+
+1. [F03 scratch pollution](../docs/failure_cases/FC-W4-D7-02.md)：pytest
+   `tmp_path` 落入 `/workspace/pytest-of-root`，产生 YAML 和 symlink；后续
+   checkpoint 正确拒绝 symlink，patch 全部 fail closed。
+2. [B02/F01/R03 completion false negative](../docs/failure_cases/FC-W4-D7-03.md)：
+   intended diff、task、regression、hidden、security 都已通过，actor 却在继续
+   test/diff/no-op 后以 `repeated_action` 失败。B03 同时存在 completion false
+   negative 与 scratch 污染。
+
+R02 是真正的语义编码遗漏：executor 的 transient `RuntimeError` 没有重试。
+本轮不修改 prompt/oracle/fixture、不硬编码 R02，也不让 Grader rescue actor。
+
+#### Phase A：验证 scratch 所有权
+
+采用 [DD-W4-D7-09](../docs/design_decisions/DD-W4-D7-09.md)：
+
+- `run_tests` 强制 `workspace_write=False`；patch 仍走 host
+  `SafeExecutionService`；
+- Docker 添加 128 MiB `/tmp` tmpfs，`nosuid,nodev,noexec,mode=1777`；
+- `TMPDIR/TMP/TEMP=/tmp`、`HOME=/tmp/home`、cache 与 pycache 都在 `/tmp`；
+- Runtime 固定 `PYTEST_ADDOPTS=-p no:cacheprovider`；模型不能覆盖 profile；
+- 验证前后 fingerprint tracked + non-ignored untracked 的 path/type/mode/content；
+  symlink 只 hash link metadata，绝不 follow target；
+- mutation 会增加 `workspace_version`、记录
+  `workspace_hygiene_failed`、使 diff review stale 并暂停；不自动删除证据。
+
+没有采用 auto-delete、放宽 CheckpointManager、host writable scratch mount 或继续
+依赖可写 source workspace。
+
+#### Phase B/C：版本化证据与 Runtime-owned finalization
+
+采用 [DD-W4-D7-10](../docs/design_decisions/DD-W4-D7-10.md)：
+
+- `VerificationEvidence.workspace_version` 保留完整历史；
+- `git_diff_checked_version == workspace_version` 才算当前 diff 已审；
+- task-specific commands 和所有 configured broad regression commands 都必须在
+  当前版本通过；没有 task command 时保留 broad fallback；
+- pure `CompletionGate` 还检查 real/safe diff、hygiene 与 execution pause；hidden
+  acceptance 不进入 gate；
+- native `submit_result(summary, notes?)` 只表达完成请求，不接受 tests/status/diff
+  自报字段；accepted/rejected 都生成匹配的 `role=tool`；
+- accepted result 先进入 canonical conversation，再产生 typed terminal completion，
+  不再请求 Provider；mixed batch 全部不执行；
+- ready 后重复调用被 skip 并返回 advisory，持续无进展仍 bounded stop；
+- textual final 只是 compatibility fallback，也必须经过同一个 versioned gate；
+- Session 持久化 fingerprint/version/evidence history/diff-review version/hygiene，
+  resume drift 或旧状态缺字段都会使旧证据 stale，不持久化 trusted ready bit。
+
+Evaluation 新增 actor completed、within budget、failure category histogram、
+completion ready、ready-but-actor-failed、post-ready calls 和 verification workspace
+mutation 计数。外部 Grader 的成功依旧不能升级 actor 状态。
+
+#### 离线验证边界
+
+新增测试覆盖 tempfile/pytest scratch、source read-only、fingerprint 内容变化、
+symlink metadata、patch/checkpoint 在验证后仍可用、版本 stale、task+broad gate、
+submit accepted/rejected/mixed、native pairing、ready duplicate、Session resume 与
+workspace drift、Evaluation metrics。最终验证结果：
+
+```text
+focused sandbox/execution/git/agent/session/evaluation/cli:
+487 passed, 9 skipped
+
+full pytest:
+1336 passed, 9 skipped
+
+real Docker sandbox (elevated Colima access):
+60 passed
+
+touched-path Ruff:
+All checks passed!
+
+touched source Mypy --follow-imports=skip:
+Success: no issues found in 12 source files
+
+git diff --check:
+passed (no output)
+```
+
+最初受限执行的 Docker 命令得到 `51 passed, 9 skipped`，skip 原因为无法连接
+Colima socket；获得 Docker daemon 权限后同一命令实际执行为 `60 passed`。
+
+```text
+Post-fix B01: NOT_RUN_BY_CODER
+Post-fix 11-task: NOT_RUN_BY_CODER
+Benchmark / ablation / real LLM: NOT_RUN_BY_CODER
+```

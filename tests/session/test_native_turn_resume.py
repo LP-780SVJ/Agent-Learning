@@ -71,6 +71,17 @@ def test_session_round_trip_preserves_native_chain_ids_and_budgets(git_repo) -> 
             safety_headroom_tokens=512,
             native_tools=True,
             reasoning_enabled=False,
+            workspace_version=3,
+            workspace_fingerprint="sha256:fingerprint",
+            git_diff_checked_version=3,
+            verification_history=(
+                {
+                    "argv": ["python", "-m", "pytest"],
+                    "passed": True,
+                    "completion_required": True,
+                    "workspace_version": 3,
+                },
+            ),
         ),
     )
 
@@ -80,6 +91,9 @@ def test_session_round_trip_preserves_native_chain_ids_and_budgets(git_repo) -> 
     assert restored.runtime_state.step_count == 4
     assert restored.runtime_state.tool_call_count == 3
     assert restored.runtime_state.max_output_tokens == 2048
+    assert restored.runtime_state.workspace_fingerprint == "sha256:fingerprint"
+    assert restored.runtime_state.git_diff_checked_version == 3
+    assert restored.runtime_state.verification_history[0]["workspace_version"] == 3
     assert restored_assistant.tool_calls is not None
     assert restored_assistant.tool_calls[0].call_id == "step-4-call-1"
     assert restored_assistant.tool_calls[0].provider_call_id == "provider-resume-1"

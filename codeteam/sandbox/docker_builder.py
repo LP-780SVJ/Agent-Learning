@@ -79,6 +79,24 @@ class DockerCommandBuilder:
         ])
 
         argv.extend([
+            "--tmpfs",
+            (
+                "/tmp:rw,nosuid,nodev,noexec,mode=1777,"
+                f"size={profile.tmpfs_mb}m"
+            ),
+        ])
+        for name, value in (
+            ("TMPDIR", "/tmp"),
+            ("TMP", "/tmp"),
+            ("TEMP", "/tmp"),
+            ("HOME", "/tmp/home"),
+            ("XDG_CACHE_HOME", "/tmp/cache"),
+            ("PYTHONPYCACHEPREFIX", "/tmp/pycache"),
+            ("PYTEST_ADDOPTS", "-p no:cacheprovider"),
+        ):
+            argv.extend(["--env", f"{name}={value}"])
+
+        argv.extend([
             "--mount",
             _workspace_mount_spec(context),
         ])

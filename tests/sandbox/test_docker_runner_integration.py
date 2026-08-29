@@ -357,6 +357,35 @@ def test_root_filesystem_write_fails_but_workspace_write_succeeds(
     assert (docker_workspace / "workspace-write.txt").read_text(encoding="utf-8") == "ok"
 
 
+def test_verification_profile_has_read_only_source_and_writable_tmp(
+    docker_availability: DockerAvailability,
+    docker_workspace: Path,
+) -> None:
+    _require_docker(docker_availability)
+
+    result = _run_in_sandbox(
+        docker_workspace,
+        _python(
+            "import os, tempfile\n"
+            "from pathlib import Path\n"
+            "path = Path(tempfile.mkdtemp()) / 'result.txt'\n"
+            "path.write_text('ok')\n"
+            "assert str(path).startswith('/tmp/')\n"
+            "assert os.environ['TMPDIR'] == '/tmp'\n"
+            "try:\n"
+            "    Path('/workspace/pollution.txt').write_text('bad')\n"
+            "except OSError:\n"
+            "    raise SystemExit(0)\n"
+            "raise SystemExit(1)\n"
+        ),
+        profile=SandboxProfile(workspace_write=False),
+    )
+
+    assert result.status is CommandStatus.SUCCESS
+    assert result.exit_code == 0
+    assert not (docker_workspace / "pollution.txt").exists()
+
+
 def test_docker_socket_is_not_mounted_when_docker_available(
     docker_availability: DockerAvailability,
     docker_workspace: Path,

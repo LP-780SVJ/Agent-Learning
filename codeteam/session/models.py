@@ -212,6 +212,10 @@ class AgentRuntimeState(BaseModel):
     recent_messages: tuple[Message, ...] = ()
     retrieved_files: tuple[str, ...] = ()
     last_verification: dict[str, Any] | None = None
+    verification_history: tuple[dict[str, Any], ...] = ()
+    workspace_fingerprint: str | None = None
+    git_diff_checked_version: int | None = None
+    workspace_hygiene_clean: bool = True
     compaction_mode: str = "structured"
     context_budget: int = 4096
     max_output_tokens: int = 4096
@@ -224,6 +228,7 @@ class AgentRuntimeState(BaseModel):
     max_repairs: int = 3
     max_protocol_repairs: int = 2
     verification_commands: tuple[tuple[str, ...], ...] = ()
+    task_verification_commands: tuple[tuple[str, ...], ...] = ()
 
 
 class SessionEvent(BaseModel):

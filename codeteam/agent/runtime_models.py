@@ -27,6 +27,24 @@ class VerificationOutcomeCategory(str, Enum):
     PASSED = "passed"
     TEST_FAILED = "test_failed"
     ENVIRONMENT_FAILED = "verification_environment_failed"
+    WORKSPACE_HYGIENE_FAILED = "workspace_hygiene_failed"
+
+
+class VerificationEvidence(BaseModel):
+    argv: tuple[str, ...]
+    passed: bool
+    category: VerificationOutcomeCategory = VerificationOutcomeCategory.TEST_FAILED
+    environment_failure_category: str | None = None
+    exit_code: int | None = None
+    duration_ms: float = 0.0
+    stdout: str = ""
+    stderr: str = ""
+    error: str | None = None
+    completion_required: bool = False
+    workspace_version: int = Field(default=0, ge=0)
+    workspace_fingerprint_before: str | None = None
+    workspace_fingerprint_after: str | None = None
+    workspace_mutations: tuple[str, ...] = ()
 
 
 class CodingAgentRunRequest(BaseModel):
@@ -52,6 +70,11 @@ class CodingAgentRunRequest(BaseModel):
     checkpoint_state_root: Path | None = None
     initial_messages: tuple[Message, ...] = ()
     initial_protocol_repair_streak: int = Field(default=0, ge=0, le=2)
+    initial_workspace_version: int = Field(default=0, ge=0)
+    initial_verification: tuple[VerificationEvidence, ...] = ()
+    initial_git_diff_checked_version: int | None = Field(default=None, ge=0)
+    initial_workspace_fingerprint: str | None = None
+    initial_workspace_hygiene_clean: bool = True
 
     @model_validator(mode="after")
     def _validate_model_budget(self) -> CodingAgentRunRequest:
@@ -65,19 +88,6 @@ class CodingAgentRunRequest(BaseModel):
                 "max_output_tokens plus safety_headroom_tokens"
             )
         return self
-
-
-class VerificationEvidence(BaseModel):
-    argv: tuple[str, ...]
-    passed: bool
-    category: VerificationOutcomeCategory = VerificationOutcomeCategory.TEST_FAILED
-    environment_failure_category: str | None = None
-    exit_code: int | None = None
-    duration_ms: float = 0.0
-    stdout: str = ""
-    stderr: str = ""
-    error: str | None = None
-    completion_required: bool = False
 
 
 class ModelOutputEvidence(BaseModel):
@@ -132,3 +142,10 @@ class CodingAgentRunResult(BaseModel):
     messages: tuple[Message, ...] = ()
     model_outputs: tuple[ModelOutputEvidence, ...] = ()
     events: tuple[str, ...] = ()
+    workspace_version: int = 0
+    workspace_fingerprint: str | None = None
+    git_diff_checked_version: int | None = None
+    workspace_hygiene_clean: bool = True
+    completion_ready: bool = False
+    post_ready_tool_calls: int = 0
+    verification_workspace_mutations: int = 0

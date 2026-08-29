@@ -193,6 +193,25 @@ class MountFailingSandbox:
         )
 
 
+class WorkspaceMutatingSandbox:
+    def __init__(self) -> None:
+        self.profiles = []
+
+    def run(self, context) -> CommandResult:
+        self.profiles.append(context.profile)
+        (context.workspace_root / "pytest-of-root" / "case").mkdir(parents=True)
+        (context.workspace_root / "pytest-of-root" / "case" / "result.yaml").write_text(
+            "temporary: true\n", encoding="utf-8"
+        )
+        return CommandResult(
+            status=CommandStatus.SUCCESS,
+            argv=context.argv,
+            cwd=context.cwd,
+            exit_code=0,
+            stdout="passed",
+        )
+
+
 def _call(index: int, name: str, arguments: dict) -> dict:
     return {
         "tool_calls": [
@@ -289,6 +308,342 @@ def test_native_patch_test_diff_closes_through_safe_execution(
     assert tool.role == "tool"
     assert tool.tool_call_id == "step-1-call-1"
     assert tool.provider_call_id == "provider-call-1"
+
+
+def test_native_submit_result_is_runtime_owned_terminal_action(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    model = NativeScriptedModel(
+        [
+            _native_call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
+            _native_call(2, "run_tests", {"argv": ["python", "-m", "pytest"]}),
+            _native_call(3, "git_diff", {}),
+            _native_call(4, "submit_result", {"summary": "fixed"}),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=SafeExecutionService(sandbox_runner=PassingSandbox()),
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="native-submit",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            verification_commands=(("python", "-m", "pytest"),),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert result.summary == "fixed"
+    assert result.completion_ready
+    assert len(model.requests) == 4
+    assert [message.role for message in result.messages[-2:]] == ["assistant", "tool"]
+    assert result.messages[-1].provider_call_id == "provider-call-4"
+    assert json.loads(result.messages[-1].content or "{}")["accepted"] is True
+
+
+def test_submit_result_rejection_preserves_pairing_and_continues(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    model = NativeScriptedModel(
+        [
+            _native_call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
+            _native_call(2, "submit_result", {"summary": "too early"}),
+            _native_call(3, "run_tests", {"argv": ["python", "-m", "pytest"]}),
+            _native_call(4, "git_diff", {}),
+            _native_call(5, "submit_result", {"summary": "verified"}),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=SafeExecutionService(sandbox_runner=PassingSandbox()),
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="submit-retry",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            verification_commands=(("python", "-m", "pytest"),),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    submit_results = [
+        json.loads(message.content or "{}")
+        for message in result.messages
+        if message.role == "tool" and message.provider_call_id in {
+            "provider-call-2", "provider-call-5"
+        }
+    ]
+    assert [item["accepted"] for item in submit_results] == [False, True]
+    assert result.status is RuntimeStatus.COMPLETED
+
+
+def test_completion_ready_duplicate_is_advisory_then_submit_can_finish(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    model = NativeScriptedModel(
+        [
+            _native_call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
+            _native_call(2, "run_tests", {"argv": ["python", "-m", "pytest"]}),
+            _native_call(3, "git_diff", {}),
+            _native_call(4, "git_diff", {}),
+            _native_call(5, "submit_result", {"summary": "done"}),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=SafeExecutionService(sandbox_runner=PassingSandbox()),
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="ready-duplicate",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            verification_commands=(("python", "-m", "pytest"),),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    advisory = next(
+        message for message in result.messages
+        if message.provider_call_id == "provider-call-4"
+    )
+    assert json.loads(advisory.content or "{}")["completion_ready"] is True
+    assert result.post_ready_tool_calls == 1
+    assert result.status is RuntimeStatus.COMPLETED
+
+
+def test_mixed_submit_result_batch_executes_nothing(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    mixed = ModelTurn(
+        tool_calls=(
+            ToolCall(
+                provider_call_id="provider-mixed-patch",
+                name="apply_patch",
+                arguments={"edits": [{"path": "app.py", "content": "VALUE = 9\n"}]},
+            ),
+            ToolCall(
+                provider_call_id="provider-mixed-submit",
+                name="submit_result",
+                arguments={"summary": "unsafe batch"},
+            ),
+        ),
+        finish_state=ModelFinishState.TOOL_CALLS,
+        model="mock-model",
+    )
+    model = NativeScriptedModel(
+        [
+            mixed,
+            ModelTurn(
+                text=json.dumps(
+                    {
+                        "status": "failed",
+                        "summary": "stopped",
+                        "tests_passed": False,
+                        "error": "batch rejected",
+                    }
+                ),
+                model="mock-model",
+            ),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="mixed-submit",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert result.status is RuntimeStatus.FAILED
+    assert (repo / "app.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    mixed_results = [
+        message for message in result.messages
+        if message.role == "tool" and message.provider_call_id
+        and message.provider_call_id.startswith("provider-mixed-")
+    ]
+    assert len(mixed_results) == 2
+
+
+def test_verification_workspace_mutation_is_typed_and_stales_evidence(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    sandbox = WorkspaceMutatingSandbox()
+    model = ScriptedModel(
+        [
+            _call(1, "apply_patch", {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]}),
+            _call(2, "run_tests", {"argv": ["python", "-m", "pytest"]}),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=SafeExecutionService(sandbox_runner=sandbox),
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="hygiene",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            verification_commands=(("python", "-m", "pytest"),),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert result.status is RuntimeStatus.PAUSED
+    assert result.failure_category == "workspace_hygiene_failed"
+    assert result.workspace_version == 2
+    assert result.verification[0].workspace_version == 2
+    assert result.verification[0].workspace_mutations == (
+        "pytest-of-root/case/result.yaml",
+    )
+    assert result.verification_workspace_mutations == 1
+    assert not result.workspace_hygiene_clean
+    assert sandbox.profiles[0].workspace_write is False
+
+
+def test_resume_restores_current_version_evidence_when_fingerprint_matches(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    (repo / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    fingerprint = GitWorkspace(repo).content_fingerprint()[0]
+    command = ("python", "-m", "pytest")
+    model = NativeScriptedModel(
+        [_native_call(1, "submit_result", {"summary": "resumed and ready"})]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="resume-ready",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            verification_commands=(command,),
+            initial_messages=(
+                Message(role="system", content="{}"),
+                Message(role="user", content="{}"),
+            ),
+            initial_workspace_version=1,
+            initial_verification=(
+                VerificationEvidence(
+                    argv=command,
+                    passed=True,
+                    completion_required=True,
+                    workspace_version=1,
+                ),
+            ),
+            initial_git_diff_checked_version=1,
+            initial_workspace_fingerprint=fingerprint,
+        )
+    )
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert result.workspace_version == 1
+    assert result.tool_calls_used == 1
+
+
+def test_resume_workspace_drift_stales_durable_evidence(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    stale_fingerprint = GitWorkspace(repo).content_fingerprint()[0]
+    (repo / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+    command = ("python", "-m", "pytest")
+    model = NativeScriptedModel(
+        [
+            _native_call(1, "submit_result", {"summary": "must reject"}),
+            ModelTurn(
+                text=json.dumps(
+                    {
+                        "status": "failed",
+                        "summary": "stale",
+                        "tests_passed": False,
+                        "error": "reverify required",
+                    }
+                ),
+                model="mock-model",
+            ),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="resume-drift",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            verification_commands=(command,),
+            initial_messages=(
+                Message(role="system", content="{}"),
+                Message(role="user", content="{}"),
+            ),
+            initial_workspace_version=1,
+            initial_verification=(
+                VerificationEvidence(
+                    argv=command,
+                    passed=True,
+                    completion_required=True,
+                    workspace_version=1,
+                ),
+            ),
+            initial_git_diff_checked_version=1,
+            initial_workspace_fingerprint=stale_fingerprint,
+        )
+    )
+
+    rejected = next(
+        json.loads(message.content or "{}")
+        for message in result.messages
+        if message.provider_call_id == "provider-call-1"
+    )
+    assert rejected["accepted"] is False
+    assert result.workspace_version == 2
+    assert result.status is RuntimeStatus.FAILED
 
 
 def test_preflight_failure_pauses_before_provider_call(tmp_path: Path) -> None:
@@ -499,7 +854,7 @@ def test_task_verification_is_distinct_from_broad_regression(tmp_path: Path) -> 
     )
 
     assert result.status is RuntimeStatus.COMPLETED
-    assert [item.completion_required for item in result.verification] == [False, True]
+    assert [item.completion_required for item in result.verification] == [True, True]
 
 
 def test_runtime_preserves_resumed_protocol_streak_before_first_model_call(
@@ -585,12 +940,14 @@ def test_structured_compaction_keeps_deterministic_runtime_facts() -> None:
         workspace_version=2,
         changed_files=("app.py",),
         git_diff_checked=True,
+        git_diff_checked_version=2,
         required_verification_commands=(("python", "-m", "pytest", "tests/task.py"),),
         verification=[
             VerificationEvidence(
                 argv=("python", "-m", "pytest", "tests/task.py"),
                 passed=True,
                 completion_required=True,
+                workspace_version=2,
             )
         ],
     )

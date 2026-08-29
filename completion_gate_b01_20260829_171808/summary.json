@@ -1,0 +1,23 @@
+{
+  "run_id": "baseline-2395e9a8",
+  "mode": "baseline",
+  "task_count": 1,
+  "success_count": 1,
+  "provider_blocked_count": 0,
+  "environment_blocked_count": 0,
+  "protocol_repair_attempt_count": 0,
+  "protocol_failed_count": 0,
+  "acceptance_passed_count": 1,
+  "regression_passed_count": 1,
+  "task_verification_passed_count": 1,
+  "security_passed_count": 1,
+  "pristine_acceptance_passed_count": 0,
+  "pristine_task_verification_passed_count": 0,
+  "actor_completed_count": 1,
+  "within_budget_count": 1,
+  "failure_category_counts": {},
+  "completion_ready_count": 1,
+  "completion_ready_but_actor_failed_count": 0,
+  "post_ready_tool_call_count": 0,
+  "verification_workspace_mutation_count": 0
+}

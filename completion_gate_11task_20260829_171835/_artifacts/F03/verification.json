@@ -1,0 +1,46 @@
+[
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/task_verification/test_f03.py",
+      "-q"
+    ],
+    "passed": false,
+    "category": "test_failed",
+    "environment_failure_category": null,
+    "exit_code": 1,
+    "duration_ms": 394.1925000399351,
+    "stdout": "F                                                                        [100%]\n=================================== FAILURES ===================================\n________________ test_email_dispatch_can_be_explicitly_disabled ________________\n\ntmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_email_dispatch_can_be_exp0')\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0xfddd33f10810>\n\n    def test_email_dispatch_can_be_explicitly_disabled(tmp_path, monkeypatch) -> None:\n        configs = tmp_path / \"configs\"\n        configs.mkdir()\n        (configs / \"feature_flags.yaml\").write_text(\n            \"notifications:\\n  email_dispatch_enabled: false\\n\", encoding=\"utf-8\"\n        )\n        monkeypatch.chdir(tmp_path)\n        sender = Sender()\n        NotificationDispatcher(sender=sender).handle(EventEnvelope(ORDER_CANCELLED, {}))\n>       assert sender.sent == []\nE       AssertionError: assert [('ops@exampl...ncelled', {})] == []\nE         \nE         Left contains one more item: ('ops@example.com', 'order_cancelled', {})\nE         Use -v to get more diff\n\n/workspace/tests/task_verification/test_f03.py:22: AssertionError\n=========================== short test summary info ============================\nFAILED tests/task_verification/test_f03.py::test_email_dispatch_can_be_explicitly_disabled\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true,
+    "workspace_version": 0,
+    "workspace_fingerprint_before": "4c25390262710838571045e6b446b21088aac954975b7d4b945a59a3f2a40f21",
+    "workspace_fingerprint_after": "4c25390262710838571045e6b446b21088aac954975b7d4b945a59a3f2a40f21",
+    "workspace_mutations": []
+  },
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests",
+      "-q"
+    ],
+    "passed": false,
+    "category": "test_failed",
+    "environment_failure_category": null,
+    "exit_code": 1,
+    "duration_ms": 447.7658332325518,
+    "stdout": ".......F                                                                 [100%]\n=================================== FAILURES ===================================\n________________ test_email_dispatch_can_be_explicitly_disabled ________________\n\ntmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_email_dispatch_can_be_exp0')\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0xf17d39132690>\n\n    def test_email_dispatch_can_be_explicitly_disabled(tmp_path, monkeypatch) -> None:\n        configs = tmp_path / \"configs\"\n        configs.mkdir()\n        (configs / \"feature_flags.yaml\").write_text(\n            \"notifications:\\n  email_dispatch_enabled: false\\n\", encoding=\"utf-8\"\n        )\n        monkeypatch.chdir(tmp_path)\n        sender = Sender()\n        NotificationDispatcher(sender=sender).handle(EventEnvelope(ORDER_CANCELLED, {}))\n>       assert sender.sent == []\nE       AssertionError: assert [('ops@exampl...ncelled', {})] == []\nE         \nE         Left contains one more item: ('ops@example.com', 'order_cancelled', {})\nE         Use -v to get more diff\n\n/workspace/tests/task_verification/test_f03.py:22: AssertionError\n=========================== short test summary info ============================\nFAILED tests/task_verification/test_f03.py::test_email_dispatch_can_be_explicitly_disabled\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true,
+    "workspace_version": 0,
+    "workspace_fingerprint_before": "4c25390262710838571045e6b446b21088aac954975b7d4b945a59a3f2a40f21",
+    "workspace_fingerprint_after": "4c25390262710838571045e6b446b21088aac954975b7d4b945a59a3f2a40f21",
+    "workspace_mutations": []
+  }
+]

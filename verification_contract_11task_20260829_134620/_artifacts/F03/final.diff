@@ -1,6 +1,0 @@
-diff --git a/pytest-of-root/pytest-0/test_email_dispatch_can_be_exp0/configs/feature_flags.yaml b/pytest-of-root/pytest-0/test_email_dispatch_can_be_exp0/configs/feature_flags.yaml
---- /dev/null
-+++ b/pytest-of-root/pytest-0/test_email_dispatch_can_be_exp0/configs/feature_flags.yaml
-@@ -0,0 +1,2 @@
-+notifications:
-+  email_dispatch_enabled: false

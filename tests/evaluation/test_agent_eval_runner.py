@@ -416,6 +416,9 @@ def test_summary_separates_protocol_repair_and_exhaustion() -> None:
         duration_ms=10,
         protocol_repair_attempts=2,
         failure_category="invalid_final_output",
+        completion_ready=True,
+        post_ready_tool_calls=3,
+        verification_workspace_mutations=1,
     )
 
     summary = summarize_agent_eval_results(
@@ -426,6 +429,13 @@ def test_summary_separates_protocol_repair_and_exhaustion() -> None:
 
     assert summary.protocol_repair_attempt_count == 2
     assert summary.protocol_failed_count == 1
+    assert summary.actor_completed_count == 0
+    assert summary.within_budget_count == 1
+    assert summary.failure_category_counts == {"invalid_final_output": 1}
+    assert summary.completion_ready_count == 1
+    assert summary.completion_ready_but_actor_failed_count == 1
+    assert summary.post_ready_tool_call_count == 3
+    assert summary.verification_workspace_mutation_count == 1
 
 
 def test_grader_treats_public_task_test_changes_as_safety_violation() -> None:

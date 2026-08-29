@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from codeteam.agent.completion import CompletionGateDecision
 from codeteam.agent.protocol import (
     ModelOutputDialect,
     ModelOutputNormalizationError,
@@ -120,6 +121,9 @@ def run_agent_loop(
         [str, AgentLoopState, dict[str, Any]], None
     ] | None = None,
     halt_signal_provider: Callable[[], tuple[StopReason, str] | None] | None = None,
+    completion_gate_provider: Callable[[], CompletionGateDecision] | None = None,
+    terminal_completion_provider: Callable[[], str | None] | None = None,
+    post_ready_tool_call_callback: Callable[[], None] | None = None,
     max_output_tokens: int = 4096,
     max_input_tokens: int = 4096,
     model_context_window: int = 32768,
@@ -397,12 +401,28 @@ def run_agent_loop(
                 state_callback=state_callback,
                 lifecycle_callback=lifecycle_callback,
                 halt_signal_provider=halt_signal_provider,
+                completion_gate_provider=completion_gate_provider,
+                terminal_completion_provider=terminal_completion_provider,
+                post_ready_tool_call_callback=post_ready_tool_call_callback,
             )
             if stop_result is not None:
                 return stop_result
             continue
 
         if parsed_output.final_output is not None:
+            if (
+                parsed_output.final_output.status is CompletionStatus.COMPLETED
+                and completion_gate_provider is not None
+            ):
+                decision = completion_gate_provider()
+                if not decision.ready:
+                    return _handle_final_output(
+                        state,
+                        parsed_output.final_output,
+                        start_time,
+                        usage_tracker,
+                        events,
+                    )
             return _handle_final_output(
                 state,
                 parsed_output.final_output,
@@ -584,7 +604,41 @@ def _handle_tool_calls(
         [str, AgentLoopState, dict[str, Any]], None
     ] | None = None,
     halt_signal_provider: Callable[[], tuple[StopReason, str] | None] | None = None,
+    completion_gate_provider: Callable[[], CompletionGateDecision] | None = None,
+    terminal_completion_provider: Callable[[], str | None] | None = None,
+    post_ready_tool_call_callback: Callable[[], None] | None = None,
 ) -> AgentLoopResult | None:
+    if any(call.name == "submit_result" for call in tool_calls) and (
+        len(tool_calls) != 1 or tool_calls[0].name != "submit_result"
+    ):
+        for call in tool_calls:
+            if call.call_id is None:
+                continue
+            result = ToolResult(
+                call_id=call.call_id,
+                provider_call_id=call.provider_call_id,
+                name=call.name,
+                content="",
+                success=False,
+                error=(
+                    "submit_result must be the sole tool call in an assistant turn; "
+                    "no calls in this batch were executed."
+                ),
+            )
+            record_tool_call(state, call.name, call.arguments, 0)
+            state.messages.append(_tool_result_to_message(result))
+            events.append(
+                make_event(
+                    AgentEventType.TOOL_RESULT,
+                    "Mixed completion batch rejected without execution.",
+                    step_index=state.step_count,
+                    data={"name": call.name, "success": False},
+                )
+            )
+        if state_callback is not None:
+            state_callback(state)
+        return None
+
     for call in tool_calls:
         if call.call_id is None:
             return _stop_with_failure(
@@ -618,6 +672,71 @@ def _handle_tool_calls(
             fingerprint_arguments,
             workspace_version,
         )
+        completion_decision = (
+            completion_gate_provider()
+            if completion_gate_provider is not None
+            else None
+        )
+        if (
+            completion_decision is not None
+            and completion_decision.ready
+            and call.name != "submit_result"
+            and post_ready_tool_call_callback is not None
+        ):
+            post_ready_tool_call_callback()
+        repeated = is_repeated_action(
+            state,
+            call.name,
+            fingerprint_arguments,
+            workspace_version,
+            include_history=call.name in semantic_repeat_tools,
+        )
+        if (
+            repeated
+            and completion_decision is not None
+            and completion_decision.ready
+            and call.name != "submit_result"
+        ):
+            advisory = ToolResult(
+                call_id=call.call_id,
+                provider_call_id=call.provider_call_id,
+                name=call.name,
+                content=json.dumps(
+                    {
+                        "skipped": True,
+                        "completion_ready": True,
+                        "workspace_version": completion_decision.workspace_version,
+                        "next_action": "Call submit_result alone.",
+                    },
+                    ensure_ascii=False,
+                ),
+                success=True,
+            )
+            state.cached_no_progress_count += 1
+            record_tool_call(
+                state, call.name, fingerprint_arguments, workspace_version
+            )
+            state.messages.append(_tool_result_to_message(advisory))
+            events.append(
+                make_event(
+                    AgentEventType.TOOL_RESULT,
+                    "Completion-ready duplicate skipped.",
+                    step_index=state.step_count,
+                    data={"name": call.name, "success": True, "skipped": True},
+                )
+            )
+            if state_callback is not None:
+                state_callback(state)
+            if state.cached_no_progress_count >= 2:
+                return _stop_with_failure(
+                    state,
+                    StopReason.NO_PROGRESS,
+                    "Agent ignored completion-ready guidance repeatedly.",
+                    start_time,
+                    usage_tracker,
+                    events,
+                )
+            continue
         if call.name in cacheable_tools and fingerprint in state.tool_result_cache:
             cached = state.tool_result_cache[fingerprint].model_copy(
                 update={
@@ -661,13 +780,7 @@ def _handle_tool_calls(
             continue
 
         state.cached_no_progress_count = 0
-        if is_repeated_action(
-            state,
-            call.name,
-            fingerprint_arguments,
-            workspace_version,
-            include_history=call.name in semantic_repeat_tools,
-        ):
+        if repeated:
             return _stop_with_failure(
                 state,
                 StopReason.REPEATED_ACTION,
@@ -701,6 +814,31 @@ def _handle_tool_calls(
             )
 
         result = tool_registry.execute(call)
+        if (
+            result.success
+            and call.name != "submit_result"
+            and completion_gate_provider is not None
+        ):
+            updated_completion = completion_gate_provider()
+            if updated_completion.ready:
+                result = result.model_copy(
+                    update={
+                        "content": (
+                            result.content
+                            + "\n\n"
+                            + json.dumps(
+                                {
+                                    "completion_ready": True,
+                                    "workspace_version": (
+                                        updated_completion.workspace_version
+                                    ),
+                                    "next_action": "Call submit_result alone.",
+                                },
+                                ensure_ascii=False,
+                            )
+                        )
+                    }
+                )
         if call.name in cacheable_tools:
             state.tool_result_cache[fingerprint] = result
 
@@ -737,6 +875,25 @@ def _handle_tool_calls(
         state.messages.append(_tool_result_to_message(result))
         if state_callback is not None:
             state_callback(state)
+        terminal_summary = (
+            terminal_completion_provider()
+            if terminal_completion_provider is not None
+            else None
+        )
+        if terminal_summary is not None:
+            return _build_loop_result(
+                state=state,
+                status=CompletionStatus.COMPLETED,
+                stop_reason=StopReason.COMPLETED,
+                start_time=start_time,
+                usage_tracker=usage_tracker,
+                events=events,
+                final_output=AgentFinalOutput(
+                    status=CompletionStatus.COMPLETED,
+                    summary=terminal_summary,
+                    tests_passed=True,
+                ),
+            )
         halt = halt_signal_provider() if halt_signal_provider is not None else None
         if halt is not None:
             stop_reason, error = halt

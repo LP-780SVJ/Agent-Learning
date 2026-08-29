@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -25,6 +26,41 @@ from codeteam.git.models import (
 from codeteam.git.patch import PatchValidator
 
 DEFAULT_GIT_TIMEOUT_SECONDS = 10.0
+
+
+def _workspace_entry_digest(path: Path) -> str:
+    """Hash one managed path without following a symlink target."""
+
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return "missing"
+    mode = stat.S_IMODE(metadata.st_mode)
+    if stat.S_ISLNK(metadata.st_mode):
+        payload = f"symlink\0{mode:o}\0{os.readlink(path)}".encode(
+            "utf-8", errors="surrogateescape"
+        )
+        return hashlib.sha256(payload).hexdigest()
+    if stat.S_ISREG(metadata.st_mode):
+        digest = hashlib.sha256(f"file\0{mode:o}\0".encode())
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as error:
+            return f"changed-during-fingerprint:{error.errno}"
+        with os.fdopen(descriptor, "rb") as file:
+            opened = os.fstat(file.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_dev != metadata.st_dev
+                or opened.st_ino != metadata.st_ino
+            ):
+                return "changed-during-fingerprint"
+            while chunk := file.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+    return hashlib.sha256(
+        f"other\0{stat.S_IFMT(metadata.st_mode):o}\0{mode:o}".encode()
+    ).hexdigest()
 
 
 def sha256_file(path: Path) -> str | None:
@@ -152,6 +188,21 @@ class GitWorkspace:
                 for path in untracked
             ],
         ]
+
+    def content_fingerprint(self) -> tuple[str, tuple[tuple[str, str], ...]]:
+        """Fingerprint tracked and non-ignored untracked workspace content."""
+
+        paths = parse_nul_paths(
+            self._run_git(
+                ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]
+            )
+        )
+        entries = tuple(
+            (path, _workspace_entry_digest(self.root / path))
+            for path in sorted(set(paths))
+        )
+        serialized = "\n".join(f"{path}\0{digest}" for path, digest in entries)
+        return hashlib.sha256(serialized.encode()).hexdigest(), entries
 
     def diff(self, base_ref: str = "HEAD") -> GitDiff:
         _validate_base_ref(base_ref)

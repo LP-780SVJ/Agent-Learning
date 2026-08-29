@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import posixpath
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
+from codeteam.agent.completion import CompletionGateDecision
 from codeteam.agent.editing import (
     FileEdit,
     TextReplacement,
@@ -77,6 +79,11 @@ class EmptyArgs(BaseModel):
     pass
 
 
+class SubmitResultArgs(BaseModel):
+    summary: str = Field(min_length=1)
+    notes: str | None = None
+
+
 @dataclass
 class RuntimeEvidence:
     workspace_version: int = 0
@@ -87,22 +94,44 @@ class RuntimeEvidence:
     paused_category: str | None = None
     checkpoint_ids: list[str] = field(default_factory=list)
     repair_duration_ms: int = 0
+    task_verification_commands: tuple[tuple[str, ...], ...] = ()
+    regression_verification_commands: tuple[tuple[str, ...], ...] = ()
     required_verification_commands: tuple[tuple[str, ...], ...] = ()
     changed_files: tuple[str, ...] = ()
     git_diff_checked: bool = False
+    git_diff_checked_version: int | None = None
+    workspace_fingerprint: str | None = None
+    workspace_hygiene_clean: bool = True
+    accepted_submission_summary: str | None = None
+    accepted_submission_notes: str | None = None
+    completion_ready_seen: bool = False
+    post_ready_tool_calls: int = 0
+    verification_workspace_mutations: int = 0
 
     @property
     def tests_passed(self) -> bool:
-        if not self.required_verification_commands:
-            return bool(self.verification) and self.verification[-1].passed
+        required = tuple(
+            dict.fromkeys(
+                (*self.task_verification_commands, *self.regression_verification_commands)
+            )
+        )
+        if not required:
+            required = self.required_verification_commands
+        if not required:
+            current = [
+                item
+                for item in self.verification
+                if item.workspace_version == self.workspace_version
+            ]
+            return bool(current) and current[-1].passed
         latest: dict[tuple[str, ...], bool] = {}
         for item in self.verification:
-            if item.completion_required:
+            if (
+                item.completion_required
+                and item.workspace_version == self.workspace_version
+            ):
                 latest[item.argv] = item.passed
-        return all(
-            latest.get(command, False)
-            for command in self.required_verification_commands
-        )
+        return all(latest.get(command, False) for command in required)
 
 
 def create_runtime_tools(
@@ -115,6 +144,9 @@ def create_runtime_tools(
     sandbox_profile: SandboxProfile | None = None,
     allowed_verification_commands: tuple[tuple[str, ...], ...] = (),
     required_verification_commands: tuple[tuple[str, ...], ...] = (),
+    task_verification_commands: tuple[tuple[str, ...], ...] = (),
+    regression_verification_commands: tuple[tuple[str, ...], ...] = (),
+    completion_gate_provider: Callable[[], CompletionGateDecision] | None = None,
     max_repairs: int = 3,
 ) -> ToolRegistry:
     root = workspace_root.resolve(strict=True)
@@ -124,8 +156,20 @@ def create_runtime_tools(
     canonical_required_commands = normalize_allowed_verification_commands(
         required_verification_commands
     )
+    canonical_task_commands = normalize_allowed_verification_commands(
+        task_verification_commands
+    )
+    canonical_regression_commands = normalize_allowed_verification_commands(
+        regression_verification_commands
+    )
+    if not canonical_task_commands:
+        canonical_task_commands = canonical_required_commands
+    evidence.task_verification_commands = canonical_task_commands
+    evidence.regression_verification_commands = canonical_regression_commands
     evidence.required_verification_commands = canonical_required_commands
-    execution_profile = sandbox_profile or SandboxProfile()
+    execution_profile = (sandbox_profile or SandboxProfile()).model_copy(
+        update={"workspace_write": False}
+    )
     registry = ToolRegistry()
     for tool in create_file_tools(root):
         if tool.name in {"list_files", "read_file", "search_code"}:
@@ -169,6 +213,8 @@ def create_runtime_tools(
         changed = [change.path for change in (result.diff.changes if result.diff else [])]
         evidence.changed_files = tuple(changed)
         evidence.git_diff_checked = False
+        evidence.git_diff_checked_version = None
+        evidence.workspace_fingerprint = GitWorkspace(root).content_fingerprint()[0]
         return json.dumps(
             {"applied": True, "changed_files": changed},
             ensure_ascii=False,
@@ -192,6 +238,8 @@ def create_runtime_tools(
             cwd.relative_to(root)
         except ValueError as error:
             raise ValueError("Test cwd escapes workspace.") from error
+        workspace = GitWorkspace(root)
+        fingerprint_before, entries_before = workspace.content_fingerprint()
         result = safe_execution.execute_command(
             SafeCommandExecutionRequest(
                 command=CommandRequest(
@@ -212,12 +260,30 @@ def create_runtime_tools(
             if command is not None
             else None
         )
+        fingerprint_after, entries_after = workspace.content_fingerprint()
+        before_map = dict(entries_before)
+        after_map = dict(entries_after)
+        mutations = tuple(
+            path
+            for path in sorted(before_map.keys() | after_map.keys())
+            if before_map.get(path) != after_map.get(path)
+        )
+        if mutations:
+            evidence.workspace_version += 1
+            evidence.workspace_hygiene_clean = False
+            evidence.verification_workspace_mutations += 1
+            evidence.git_diff_checked = False
+            evidence.git_diff_checked_version = None
+        evidence.workspace_fingerprint = fingerprint_after
         passed = (
             result.status is SafeExecutionStatus.COMPLETED
             and command is not None
             and command.exit_code == 0
+            and not mutations
         )
-        if passed:
+        if mutations:
+            outcome_category = VerificationOutcomeCategory.WORKSPACE_HYGIENE_FAILED
+        elif passed:
             outcome_category = VerificationOutcomeCategory.PASSED
         elif (
             environment_failure_category is not None
@@ -237,6 +303,10 @@ def create_runtime_tools(
             stderr=command.stderr if command else "",
             error=result.error or (command.error if command else None),
             completion_required=argv in canonical_required_commands,
+            workspace_version=evidence.workspace_version,
+            workspace_fingerprint_before=fingerprint_before,
+            workspace_fingerprint_after=fingerprint_after,
+            workspace_mutations=mutations,
         )
         evidence.verification.append(item)
         if evidence.repair_attempts:
@@ -252,6 +322,12 @@ def create_runtime_tools(
                 "Verification environment failed during required command "
                 f"execution ({environment_failure_category})."
             )
+        if mutations:
+            evidence.paused_category = "workspace_hygiene_failed"
+            evidence.paused_reason = (
+                "Verification mutated the source workspace: "
+                + ", ".join(mutations)
+            )
         return item.model_dump_json()
 
     def git_status(_: BaseModel) -> str:
@@ -262,8 +338,24 @@ def create_runtime_tools(
         )
 
     def git_diff(_: BaseModel) -> str:
+        rendered = render_workspace_diff(root)
         evidence.git_diff_checked = True
-        return render_workspace_diff(root)
+        evidence.git_diff_checked_version = evidence.workspace_version
+        return rendered
+
+    def submit_result(args: BaseModel) -> str:
+        parsed = SubmitResultArgs.model_validate(args)
+        if completion_gate_provider is None:
+            raise ValueError("Completion gate is unavailable.")
+        decision = completion_gate_provider()
+        if not isinstance(decision, CompletionGateDecision):
+            raise TypeError("Completion gate returned an invalid decision.")
+        evidence.completion_ready_seen |= decision.ready
+        payload = {"accepted": decision.ready, **decision.as_dict()}
+        if decision.ready:
+            evidence.accepted_submission_summary = parsed.summary
+            evidence.accepted_submission_notes = parsed.notes
+        return json.dumps(payload, ensure_ascii=False)
 
     registry.register(
         RegisteredTool(
@@ -295,6 +387,17 @@ def create_runtime_tools(
             description="Inspect the current source diff, including untracked text files.",
             args_schema=EmptyArgs,
             func=git_diff,
+        )
+    )
+    registry.register(
+        RegisteredTool(
+            name="submit_result",
+            description=(
+                "Request Runtime-authorized completion after all current-version "
+                "verification and diff-review requirements are satisfied. Call alone."
+            ),
+            args_schema=SubmitResultArgs,
+            func=submit_result,
         )
     )
     return registry
@@ -329,6 +432,8 @@ def render_workspace_diff(workspace_root: Path) -> str:
     chunks = [diff.patch]
     for path in diff.untracked_paths:
         target = workspace.root / path
+        if target.is_symlink():
+            continue
         try:
             content = target.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
+from codeteam.agent.completion import CompletionGate
 from codeteam.agent.runtime_models import (
     CodingAgentRunRequest,
     CodingAgentRunResult,
@@ -90,8 +91,13 @@ class CodingAgentRuntime:
                     AgentEventType.SANDBOX_PREFLIGHT_FAILED.value,
                 ),
             )
-        required_verification_commands = (
-            request.task_verification_commands or request.verification_commands
+        required_verification_commands = tuple(
+            dict.fromkeys(
+                (
+                    *(request.task_verification_commands or ()),
+                    *request.verification_commands,
+                )
+            )
         )
         verification_preflight = self._verification_preflight.check(
             root,
@@ -121,12 +127,54 @@ class CodingAgentRuntime:
         checkpoint_root = request.checkpoint_state_root or (
             root.parent / ".codeteam" / "checkpoints" / request.task_id
         )
-        evidence = RuntimeEvidence()
+        current_fingerprint = GitWorkspace(root).content_fingerprint()[0]
+        restoring = bool(
+            request.initial_messages
+            or request.initial_workspace_version
+            or request.initial_verification
+            or request.initial_workspace_fingerprint
+        )
+        resume_matches = (
+            request.initial_workspace_fingerprint is not None
+            and request.initial_workspace_fingerprint == current_fingerprint
+        )
+        evidence = RuntimeEvidence(
+            workspace_version=(
+                request.initial_workspace_version
+                if not restoring or resume_matches
+                else request.initial_workspace_version + 1
+            ),
+            verification=list(request.initial_verification),
+            git_diff_checked=(
+                resume_matches
+                and request.initial_git_diff_checked_version
+                == request.initial_workspace_version
+            ),
+            git_diff_checked_version=(
+                request.initial_git_diff_checked_version if resume_matches else None
+            ),
+            workspace_fingerprint=current_fingerprint,
+            workspace_hygiene_clean=(
+                request.initial_workspace_hygiene_clean if resume_matches else True
+            ),
+        )
         allowed_verification_commands = tuple(
             dict.fromkeys(
                 (*request.task_verification_commands, *request.verification_commands)
             )
         )
+        def completion_decision():
+            workspace = GitWorkspace(root)
+            changed_files = tuple(change.path for change in workspace.changed_files())
+            diff = render_workspace_diff(root) if changed_files else ""
+            decision = CompletionGate.evaluate(
+                evidence,
+                changed_files=changed_files,
+                diff=diff,
+            )
+            evidence.completion_ready_seen |= decision.ready
+            return decision
+
         tools = create_runtime_tools(
             workspace_root=root,
             task_id=request.task_id,
@@ -136,6 +184,15 @@ class CodingAgentRuntime:
             sandbox_profile=self._sandbox_profile,
             allowed_verification_commands=allowed_verification_commands,
             required_verification_commands=required_verification_commands,
+            task_verification_commands=(
+                request.task_verification_commands or request.verification_commands
+            ),
+            regression_verification_commands=(
+                request.verification_commands
+                if request.task_verification_commands
+                else ()
+            ),
+            completion_gate_provider=completion_decision,
             max_repairs=request.max_repairs,
         )
         messages = _canonicalize_conversation(
@@ -191,6 +248,17 @@ class CodingAgentRuntime:
                     (StopReason.PAUSED, evidence.paused_reason)
                     if evidence.paused_reason is not None
                     else None
+                )
+            ),
+            completion_gate_provider=completion_decision,
+            terminal_completion_provider=(
+                lambda: evidence.accepted_submission_summary
+            ),
+            post_ready_tool_call_callback=(
+                lambda: setattr(
+                    evidence,
+                    "post_ready_tool_calls",
+                    evidence.post_ready_tool_calls + 1,
                 )
             ),
             max_output_tokens=request.max_output_tokens,
@@ -252,6 +320,15 @@ class CodingAgentRuntime:
                 AgentEventType.VERIFICATION_PREFLIGHT_STARTED.value,
                 AgentEventType.VERIFICATION_PREFLIGHT_PASSED.value,
                 *(event.event_type.value for event in loop.events),
+            ),
+            workspace_version=evidence.workspace_version,
+            workspace_fingerprint=evidence.workspace_fingerprint,
+            git_diff_checked_version=evidence.git_diff_checked_version,
+            workspace_hygiene_clean=evidence.workspace_hygiene_clean,
+            completion_ready=evidence.completion_ready_seen,
+            post_ready_tool_calls=evidence.post_ready_tool_calls,
+            verification_workspace_mutations=(
+                evidence.verification_workspace_mutations
             ),
         )
 
@@ -317,6 +394,14 @@ class CodingAgentRuntime:
                     "error": None,
                     "user_input_request": None,
                 },
+                "completion_tool": {
+                    "name": "submit_result",
+                    "arguments": {
+                        "summary": "short factual summary",
+                        "notes": None,
+                    },
+                    "rule": "Call submit_result alone; only the Runtime may accept completion.",
+                },
             },
             "tools": schemas,
             "budgets": {
@@ -333,6 +418,10 @@ class CodingAgentRuntime:
                 "Make a real Git diff.",
                 "Run every task verification command successfully.",
                 "Inspect the final diff before returning completed.",
+                (
+                    "After the Runtime reports completion-ready, call submit_result "
+                    "as the sole tool call. Readiness does not auto-terminate the run."
+                ),
                 "Never claim hidden acceptance results.",
                 (
                     "The initial context is a current snapshot. Do not reread the same "
@@ -390,16 +479,22 @@ class CodingAgentRuntime:
             return RuntimeStatus.PAUSED, "user_input_required", loop.error
         if loop.status is not CompletionStatus.COMPLETED:
             return RuntimeStatus.FAILED, loop.stop_reason.value, loop.error
-        if not changed_files or not diff.strip():
-            return RuntimeStatus.FAILED, "no_patch", "Completion requires a real Git diff."
-        if any(path == ".git" or path.startswith(".git/") for path in changed_files):
-            return RuntimeStatus.FAILED, "security_failure", "Final diff touches Git metadata."
-        if not evidence.verification:
-            return RuntimeStatus.PAUSED, "verification_required", "No visible verification was run."
-        if not evidence.tests_passed:
-            return RuntimeStatus.FAILED, "verification_failed", "The latest visible verification failed."
-        if not evidence.git_diff_checked:
-            return RuntimeStatus.PAUSED, "diff_review_required", "The final Git diff was not inspected."
+        decision = CompletionGate.evaluate(
+            evidence,
+            changed_files=changed_files,
+            diff=diff,
+        )
+        if not decision.ready:
+            missing = ", ".join(decision.missing_requirements)
+            if "real_git_diff" in decision.missing_requirements:
+                return RuntimeStatus.FAILED, "no_patch", "Completion requires a real Git diff."
+            if "safe_git_diff" in decision.missing_requirements:
+                return RuntimeStatus.FAILED, "security_failure", "Final diff touches Git metadata."
+            if "workspace_hygiene_clean" in decision.missing_requirements:
+                return RuntimeStatus.PAUSED, "workspace_hygiene_failed", missing
+            if "current_version_verification" in decision.missing_requirements:
+                return RuntimeStatus.PAUSED, "verification_required", missing
+            return RuntimeStatus.PAUSED, "diff_review_required", missing
         return RuntimeStatus.COMPLETED, None, None
 
 
@@ -686,7 +781,12 @@ def _structured_context_message(
             "changed_files": list(evidence.changed_files) if evidence is not None else [],
             "latest_verification": latest_verification,
             "git_diff_checked": (
-                evidence.git_diff_checked if evidence is not None else git_diff_checked
+                evidence.git_diff_checked_version == evidence.workspace_version
+                if evidence is not None
+                else git_diff_checked
+            ),
+            "git_diff_checked_version": (
+                evidence.git_diff_checked_version if evidence is not None else None
             ),
             "remaining_completion_gate": completion_gate,
         }

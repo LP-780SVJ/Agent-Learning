@@ -153,6 +153,9 @@ class PatchActorResult(BaseModel):
     verification_preflight_available: bool | None = None
     verification_preflight_category: str | None = None
     verification_environment: VerificationEnvironmentMetadata | None = None
+    completion_ready: bool = False
+    post_ready_tool_calls: int = 0
+    verification_workspace_mutations: int = 0
 
 
 class GraderCommandResult(BaseModel):
@@ -234,6 +237,9 @@ class AgentEvalTaskResult(BaseModel):
     verification_preflight_available: bool | None = None
     verification_preflight_category: str | None = None
     verification_environment: VerificationEnvironmentMetadata | None = None
+    completion_ready: bool = False
+    post_ready_tool_calls: int = 0
+    verification_workspace_mutations: int = 0
 
 
 class AgentEvalRunSummary(BaseModel):
@@ -251,3 +257,10 @@ class AgentEvalRunSummary(BaseModel):
     security_passed_count: int
     pristine_acceptance_passed_count: int = 0
     pristine_task_verification_passed_count: int = 0
+    actor_completed_count: int = 0
+    within_budget_count: int = 0
+    failure_category_counts: dict[str, int] = Field(default_factory=dict)
+    completion_ready_count: int = 0
+    completion_ready_but_actor_failed_count: int = 0
+    post_ready_tool_call_count: int = 0
+    verification_workspace_mutation_count: int = 0

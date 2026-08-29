@@ -15,6 +15,7 @@ from codeteam.agent.runtime_models import (
     CodingAgentRunRequest,
     CompactionMode,
     RuntimeStatus,
+    VerificationEvidence,
 )
 from codeteam.agent.runtime_tools import render_workspace_diff
 from codeteam.cli.render import render_error, render_json, render_text
@@ -178,6 +179,17 @@ def run_agent_task(request: RunRequest) -> None:
                             "workspace_version": evidence.workspace_version,
                             "recent_messages": durable_recent_messages(state.messages),
                             "last_verification": last_verification,
+                            "verification_history": tuple(
+                                item.model_dump(mode="json")
+                                for item in evidence.verification
+                            ),
+                            "workspace_fingerprint": evidence.workspace_fingerprint,
+                            "git_diff_checked_version": (
+                                evidence.git_diff_checked_version
+                            ),
+                            "workspace_hygiene_clean": (
+                                evidence.workspace_hygiene_clean
+                            ),
                         }
                     ),
                     "checkpoint_ids": tuple(
@@ -516,9 +528,7 @@ def resume_agent_session(request: ResumeRequest) -> None:
                                 + loop_state.protocol_repair_count
                             ),
                             "protocol_repair_streak": loop_state.protocol_repair_streak,
-                            "workspace_version": (
-                                state.workspace_version + evidence.workspace_version
-                            ),
+                            "workspace_version": evidence.workspace_version,
                             "recent_messages": durable_recent_messages(
                                 loop_state.messages
                             ),
@@ -526,6 +536,17 @@ def resume_agent_session(request: ResumeRequest) -> None:
                                 evidence.verification[-1].model_dump(mode="json")
                                 if evidence.verification
                                 else state.last_verification
+                            ),
+                            "verification_history": tuple(
+                                item.model_dump(mode="json")
+                                for item in evidence.verification
+                            ),
+                            "workspace_fingerprint": evidence.workspace_fingerprint,
+                            "git_diff_checked_version": (
+                                evidence.git_diff_checked_version
+                            ),
+                            "workspace_hygiene_clean": (
+                                evidence.workspace_hygiene_clean
                             ),
                         }
                     ),
@@ -643,9 +664,18 @@ def resume_agent_session(request: ResumeRequest) -> None:
             max_protocol_repairs=state.max_protocol_repairs,
             compaction_mode=CompactionMode(state.compaction_mode),
             verification_commands=state.verification_commands,
+            task_verification_commands=state.task_verification_commands,
             checkpoint_state_root=_checkpoint_state_root_for_repo(repo_root),
             initial_messages=state.recent_messages,
             initial_protocol_repair_streak=state.protocol_repair_streak,
+            initial_workspace_version=state.workspace_version,
+            initial_verification=tuple(
+                VerificationEvidence.model_validate(item)
+                for item in state.verification_history
+            ),
+            initial_git_diff_checked_version=state.git_diff_checked_version,
+            initial_workspace_fingerprint=state.workspace_fingerprint,
+            initial_workspace_hygiene_clean=state.workspace_hygiene_clean,
         )
     )
     status = {

@@ -28,13 +28,14 @@ The first four weeks are now at a closeout baseline.
 | Unified Coding Agent Runtime | Implemented | `codeteam/agent/runtime.py`, scripted-model integration tests |
 | Provider action normalization | Native-first + fallback | OpenAI-compatible native tools; JSON, fenced JSON, DSML fallback |
 | Agent EvalRunner / Grader | Implemented V2 | Same Runtime as `run`; hidden oracle remains grader-only |
-| 11-task coding development benchmark | NOT_RUN after Agent Turn change | Wait for user B01 smoke and Completion Ownership fix |
+| Runtime-owned completion | Implemented offline | Versioned gate + native `submit_result`; real Provider smoke pending |
+| 11-task coding development benchmark | Historical pre-fix run inspected; post-fix NOT_RUN | Wait for user B01 smoke, then rerun |
 
 Latest closeout evidence:
 
 ```text
-normal sandbox:      1322 passed, 8 skipped
-Docker integration:  58 passed with the project-owned image
+normal sandbox:      1336 passed, 9 skipped
+Docker integration:  60 passed with the project-owned image
 ```
 
 `codeteam run` now uses the real provider-neutral `CodingAgentRuntime`. Its
@@ -338,7 +339,7 @@ Important limitation: the 11 tasks are explicitly a `dev` suite, not held-out
 evidence. The native Agent Turn path has offline coverage only. The user must
 rerun B01 after the verification environment fix; that validation is
 `NOT_RUN_BY_CODER`. The 11-task benchmark and native/text ablation remain
-`NOT_RUN` until B01 is stable and Completion Ownership is fixed. Null preflight proves
+`NOT_RUN` until the new B01 scratch/completion path is stable. Null preflight proves
 harness discrimination; the non-blind Codex reference proves task solvability,
 not model quality.
 
@@ -457,6 +458,25 @@ with task/model/temperature/output budget held constant. Compare transport
 success, parse failure, Runtime execution reached, and task completion only
 after the baseline is repeatable.
 
+### Runtime-owned completion and isolated verification scratch
+
+Agent-visible `run_tests` now receives a read-only `/workspace` mount and a
+bounded `/tmp` tmpfs. Runtime fixes Python, cache, home, and pytest scratch
+variables below `/tmp`; it fingerprints tracked and non-ignored untracked
+workspace content before and after verification without following symlinks.
+Any mutation is recorded as `workspace_hygiene_failed`, advances the workspace
+version, invalidates evidence, and blocks completion. Runtime never cleans the
+mutation automatically and does not weaken checkpoint symlink checks.
+
+Verification and diff review are versioned. Completion requires the current
+workspace version to have a real safe diff, every task verification command,
+all configured broad regression commands, current diff review, clean hygiene,
+and no execution pause. The model then calls native `submit_result` alone;
+Runtime evaluates the gate, appends the correlated tool result, and owns the
+terminal transition. A textual final remains a compatibility fallback through
+the same gate. See [DD-W4-D7-09](docs/design_decisions/DD-W4-D7-09.md) and
+[DD-W4-D7-10](docs/design_decisions/DD-W4-D7-10.md).
+
 `--output` stores only reports and audit artifacts. Execution repositories live
 under the resolved worktree root. `environment_blocked_count` is reported
 separately from provider and Agent failures. The independent Grader still runs
@@ -511,9 +531,9 @@ When running inside a restricted terminal sandbox, Docker tests may skip. In a u
 - Earlier real LLM runs predate canonical evidence and discriminative public
   tests; the V3 suite needs the user-run native B01 smoke. B01 is
   `NOT_RUN_BY_CODER`; benchmark and ablation are `NOT_RUN`.
-- Runtime completion ownership / `READY_TO_FINALIZE` is still pending. The
-  Runtime may still report repeated-action failure after objective gates pass;
-  this change intentionally did not redesign the completion state machine.
+- Completion ownership is now Runtime-gated through versioned evidence and
+  `submit_result`. Real-Provider confirmation remains user-run; this coder did
+  not run B01, the 11-task benchmark, or an ablation.
 - Native tool calling is implemented for the OpenAI-compatible adapter and
   falls back explicitly when unsupported. New Provider wire protocols still
   require adapters; full reasoning-content continuation is not implemented.
@@ -544,14 +564,15 @@ Important directories:
 
 Recommended order:
 
-1. User builds the documented image, runs only the B01 verification-contract
-   smoke, and returns its manifest,
-   result, model-output evidence, runtime messages, and kept worktree evidence.
-2. Fix any real Provider adapter issue exposed by B01 without weakening the
-   SafeExecution or dual-ID boundaries.
-3. Implement the second knife: Runtime completion ownership /
-   `READY_TO_FINALIZE`, without conflating it with action transport.
-4. Only after two repeatable B01 runs, run the 11-task dev baseline and then the
-   controlled native-vs-text transport ablation.
-5. Improve retrieval on medium-repo business/cross-module/doc/config misses and
+1. User builds the documented image and runs the B01 smoke to confirm isolated
+   scratch plus native `submit_result` on the real Provider path.
+2. Fix any real Provider adapter issue exposed by B01 without weakening
+   SafeExecution, checkpoint, hygiene, or dual-ID boundaries.
+3. After repeatable B01 evidence, run the 11-task dev baseline and compare the
+   completion-ready and workspace-mutation metrics with the historical run.
+4. Only after two repeatable B01 runs, run the controlled native-vs-text
+   transport ablation.
+5. Keep R02 as a semantic coding-quality case; improve repair/reasoning without
+   hardcoding its oracle.
+6. Improve retrieval on medium-repo business/cross-module/doc/config misses and
    keep repo-wide lint/type cleanup as separate maintenance work.

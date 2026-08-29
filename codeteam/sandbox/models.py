@@ -32,6 +32,7 @@ class SandboxProfile(BaseModel):
     memory_mb: int = Field(default=512, gt=0)
     cpus: float = Field(default=1.0, gt=0)
     pids_limit: int = Field(default=256, gt=0)
+    tmpfs_mb: int = Field(default=128, gt=0, le=1024)
 
     workspace_write: bool = True
     pull_policy: str = "never"
