@@ -110,20 +110,24 @@ def run_agent_loop(
     actual_tests_passed: bool | Callable[[], bool] | None = None,
     message_transform: Callable[[list[Message]], list[Message]] | None = None,
     state_version_provider: Callable[[], int] | None = None,
-    action_fingerprint_normalizer: Callable[
-        [str, dict[str, Any]], dict[str, Any]
-    ] | None = None,
+    action_fingerprint_normalizer: Callable[[str, dict[str, Any]], dict[str, Any]]
+    | None = None,
     semantic_repeat_tools: frozenset[str] = frozenset(),
     cacheable_tools: frozenset[str] = frozenset(),
     initial_protocol_repair_streak: int = 0,
     state_callback: Callable[[AgentLoopState], None] | None = None,
-    lifecycle_callback: Callable[
-        [str, AgentLoopState, dict[str, Any]], None
-    ] | None = None,
+    lifecycle_callback: Callable[[str, AgentLoopState, dict[str, Any]], None]
+    | None = None,
     halt_signal_provider: Callable[[], tuple[StopReason, str] | None] | None = None,
     completion_gate_provider: Callable[[], CompletionGateDecision] | None = None,
     terminal_completion_provider: Callable[[], str | None] | None = None,
     post_ready_tool_call_callback: Callable[[], None] | None = None,
+    request_advisory_provider: Callable[[AgentLoopState], Message | None] | None = None,
+    tool_result_observer: Callable[
+        [AgentLoopState, ToolCall, ToolResult, int, bool, bool], None
+    ]
+    | None = None,
+    cached_no_progress_exempt_provider: Callable[[ToolCall, int], bool] | None = None,
     max_output_tokens: int = 4096,
     max_input_tokens: int = 4096,
     model_context_window: int = 32768,
@@ -155,23 +159,32 @@ def run_agent_loop(
 
         state.step_count += 1
 
-        events.append(make_event(
-            AgentEventType.STEP_STARTED,
-            "Agent step started.",
-            step_index=state.step_count,
-        ))
+        events.append(
+            make_event(
+                AgentEventType.STEP_STARTED,
+                "Agent step started.",
+                step_index=state.step_count,
+            )
+        )
 
-        events.append(make_event(
-            AgentEventType.MODEL_REQUEST,
-            "Sending messages to model.",
-            step_index=state.step_count,
-            data={"message_count": len(state.messages)},
-        ))
+        events.append(
+            make_event(
+                AgentEventType.MODEL_REQUEST,
+                "Sending messages to model.",
+                step_index=state.step_count,
+                data={"message_count": len(state.messages)},
+            )
+        )
 
+        request_base = list(state.messages)
+        if request_advisory_provider is not None:
+            advisory = request_advisory_provider(state)
+            if advisory is not None:
+                request_base.append(advisory)
         request_messages = (
-            message_transform(list(state.messages))
+            message_transform(request_base)
             if message_transform is not None
-            else list(state.messages)
+            else request_base
         )
         if lifecycle_callback is not None:
             lifecycle_callback(
@@ -232,25 +245,27 @@ def run_agent_loop(
                 {"step_index": state.step_count},
             )
 
-        events.append(make_event(
-            AgentEventType.MODEL_RESPONSE,
-            "Model response received.",
-            step_index=state.step_count,
-            data={
-                "model": model_turn.model,
-                "provider": model_turn.provider,
-                "finish_state": model_turn.finish_state.value,
-                "finish_reason": model_turn.finish_reason,
-                "actual_response_mode": (
-                    model_turn.actual_response_mode.value
-                    if model_turn.actual_response_mode is not None
-                    else None
-                ),
-                "input_tokens": model_turn.usage.input_tokens,
-                "output_tokens": model_turn.usage.output_tokens,
-                "cost": usage_record.cost.total_cost,
-            },
-        ))
+        events.append(
+            make_event(
+                AgentEventType.MODEL_RESPONSE,
+                "Model response received.",
+                step_index=state.step_count,
+                data={
+                    "model": model_turn.model,
+                    "provider": model_turn.provider,
+                    "finish_state": model_turn.finish_state.value,
+                    "finish_reason": model_turn.finish_reason,
+                    "actual_response_mode": (
+                        model_turn.actual_response_mode.value
+                        if model_turn.actual_response_mode is not None
+                        else None
+                    ),
+                    "input_tokens": model_turn.usage.input_tokens,
+                    "output_tokens": model_turn.usage.output_tokens,
+                    "cost": usage_record.cost.total_cost,
+                },
+            )
+        )
 
         native_tool_calls = _assign_runtime_call_ids(
             model_turn.tool_calls,
@@ -404,6 +419,10 @@ def run_agent_loop(
                 completion_gate_provider=completion_gate_provider,
                 terminal_completion_provider=terminal_completion_provider,
                 post_ready_tool_call_callback=post_ready_tool_call_callback,
+                tool_result_observer=tool_result_observer,
+                cached_no_progress_exempt_provider=(
+                    cached_no_progress_exempt_provider
+                ),
             )
             if stop_result is not None:
                 return stop_result
@@ -559,11 +578,11 @@ def _protocol_repair_message(error: str, *, attempt: int, maximum: int) -> Messa
 
 
 def _handle_final_output(
-        state: AgentLoopState,
-        final_output: AgentFinalOutput,
-        start_time: float,
-        usage_tracker: UsageTracker,
-        events: list[AgentEvent],
+    state: AgentLoopState,
+    final_output: AgentFinalOutput,
+    start_time: float,
+    usage_tracker: UsageTracker,
+    events: list[AgentEvent],
 ) -> AgentLoopResult:
     if final_output.status == CompletionStatus.COMPLETED:
         stop_reason = StopReason.COMPLETED
@@ -594,19 +613,22 @@ def _handle_tool_calls(
     events: list[AgentEvent],
     *,
     state_version_provider: Callable[[], int] | None = None,
-    action_fingerprint_normalizer: Callable[
-        [str, dict[str, Any]], dict[str, Any]
-    ] | None = None,
+    action_fingerprint_normalizer: Callable[[str, dict[str, Any]], dict[str, Any]]
+    | None = None,
     semantic_repeat_tools: frozenset[str] = frozenset(),
     cacheable_tools: frozenset[str] = frozenset(),
     state_callback: Callable[[AgentLoopState], None] | None = None,
-    lifecycle_callback: Callable[
-        [str, AgentLoopState, dict[str, Any]], None
-    ] | None = None,
+    lifecycle_callback: Callable[[str, AgentLoopState, dict[str, Any]], None]
+    | None = None,
     halt_signal_provider: Callable[[], tuple[StopReason, str] | None] | None = None,
     completion_gate_provider: Callable[[], CompletionGateDecision] | None = None,
     terminal_completion_provider: Callable[[], str | None] | None = None,
     post_ready_tool_call_callback: Callable[[], None] | None = None,
+    tool_result_observer: Callable[
+        [AgentLoopState, ToolCall, ToolResult, int, bool, bool], None
+    ]
+    | None = None,
+    cached_no_progress_exempt_provider: Callable[[ToolCall, int], bool] | None = None,
 ) -> AgentLoopResult | None:
     if any(call.name == "submit_result" for call in tool_calls) and (
         len(tool_calls) != 1 or tool_calls[0].name != "submit_result"
@@ -639,7 +661,8 @@ def _handle_tool_calls(
             state_callback(state)
         return None
 
-    for call in tool_calls:
+    for call_index, call in enumerate(tool_calls):
+        batch_complete = call_index == len(tool_calls) - 1
         if call.call_id is None:
             return _stop_with_failure(
                 state,
@@ -673,9 +696,7 @@ def _handle_tool_calls(
             workspace_version,
         )
         completion_decision = (
-            completion_gate_provider()
-            if completion_gate_provider is not None
-            else None
+            completion_gate_provider() if completion_gate_provider is not None else None
         )
         if (
             completion_decision is not None
@@ -713,9 +734,7 @@ def _handle_tool_calls(
                 success=True,
             )
             state.cached_no_progress_count += 1
-            record_tool_call(
-                state, call.name, fingerprint_arguments, workspace_version
-            )
+            record_tool_call(state, call.name, fingerprint_arguments, workspace_version)
             state.messages.append(_tool_result_to_message(advisory))
             events.append(
                 make_event(
@@ -744,7 +763,13 @@ def _handle_tool_calls(
                     "provider_call_id": call.provider_call_id,
                 }
             )
-            state.cached_no_progress_count += 1
+            cache_exempt = (
+                cached_no_progress_exempt_provider(call, workspace_version)
+                if cached_no_progress_exempt_provider is not None
+                else False
+            )
+            if not cache_exempt:
+                state.cached_no_progress_count += 1
             record_tool_call(
                 state,
                 call.name,
@@ -752,6 +777,15 @@ def _handle_tool_calls(
                 workspace_version,
             )
             state.messages.append(_tool_result_to_message(cached))
+            if tool_result_observer is not None:
+                tool_result_observer(
+                    state,
+                    call,
+                    cached,
+                    workspace_version,
+                    True,
+                    batch_complete,
+                )
             events.append(
                 make_event(
                     AgentEventType.TOOL_RESULT,
@@ -768,11 +802,26 @@ def _handle_tool_calls(
             )
             if state_callback is not None:
                 state_callback(state)
-            if state.cached_no_progress_count >= 2:
+            if not cache_exempt and state.cached_no_progress_count >= 2:
                 return _stop_with_failure(
                     state,
                     StopReason.NO_PROGRESS,
                     "Agent stopped after repeated cached exploration without workspace changes.",
+                    start_time,
+                    usage_tracker,
+                    events,
+                )
+            halt = (
+                halt_signal_provider()
+                if halt_signal_provider is not None
+                else None
+            )
+            if halt is not None:
+                stop_reason, error = halt
+                return _stop_with_pause(
+                    state,
+                    stop_reason,
+                    error,
                     start_time,
                     usage_tracker,
                     events,
@@ -790,17 +839,19 @@ def _handle_tool_calls(
                 events,
             )
 
-        events.append(make_event(
-            AgentEventType.TOOL_CALLED,
-            f"Calling tool: {call.name}",
-            step_index=state.step_count,
-            data={
-                "call_id": call.call_id,
-                "provider_call_id": call.provider_call_id,
-                "name": call.name,
-                "arguments": call.arguments,
-            },
-        ))
+        events.append(
+            make_event(
+                AgentEventType.TOOL_CALLED,
+                f"Calling tool: {call.name}",
+                step_index=state.step_count,
+                data={
+                    "call_id": call.call_id,
+                    "provider_call_id": call.provider_call_id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                },
+            )
+        )
 
         if lifecycle_callback is not None:
             lifecycle_callback(
@@ -854,18 +905,20 @@ def _handle_tool_calls(
                 },
             )
 
-        events.append(make_event(
-            AgentEventType.TOOL_RESULT,
-            "Tool call finished.",
-            step_index=state.step_count,
-            data={
-                "call_id": result.call_id,
-                "provider_call_id": result.provider_call_id,
-                "name": result.name,
-                "success": result.success,
-                "error": result.error,
-            },
-        ))
+        events.append(
+            make_event(
+                AgentEventType.TOOL_RESULT,
+                "Tool call finished.",
+                step_index=state.step_count,
+                data={
+                    "call_id": result.call_id,
+                    "provider_call_id": result.provider_call_id,
+                    "name": result.name,
+                    "success": result.success,
+                    "error": result.error,
+                },
+            )
+        )
         record_tool_call(
             state,
             call.name,
@@ -873,6 +926,18 @@ def _handle_tool_calls(
             workspace_version,
         )
         state.messages.append(_tool_result_to_message(result))
+        if tool_result_observer is not None:
+            observed_version = (
+                state_version_provider() if state_version_provider is not None else 0
+            )
+            tool_result_observer(
+                state,
+                call,
+                result,
+                observed_version,
+                False,
+                batch_complete,
+            )
         if state_callback is not None:
             state_callback(state)
         terminal_summary = (
@@ -1050,16 +1115,18 @@ def _build_loop_result(
 ) -> AgentLoopResult:
     duration_seconds = time.monotonic() - start_time
 
-    events.append(make_event(
-        AgentEventType.LOOP_STOPPED,
-        "Agent loop stopped.",
-        step_index=state.step_count,
-        data={
-            "stop_reason": stop_reason.value,
-            "total_cost": usage_tracker.total_cost(),
-            "duration_seconds": duration_seconds,
-        },
-    ))
+    events.append(
+        make_event(
+            AgentEventType.LOOP_STOPPED,
+            "Agent loop stopped.",
+            step_index=state.step_count,
+            data={
+                "stop_reason": stop_reason.value,
+                "total_cost": usage_tracker.total_cost(),
+                "duration_seconds": duration_seconds,
+            },
+        )
+    )
 
     return AgentLoopResult(
         status=status,

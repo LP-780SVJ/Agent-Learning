@@ -1,4 +1,5 @@
 """Task-level agent evaluation runner."""
+
 from __future__ import annotations
 
 import hashlib
@@ -128,7 +129,9 @@ class AgentEvalRunner:
                     native_tools=config.native_tools,
                     reasoning_enabled=config.reasoning_enabled,
                     max_steps=min(task.budget.max_steps, config.max_steps),
-                    max_tool_calls=max(1, min(task.budget.max_steps, config.max_steps) * 3),
+                    max_tool_calls=max(
+                        1, min(task.budget.max_steps, config.max_steps) * 3
+                    ),
                     max_repairs=min(task.budget.max_repairs, config.max_repairs),
                     max_protocol_repairs=config.max_protocol_repairs,
                     compaction_mode=CompactionMode(config.compaction_mode),
@@ -159,9 +162,7 @@ class AgentEvalRunner:
                 actor_result=actor_result,
                 config=config,
                 pristine_acceptance_results=pristine_acceptance_results,
-                pristine_task_verification_results=(
-                    pristine_task_verification_results
-                ),
+                pristine_task_verification_results=(pristine_task_verification_results),
             )
             duration_ms = int((time.monotonic() - started) * 1000)
             results.append(
@@ -200,9 +201,7 @@ class AgentEvalRunner:
                     changed_files=grade.changed_files,
                     patch_attempts=actor_result.patch_attempts,
                     repair_attempts=actor_result.repair_attempts,
-                    protocol_repair_attempts=(
-                        actor_result.protocol_repair_attempts
-                    ),
+                    protocol_repair_attempts=(actor_result.protocol_repair_attempts),
                     tool_calls=actor_result.tool_calls,
                     input_tokens=actor_result.input_tokens,
                     output_tokens=actor_result.output_tokens,
@@ -227,6 +226,33 @@ class AgentEvalRunner:
                     post_ready_tool_calls=actor_result.post_ready_tool_calls,
                     verification_workspace_mutations=(
                         actor_result.verification_workspace_mutations
+                    ),
+                    first_patch_step=actor_result.first_patch_step,
+                    pre_edit_step_count=actor_result.pre_edit_step_count,
+                    pre_edit_tool_call_count=actor_result.pre_edit_tool_call_count,
+                    progress_advisory_count=actor_result.progress_advisory_count,
+                    progress_advisory_level_counts=(
+                        actor_result.progress_advisory_level_counts
+                    ),
+                    no_source_progress_pause_count=(
+                        actor_result.no_source_progress_pause_count
+                    ),
+                    max_no_source_progress_streak=(
+                        actor_result.max_no_source_progress_streak
+                    ),
+                    environment_inspection_count=(
+                        actor_result.environment_inspection_count
+                    ),
+                    initial_context_cache_hit_count=(
+                        actor_result.initial_context_cache_hit_count
+                    ),
+                    initial_context_reference_hit_count=(
+                        actor_result.initial_context_reference_hit_count
+                    ),
+                    source_progress_count=actor_result.source_progress_count,
+                    diagnostic_progress_count=actor_result.diagnostic_progress_count,
+                    first_environment_inspection_step=(
+                        actor_result.first_environment_inspection_step
                     ),
                 )
             )
@@ -271,9 +297,7 @@ class AgentEvalRunner:
                                 if task.public_test_patch is not None
                                 else None
                             ),
-                            "public_test_patch_sha256": (
-                                task.public_test_patch_sha256
-                            ),
+                            "public_test_patch_sha256": (task.public_test_patch_sha256),
                             "oracle_review_status": task.oracle_review_status,
                         }
                         for task in tasks
@@ -510,7 +534,9 @@ class AgentEvalRunner:
 def load_agent_eval_tasks(path: Path) -> list[AgentEvalTask]:
     tasks: list[AgentEvalTask] = []
     errors: list[str] = []
-    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_no, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
         stripped = line.strip()
         if not stripped:
             continue
@@ -614,6 +640,52 @@ def summarize_agent_eval_results(
         verification_workspace_mutation_count=sum(
             result.verification_workspace_mutations for result in results
         ),
+        first_patch_step_count=sum(
+            result.first_patch_step is not None for result in results
+        ),
+        first_patch_step_by_task={
+            result.task_id: result.first_patch_step for result in results
+        },
+        pre_edit_step_count=sum(result.pre_edit_step_count for result in results),
+        pre_edit_tool_call_count=sum(
+            result.pre_edit_tool_call_count for result in results
+        ),
+        progress_advisory_count=sum(
+            result.progress_advisory_count for result in results
+        ),
+        progress_advisory_level_counts={
+            level: sum(
+                result.progress_advisory_level_counts.get(level, 0)
+                for result in results
+            )
+            for level in ("1", "2")
+        },
+        no_source_progress_pause_count=sum(
+            result.no_source_progress_pause_count for result in results
+        ),
+        max_no_source_progress_streak=max(
+            (result.max_no_source_progress_streak for result in results), default=0
+        ),
+        environment_inspection_count=sum(
+            result.environment_inspection_count for result in results
+        ),
+        initial_context_cache_hit_count=sum(
+            result.initial_context_cache_hit_count for result in results
+        ),
+        initial_context_reference_hit_count=sum(
+            result.initial_context_reference_hit_count for result in results
+        ),
+        source_progress_count=sum(result.source_progress_count for result in results),
+        diagnostic_progress_count=sum(
+            result.diagnostic_progress_count for result in results
+        ),
+        first_environment_inspection_step_count=sum(
+            result.first_environment_inspection_step is not None for result in results
+        ),
+        first_environment_inspection_step_by_task={
+            result.task_id: result.first_environment_inspection_step
+            for result in results
+        },
     )
 
 
@@ -747,9 +819,22 @@ def _runtime_to_actor_result(
         events=result.events,
         completion_ready=result.completion_ready,
         post_ready_tool_calls=result.post_ready_tool_calls,
-        verification_workspace_mutations=(
-            result.verification_workspace_mutations
+        verification_workspace_mutations=(result.verification_workspace_mutations),
+        first_patch_step=result.first_patch_step,
+        pre_edit_step_count=result.pre_edit_step_count,
+        pre_edit_tool_call_count=result.pre_edit_tool_call_count,
+        progress_advisory_count=result.progress_advisory_count,
+        progress_advisory_level_counts=result.progress_advisory_level_counts,
+        no_source_progress_pause_count=result.no_source_progress_pause_count,
+        max_no_source_progress_streak=result.max_no_source_progress_streak,
+        environment_inspection_count=result.environment_inspection_count,
+        initial_context_cache_hit_count=result.initial_context_cache_hit_count,
+        initial_context_reference_hit_count=(
+            result.initial_context_reference_hit_count
         ),
+        source_progress_count=result.source_progress_count,
+        diagnostic_progress_count=result.diagnostic_progress_count,
+        first_environment_inspection_step=(result.first_environment_inspection_step),
     )
 
 

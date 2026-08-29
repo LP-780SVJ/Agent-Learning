@@ -3,7 +3,7 @@
 > 文档状态：持续维护  
 > 首次建立：2026-08-27  
 > 当前分支：`week4`  
-> 当前记录终点：Agent Turn 已通过用户 B01 暴露真实 verification toolchain 缺口；第一刀半已离线与 Docker 验证，等待用户复验 B01
+> 当前记录终点：第四刀 Progress Control、受限环境探测与 Initial Context 复用已离线实现；等待用户运行稳定性 campaign
 > 维护范围：从第一次真实 15-task benchmark 开始，持续记录单 Agent 生产闭环的故障、修复、实验和架构演进
 
 ## 1. 文档目的
@@ -1174,4 +1174,83 @@ Colima socket；获得 Docker daemon 权限后同一命令实际执行为 `60 pa
 Post-fix B01: NOT_RUN_BY_CODER
 Post-fix 11-task: NOT_RUN_BY_CODER
 Benchmark / ablation / real LLM: NOT_RUN_BY_CODER
+```
+
+### 2026-08-29：第四刀——Progress Control & Diagnostic Affordance
+
+#### 用户运行证据
+
+本轮只读取既有真实运行，不由 coder 重跑：
+
+- `completion_gate_b01_20260829_171808`：B01 1/1 success，completion ready、actor
+  completed、task/regression/acceptance/security 全通过，repair/protocol/provider/
+  environment/workspace mutation 均为 0。
+- `completion_gate_11task_20260829_171835`：10/11 success；唯一失败 F03 为
+  `max_steps`。整体 acceptance/regression/task verification 均 10，security 11，
+  ready-but-actor-failed、post-ready calls、workspace mutation 均为 0。
+- F03 完整 evidence：20 turns、37 calls、0 patch attempts、0 changed files；sandbox、
+  verification toolchain 和 Provider 正常。模型已读到 dispatcher、public test 和 config，
+  正确理解 explicit false 才 suppress、missing 保持行为，却围绕 PyYAML availability
+  持续不同 read/search/list。第 19 turn 已形成 minimal parser/fallback 思路，仍未 patch。
+
+因此根因分层是：primary 为 Runtime 缺少 source-progress-aware intervention；secondary
+为实际 verification sandbox 缺少受限 dependency probe；重复初始读取是效率贡献项。
+它不是 retrieval、completion、repair、provider、protocol 或 verification failure。
+
+#### 实现决策
+
+1. [DD-W4-D7-11](../docs/design_decisions/DD-W4-D7-11.md)：新增独立
+   `ProgressTracker/ProgressPolicy`。source、diagnostic、completion 三类进展不混账；
+   40%/70% 两级 soft advisory 进入下一次正常 request；85% 后满足条件才
+   `PAUSED + no_source_progress`，不强迫错误 patch。一次成功 patch 为新 workspace
+   version 重置提示状态。
+2. [DD-W4-D7-12](../docs/design_decisions/DD-W4-D7-12.md)：新增
+   `inspect_environment`，只允许 module/bare executable；Runtime fixed probe 在真实
+   read-only verification Docker 中运行。availability 与 declaration 分开，未声明但
+   image 偶然具备会警告不可移植。没有 generic `run_command`，没有放宽 `python -c`。
+3. [DD-W4-D7-13](../docs/design_decisions/DD-W4-D7-13.md)：从
+   `ContextBuildReport` 显式建立 versioned `InitialContextSnapshot`。完整且当前、并仍
+   位于请求内才返回引用；被 compaction 移除则回完整缓存；partial/ranged/stale 真实读。
+
+F03 失败分析保存在
+[FC-W4-D7-04](../docs/failure_cases/FC-W4-D7-04.md)。Session schema 升至 v4，累计
+progress metrics 可 resume；Evaluation result 和 summary 贯通 first patch、pre-edit、
+advisory/pause、environment inspection、initial context reuse 等字段。
+
+#### 用户运行稳定性方案
+
+新增 `scripts/run_single_agent_stability_validation.sh`：顺序执行 F03 x5、B01 x2、
+11-task x3；每次独立时间戳/序号目录，业务失败不中断后续运行，最终由项目
+`.venv/bin/python` 汇总 `stability_summary.json` 并按门槛返回 exit code。Coder 只运行
+了 `bash -n` 和 `--dry-run`，没有执行真实 Provider campaign。
+
+#### 离线验证结果
+
+```text
+focused agent/execution/sandbox/evaluation/session/scripts:
+426 passed, 9 skipped
+
+full pytest:
+1367 passed, 9 skipped
+
+touched-path Ruff:
+All checks passed!
+
+touched source Mypy --follow-imports=skip:
+Success: no issues found in 11 source files
+
+bash -n + stability --dry-run:
+passed; 10 commands printed, no campaign output created
+
+git diff --check:
+passed (no output)
+```
+
+9 个 skip 仍是当前受限终端不能访问 Docker daemon 的既有 integration skip；本轮没有
+申请或执行真实 Docker probe，也没有把 host availability 当作 sandbox evidence。
+
+```text
+Post-change real LLM: NOT_RUN_BY_CODER
+Post-change benchmark: NOT_RUN_BY_CODER
+Commit: UNCOMMITTED
 ```

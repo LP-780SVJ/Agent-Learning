@@ -21,6 +21,8 @@ from codeteam.agent.runtime_models import (
     VerificationEvidence,
 )
 from codeteam.agent.runtime_tools import RuntimeEvidence
+from codeteam.application.build_context import CodeContextReport
+from codeteam.context.models import CompressionLevel
 from codeteam.execution.models import CommandResult, CommandStatus
 from codeteam.execution.safe_execution_service import SafeExecutionService
 from codeteam.git.workspace import GitWorkspace
@@ -139,6 +141,36 @@ class StubContext:
             test_commands=[],
             diagnostics=[],
         )
+
+
+class FullFileContext(StubContext):
+    def execute(self, **kwargs):
+        report = super().execute(**kwargs)
+        report.code_context = [
+            CodeContextReport(
+                path="app.py",
+                compression_level=CompressionLevel.FULL_FILE.value,
+                token_count=4,
+                content="VALUE = 1\n",
+            )
+        ]
+        return report
+
+
+class LongFullFileContext(StubContext):
+    content = "VALUE = 1\n" * 200
+
+    def execute(self, **kwargs):
+        report = super().execute(**kwargs)
+        report.code_context = [
+            CodeContextReport(
+                path="app.py",
+                compression_level=CompressionLevel.FULL_FILE.value,
+                token_count=600,
+                content=self.content,
+            )
+        ]
+        return report
 
 
 class SequencedSandbox:
@@ -389,9 +421,8 @@ def test_submit_result_rejection_preserves_pairing_and_continues(
     submit_results = [
         json.loads(message.content or "{}")
         for message in result.messages
-        if message.role == "tool" and message.provider_call_id in {
-            "provider-call-2", "provider-call-5"
-        }
+        if message.role == "tool"
+        and message.provider_call_id in {"provider-call-2", "provider-call-5"}
     ]
     assert [item["accepted"] for item in submit_results] == [False, True]
     assert result.status is RuntimeStatus.COMPLETED
@@ -432,7 +463,8 @@ def test_completion_ready_duplicate_is_advisory_then_submit_can_finish(
     )
 
     advisory = next(
-        message for message in result.messages
+        message
+        for message in result.messages
         if message.provider_call_id == "provider-call-4"
     )
     assert json.loads(advisory.content or "{}")["completion_ready"] is True
@@ -492,8 +524,10 @@ def test_mixed_submit_result_batch_executes_nothing(tmp_path: Path) -> None:
     assert result.status is RuntimeStatus.FAILED
     assert (repo / "app.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     mixed_results = [
-        message for message in result.messages
-        if message.role == "tool" and message.provider_call_id
+        message
+        for message in result.messages
+        if message.role == "tool"
+        and message.provider_call_id
         and message.provider_call_id.startswith("provider-mixed-")
     ]
     assert len(mixed_results) == 2
@@ -506,7 +540,11 @@ def test_verification_workspace_mutation_is_typed_and_stales_evidence(
     sandbox = WorkspaceMutatingSandbox()
     model = ScriptedModel(
         [
-            _call(1, "apply_patch", {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]}),
+            _call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
             _call(2, "run_tests", {"argv": ["python", "-m", "pytest"]}),
         ]
     )
@@ -773,7 +811,11 @@ def test_runtime_completes_search_patch_test_repair_diff_loop(tmp_path: Path) ->
         [
             _call(1, "search_code", {"query": "VALUE", "path": "."}),
             _call(2, "read_file", {"path": "app.py"}),
-            _call(3, "apply_patch", {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]}),
+            _call(
+                3,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
             _call(30, "read_file", {"path": "app.py"}),
             _call(
                 4,
@@ -781,7 +823,11 @@ def test_runtime_completes_search_patch_test_repair_diff_loop(tmp_path: Path) ->
                 {"argv": ["python", "-m", "pytest", "/workspace/tests"]},
             ),
             _call(5, "git_diff", {}),
-            _call(6, "apply_patch", {"edits": [{"path": "app.py", "content": "VALUE = 3\n"}]}),
+            _call(
+                6,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 3\n"}]},
+            ),
             _call(
                 7,
                 "run_tests",
@@ -827,9 +873,15 @@ def test_task_verification_is_distinct_from_broad_regression(tmp_path: Path) -> 
     repo = _repo(tmp_path)
     model = ScriptedModel(
         [
-            _call(1, "apply_patch", {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]}),
+            _call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
             _call(2, "run_tests", {"argv": ["python", "-m", "pytest", "tests"]}),
-            _call(3, "run_tests", {"argv": ["python", "-m", "pytest", "tests/task.py"]}),
+            _call(
+                3, "run_tests", {"argv": ["python", "-m", "pytest", "tests/task.py"]}
+            ),
             _call(4, "git_diff", {}),
             {"status": "completed", "summary": "verified", "tests_passed": True},
         ]
@@ -846,9 +898,7 @@ def test_task_verification_is_distinct_from_broad_regression(tmp_path: Path) -> 
             provider_id="scripted",
             model_id="scripted",
             verification_commands=(("python", "-m", "pytest", "tests"),),
-            task_verification_commands=(
-                ("python", "-m", "pytest", "tests/task.py"),
-            ),
+            task_verification_commands=(("python", "-m", "pytest", "tests/task.py"),),
             checkpoint_state_root=tmp_path / "checkpoints",
         )
     )
@@ -898,7 +948,11 @@ def test_completed_without_verification_pauses(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     model = ScriptedModel(
         [
-            _call(1, "apply_patch", {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]}),
+            _call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
             {"status": "completed", "summary": "done", "tests_passed": False},
         ]
     )
@@ -923,7 +977,10 @@ def test_compaction_modes_are_behaviorally_distinct() -> None:
     messages = [
         Message(role="system", content="system"),
         Message(role="user", content="task"),
-        *[Message(role="tool", content="x" * 40, tool_call_id=str(i)) for i in range(6)],
+        *[
+            Message(role="tool", content="x" * 40, tool_call_id=str(i))
+            for i in range(6)
+        ],
     ]
     none = _message_transform(CompactionMode.NONE, 20)(messages)
     naive = _message_transform(CompactionMode.NAIVE, 20)(messages)
@@ -931,7 +988,9 @@ def test_compaction_modes_are_behaviorally_distinct() -> None:
 
     assert none == messages
     assert len(naive) < len(none)
-    assert any("structured_context_summary" in (item.content or "") for item in structured)
+    assert any(
+        "structured_context_summary" in (item.content or "") for item in structured
+    )
     assert structured != naive
 
 
@@ -970,9 +1029,7 @@ def test_structured_compaction_keeps_deterministic_runtime_facts() -> None:
         Message(role="assistant", content="<｜｜DSML｜｜tool_calls>raw"),
     ]
 
-    compacted = _message_transform(CompactionMode.STRUCTURED, 20, evidence)(
-        messages
-    )
+    compacted = _message_transform(CompactionMode.STRUCTURED, 20, evidence)(messages)
     summary = next(
         json.loads(item.content)["structured_context_summary"]
         for item in compacted
@@ -1054,7 +1111,11 @@ def test_approval_required_command_pauses_fail_closed(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     model = ScriptedModel(
         [
-            _call(1, "apply_patch", {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]}),
+            _call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
             _call(2, "run_tests", {"argv": ["pip", "install", "package"]}),
             {"status": "completed", "summary": "done", "tests_passed": False},
         ]
@@ -1174,27 +1235,22 @@ def test_runtime_completes_with_dsml_actions_and_fenced_final(tmp_path: Path) ->
     model = SimpleNamespace()
     model.outputs = [
         (
-            f"<{dsml}tool_calls><{dsml}invoke name=\"apply_patch\">"
-            f"<{dsml}parameter name=\"edits\" string=\"false\">"
+            f'<{dsml}tool_calls><{dsml}invoke name="apply_patch">'
+            f'<{dsml}parameter name="edits" string="false">'
             '[{"path":"app.py","content":"VALUE = 2\\n"}]'
             f"</{dsml}parameter></{dsml}invoke></{dsml}tool_calls>"
         ),
         (
-            f"<{dsml}tool_calls><{dsml}invoke name=\"run_tests\">"
-            f"<{dsml}parameter name=\"argv\" string=\"false\">"
+            f'<{dsml}tool_calls><{dsml}invoke name="run_tests">'
+            f'<{dsml}parameter name="argv" string="false">'
             '["python","-m","pytest"]'
             f"</{dsml}parameter></{dsml}invoke></{dsml}tool_calls>"
         ),
         (
-            f"<{dsml}tool_calls><{dsml}invoke name=\"git_diff\">"
+            f'<{dsml}tool_calls><{dsml}invoke name="git_diff">'
             f"</{dsml}invoke></{dsml}tool_calls>"
         ),
-        (
-            "```json\n"
-            '{"status":"completed","summary":"fixed",'
-            '"tests_passed":true}\n'
-            "```"
-        ),
+        ('```json\n{"status":"completed","summary":"fixed","tests_passed":true}\n```'),
     ]
     model.requests = []
 
@@ -1316,3 +1372,242 @@ def test_equivalent_failed_verification_stops_without_spending_more_steps(
     assert result.steps_used == 4
     assert result.tool_calls_used == 3
     assert len(result.verification) == 1
+
+
+def test_progress_advisories_share_normal_requests_then_pause_stagnation(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    outputs = [
+        _call(step, "search_code", {"query": f"unique-{step}"}) for step in range(1, 18)
+    ]
+    model = ScriptedModel(outputs)
+
+    result = CodingAgentRuntime(model_client=model, context_service=StubContext()).run(
+        CodingAgentRunRequest(
+            task_id="progress-stagnation",
+            task="find and fix the issue",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            max_steps=20,
+            max_tool_calls=40,
+        )
+    )
+
+    assert result.status is RuntimeStatus.PAUSED
+    assert result.failure_category == "no_source_progress"
+    assert result.steps_used == 17
+    assert result.tool_calls_used == 17
+    assert len(model.requests) == 17
+    assert result.progress_advisory_level_counts == {"1": 1, "2": 1}
+    assert result.no_source_progress_pause_count == 1
+    advisories = [
+        json.loads(message.content or "{}")
+        for request_messages in model.requests
+        for message in request_messages
+        if "progress_advisory" in (message.content or "")
+    ]
+    assert [item["progress_advisory"]["level"] for item in advisories] == [1, 2]
+
+
+def test_progress_pause_finishes_all_calls_in_the_terminal_batch(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    outputs = [
+        _call(step, "search_code", {"query": f"unique-{step}"})
+        for step in range(1, 17)
+    ]
+    outputs.append(
+        {
+            "tool_calls": [
+                {"name": "search_code", "arguments": {"query": "terminal-a"}},
+                {"name": "search_code", "arguments": {"query": "terminal-b"}},
+            ]
+        }
+    )
+    model = ScriptedModel(outputs)
+
+    result = CodingAgentRuntime(model_client=model, context_service=StubContext()).run(
+        CodingAgentRunRequest(
+            task_id="progress-terminal-batch",
+            task="find and fix the issue",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            max_steps=20,
+            max_tool_calls=40,
+        )
+    )
+
+    assert result.failure_category == "no_source_progress"
+    assert result.steps_used == 17
+    assert result.tool_calls_used == 18
+    assert [message.role for message in result.messages[-3:]] == [
+        "assistant",
+        "tool",
+        "tool",
+    ]
+
+
+def test_successful_patch_records_pre_edit_metrics_without_advisory(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    model = ScriptedModel(
+        [
+            _call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
+            {
+                "status": "failed",
+                "summary": "stop after metric inspection",
+                "tests_passed": False,
+                "error": "test stop",
+            },
+        ]
+    )
+
+    result = CodingAgentRuntime(model_client=model, context_service=StubContext()).run(
+        CodingAgentRunRequest(
+            task_id="progress-patch",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+        )
+    )
+
+    assert result.first_patch_step == 1
+    assert result.pre_edit_step_count == 0
+    assert result.pre_edit_tool_call_count == 0
+    assert result.source_progress_count == 1
+    assert result.progress_advisory_count == 0
+
+
+def test_same_turn_initial_context_reads_are_references_not_no_progress(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    model = NativeScriptedModel(
+        [
+            ModelTurn(
+                text=None,
+                tool_calls=(
+                    ToolCall(
+                        provider_call_id="read-1",
+                        name="read_file",
+                        arguments={"path": "app.py"},
+                    ),
+                    ToolCall(
+                        provider_call_id="read-2",
+                        name="read_file",
+                        arguments={"path": "app.py"},
+                    ),
+                ),
+                finish_state=ModelFinishState.TOOL_CALLS,
+                model="mock-model",
+            ),
+            ModelTurn(
+                text=json.dumps(
+                    {
+                        "status": "failed",
+                        "summary": "test stop",
+                        "tests_passed": False,
+                        "error": "test stop",
+                    }
+                ),
+                finish_state=ModelFinishState.STOP,
+                model="mock-model",
+            ),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model, context_service=FullFileContext()
+    ).run(
+        CodingAgentRunRequest(
+            task_id="initial-context-multi-read",
+            task="inspect app",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+        )
+    )
+
+    assert result.failure_category == "failed"
+    assert result.steps_used == 2
+    assert result.tool_calls_used == 2
+    assert result.initial_context_cache_hit_count == 2
+    assert result.initial_context_reference_hit_count == 2
+    tool_messages = [message for message in result.messages if message.role == "tool"]
+    assert len(tool_messages) == 2
+    assert all(
+        json.loads(message.content or "{}")["initial_context_reference"]
+        for message in tool_messages
+    )
+
+
+def test_compacted_initial_context_multi_read_returns_content_without_no_progress(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    (repo / "app.py").write_text(LongFullFileContext.content, encoding="utf-8")
+    _git(repo, "add", "app.py")
+    _git(repo, "commit", "-m", "long context")
+    first_turn = ModelTurn(
+        text=None,
+        tool_calls=(
+            ToolCall(
+                provider_call_id="compact-read-1",
+                name="read_file",
+                arguments={"path": "app.py"},
+            ),
+            ToolCall(
+                provider_call_id="compact-read-2",
+                name="read_file",
+                arguments={"path": "app.py"},
+            ),
+        ),
+        finish_state=ModelFinishState.TOOL_CALLS,
+        model="mock-model",
+    )
+    stop_turn = ModelTurn(
+        text=json.dumps(
+            {
+                "status": "failed",
+                "summary": "test stop",
+                "tests_passed": False,
+                "error": "test stop",
+            }
+        ),
+        finish_state=ModelFinishState.STOP,
+        model="mock-model",
+    )
+    model = NativeScriptedModel([first_turn, stop_turn])
+
+    result = CodingAgentRuntime(
+        model_client=model, context_service=LongFullFileContext()
+    ).run(
+        CodingAgentRunRequest(
+            task_id="initial-context-compacted-multi-read",
+            task="inspect app",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            context_budget=512,
+        )
+    )
+
+    assert result.failure_category == "failed"
+    assert result.tool_calls_used == 2
+    assert result.initial_context_cache_hit_count == 2
+    assert result.initial_context_reference_hit_count == 0
+    tool_messages = [message for message in result.messages if message.role == "tool"]
+    assert [message.content for message in tool_messages] == [
+        LongFullFileContext.content,
+        LongFullFileContext.content,
+    ]

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
+from typing import Any
 
 from codeteam.agent.completion import CompletionGate
+from codeteam.agent.initial_context import InitialContextSnapshot
+from codeteam.agent.progress import ProgressPolicy, ProgressTracker
 from codeteam.agent.runtime_models import (
     CodingAgentRunRequest,
     CodingAgentRunResult,
@@ -23,6 +27,10 @@ from codeteam.execution.safe_execution_service import SafeExecutionService
 from codeteam.git.workspace import GitWorkspace
 from codeteam.limits import AgentLoopLimits
 from codeteam.llm.base import LegacyModelClient, ModelClient
+from codeteam.sandbox.environment_inspection import (
+    DockerEnvironmentInspector,
+    EnvironmentInspector,
+)
 from codeteam.sandbox.models import SandboxProfile
 from codeteam.sandbox.preflight import DockerSandboxPreflight, SandboxPreflight
 from codeteam.sandbox.verification_preflight import (
@@ -55,6 +63,7 @@ class CodingAgentRuntime:
         sandbox_preflight: SandboxPreflight | None = None,
         verification_preflight: VerificationEnvironmentPreflight | None = None,
         sandbox_profile: SandboxProfile | None = None,
+        environment_inspector: EnvironmentInspector | None = None,
     ) -> None:
         self._model_client = model_client
         self._safe_execution = safe_execution or SafeExecutionService()
@@ -62,6 +71,14 @@ class CodingAgentRuntime:
         self._state_callback = state_callback
         self._operation_callback = operation_callback
         self._sandbox_profile = sandbox_profile or SandboxProfile()
+        self._environment_inspector = (
+            environment_inspector
+            or DockerEnvironmentInspector(
+                profile=self._sandbox_profile.model_copy(
+                    update={"workspace_write": False}
+                )
+            )
+        )
         preflight_profile = self._sandbox_profile.model_copy(
             update={"workspace_write": False}
         )
@@ -158,11 +175,13 @@ class CodingAgentRuntime:
                 request.initial_workspace_hygiene_clean if resume_matches else True
             ),
         )
+        progress = _progress_tracker_from_request(request, evidence.workspace_version)
         allowed_verification_commands = tuple(
             dict.fromkeys(
                 (*request.task_verification_commands, *request.verification_commands)
             )
         )
+
         def completion_decision():
             workspace = GitWorkspace(root)
             changed_files = tuple(change.path for change in workspace.changed_files())
@@ -174,6 +193,15 @@ class CodingAgentRuntime:
             )
             evidence.completion_ready_seen |= decision.ready
             return decision
+
+        restored_messages = _canonicalize_conversation(list(request.initial_messages))
+        if restored_messages:
+            messages = restored_messages
+            initial_snapshot = None
+        else:
+            messages, initial_snapshot = self._initial_messages(
+                request, [], workspace_version=evidence.workspace_version
+            )
 
         tools = create_runtime_tools(
             workspace_root=root,
@@ -193,11 +221,12 @@ class CodingAgentRuntime:
                 else ()
             ),
             completion_gate_provider=completion_decision,
+            environment_inspector=self._environment_inspector,
+            initial_context_snapshot=initial_snapshot,
             max_repairs=request.max_repairs,
         )
-        messages = _canonicalize_conversation(
-            list(request.initial_messages)
-        ) or self._initial_messages(request, tools.describe())
+        if not restored_messages:
+            messages = _with_tool_schemas(messages, tools.describe())
 
         def persist(state: AgentLoopState) -> None:
             if self._state_callback is not None:
@@ -210,6 +239,77 @@ class CodingAgentRuntime:
         ) -> None:
             if self._operation_callback is not None:
                 self._operation_callback(phase, state, evidence, data)
+
+        def observe_tool_result(
+            state, call, result, workspace_version, cached, batch_complete
+        ) -> None:
+            del cached
+            cache_hit, reference_hit = InitialContextSnapshot.result_flags(
+                result.content if result.success else ""
+            )
+            if _initial_context_reuse_for_call(
+                initial_snapshot, call, workspace_version
+            ):
+                cache_hit = True
+                reference_hit = bool(
+                    initial_snapshot is not None
+                    and initial_snapshot.visible_in_current_request
+                )
+            evidence_key = hashlib.sha256(
+                json.dumps(
+                    {
+                        "name": call.name,
+                        "arguments": normalize_runtime_action(
+                            call.name, call.arguments
+                        ),
+                        "success": result.success,
+                        "content": result.content,
+                        "error": result.error,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+            decision = completion_decision()
+            progress.observe_tool_result(
+                step=state.step_count,
+                tool_call_count=state.tool_call_count,
+                tool_name=call.name,
+                success=result.success,
+                workspace_version=workspace_version,
+                evidence_key=f"{call.name}:{evidence_key}",
+                completion_ready=decision.ready,
+                initial_context_cache_hit=cache_hit,
+                initial_context_reference_hit=reference_hit,
+            )
+            if progress.paused_reason is not None and batch_complete:
+                evidence.paused_category = "no_source_progress"
+                evidence.paused_reason = progress.paused_reason
+            evidence.progress_metrics = _progress_metrics(progress)
+
+        def progress_advisory(state: AgentLoopState) -> Message | None:
+            advisory = progress.advisory_for_request(
+                step=state.step_count,
+                tool_call_count=state.tool_call_count,
+                completion_ready=completion_decision().ready,
+            )
+            evidence.progress_metrics = _progress_metrics(progress)
+            return advisory
+
+        def fingerprint_action(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            normalized = normalize_runtime_action(name, arguments)
+            if initial_snapshot is not None and _initial_context_reuse_for_arguments(
+                initial_snapshot,
+                name,
+                arguments,
+                evidence.workspace_version,
+            ):
+                normalized["_initial_context_visibility"] = (
+                    "visible"
+                    if initial_snapshot.visible_in_current_request
+                    else "compacted"
+                )
+            return normalized
 
         persist(
             AgentLoopState(
@@ -233,9 +333,10 @@ class CodingAgentRuntime:
                 request.context_budget,
                 evidence,
                 tool_schemas=tuple(tools.describe()),
+                initial_context_snapshot=initial_snapshot,
             ),
             state_version_provider=lambda: evidence.workspace_version,
-            action_fingerprint_normalizer=normalize_runtime_action,
+            action_fingerprint_normalizer=fingerprint_action,
             semantic_repeat_tools=frozenset({"run_tests"}),
             cacheable_tools=frozenset(
                 {"list_files", "read_file", "search_code", "git_status", "git_diff"}
@@ -251,14 +352,19 @@ class CodingAgentRuntime:
                 )
             ),
             completion_gate_provider=completion_decision,
-            terminal_completion_provider=(
-                lambda: evidence.accepted_submission_summary
-            ),
+            terminal_completion_provider=(lambda: evidence.accepted_submission_summary),
             post_ready_tool_call_callback=(
                 lambda: setattr(
                     evidence,
                     "post_ready_tool_calls",
                     evidence.post_ready_tool_calls + 1,
+                )
+            ),
+            request_advisory_provider=progress_advisory,
+            tool_result_observer=observe_tool_result,
+            cached_no_progress_exempt_provider=(
+                lambda call, workspace_version: _initial_context_reuse_for_call(
+                    initial_snapshot, call, workspace_version
                 )
             ),
             max_output_tokens=request.max_output_tokens,
@@ -269,6 +375,15 @@ class CodingAgentRuntime:
             reasoning_enabled=request.reasoning_enabled,
         )
         workspace = GitWorkspace(root)
+        if initial_snapshot is not None:
+            progress.initial_context_cache_hit_count = max(
+                progress.initial_context_cache_hit_count,
+                initial_snapshot.cache_hit_count,
+            )
+            progress.initial_context_reference_hit_count = max(
+                progress.initial_context_reference_hit_count,
+                initial_snapshot.reference_hit_count,
+            )
         changed_files = tuple(change.path for change in workspace.changed_files())
         diff = render_workspace_diff(root) if changed_files else ""
         status, category, error = self._finalize(loop, evidence, changed_files, diff)
@@ -330,13 +445,32 @@ class CodingAgentRuntime:
             verification_workspace_mutations=(
                 evidence.verification_workspace_mutations
             ),
+            first_patch_step=progress.first_patch_step,
+            pre_edit_step_count=progress.pre_edit_step_count,
+            pre_edit_tool_call_count=progress.pre_edit_tool_call_count,
+            progress_advisory_count=progress.progress_advisory_count,
+            progress_advisory_level_counts=progress.progress_advisory_level_counts,
+            no_source_progress_pause_count=progress.no_source_progress_pause_count,
+            max_no_source_progress_streak=progress.max_no_source_progress_streak,
+            environment_inspection_count=progress.environment_inspection_count,
+            initial_context_cache_hit_count=progress.initial_context_cache_hit_count,
+            initial_context_reference_hit_count=(
+                progress.initial_context_reference_hit_count
+            ),
+            source_progress_count=progress.source_progress_count,
+            diagnostic_progress_count=progress.diagnostic_progress_count,
+            first_environment_inspection_step=(
+                progress.first_environment_inspection_step
+            ),
         )
 
     def _initial_messages(
         self,
         request: CodingAgentRunRequest,
         schemas: list[dict[str, object]],
-    ) -> list[Message]:
+        *,
+        workspace_version: int,
+    ) -> tuple[list[Message], InitialContextSnapshot]:
         context = self._context_service.execute(
             query=request.task,
             repository_root=request.workspace_root,
@@ -348,9 +482,14 @@ class CodingAgentRuntime:
             "repo_map": context.repo_map,
             "files": [item.model_dump() for item in context.code_context],
             "instructions": context.applicable_instructions,
-            "visible_test_commands": [item.model_dump(mode="json") for item in context.test_commands],
+            "visible_test_commands": [
+                item.model_dump(mode="json") for item in context.test_commands
+            ],
             "diagnostics": context.diagnostics,
         }
+        snapshot = InitialContextSnapshot.from_context_report(
+            context, workspace_version=workspace_version
+        )
         system = {
             "role": "coding_agent",
             "protocol": {
@@ -449,8 +588,7 @@ class CodingAgentRuntime:
             "task_verification_commands": [
                 list(command)
                 for command in (
-                    request.task_verification_commands
-                    or request.verification_commands
+                    request.task_verification_commands or request.verification_commands
                 )
             ],
             "regression_commands": [
@@ -461,7 +599,7 @@ class CodingAgentRuntime:
         return [
             Message(role="system", content=json.dumps(system, ensure_ascii=False)),
             Message(role="user", content=json.dumps(user, ensure_ascii=False)),
-        ]
+        ], snapshot
 
     @staticmethod
     def _finalize(loop, evidence, changed_files, diff):
@@ -487,9 +625,17 @@ class CodingAgentRuntime:
         if not decision.ready:
             missing = ", ".join(decision.missing_requirements)
             if "real_git_diff" in decision.missing_requirements:
-                return RuntimeStatus.FAILED, "no_patch", "Completion requires a real Git diff."
+                return (
+                    RuntimeStatus.FAILED,
+                    "no_patch",
+                    "Completion requires a real Git diff.",
+                )
             if "safe_git_diff" in decision.missing_requirements:
-                return RuntimeStatus.FAILED, "security_failure", "Final diff touches Git metadata."
+                return (
+                    RuntimeStatus.FAILED,
+                    "security_failure",
+                    "Final diff touches Git metadata.",
+                )
             if "workspace_hygiene_clean" in decision.missing_requirements:
                 return RuntimeStatus.PAUSED, "workspace_hygiene_failed", missing
             if "current_version_verification" in decision.missing_requirements:
@@ -504,13 +650,20 @@ def _message_transform(
     evidence: RuntimeEvidence | None = None,
     *,
     tool_schemas: tuple[dict[str, object], ...] = (),
+    initial_context_snapshot: InitialContextSnapshot | None = None,
 ) -> Callable[[list[Message]], list[Message]]:
     def transform(messages: list[Message]) -> list[Message]:
         messages = _canonicalize_conversation(messages)
         if mode is CompactionMode.NONE:
+            if initial_context_snapshot is not None:
+                initial_context_snapshot.set_request_visibility(True)
             return messages
         if _conversation_tokens(messages, tool_schemas) <= context_budget:
+            if initial_context_snapshot is not None:
+                initial_context_snapshot.set_request_visibility(True)
             return messages
+        if initial_context_snapshot is not None:
+            initial_context_snapshot.set_request_visibility(False)
 
         # Initial context is a snapshot, not an untouchable prefix.  Once the
         # request is over budget, replace it with an explicit compact form.
@@ -551,6 +704,123 @@ def _message_transform(
         return reduced
 
     return transform
+
+
+def _with_tool_schemas(
+    messages: list[Message], schemas: list[dict[str, object]]
+) -> list[Message]:
+    if not messages:
+        return messages
+    try:
+        payload = json.loads(messages[0].content or "{}")
+    except json.JSONDecodeError:
+        return messages
+    if not isinstance(payload, dict):
+        return messages
+    payload["tools"] = schemas
+    return [
+        messages[0].model_copy(
+            update={"content": json.dumps(payload, ensure_ascii=False)}
+        ),
+        *messages[1:],
+    ]
+
+
+def _progress_tracker_from_request(
+    request: CodingAgentRunRequest, workspace_version: int
+) -> ProgressTracker:
+    metrics = request.initial_progress_metrics
+
+    def integer(name: str) -> int:
+        value = metrics.get(name, 0)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    first_patch = metrics.get("first_patch_step")
+    first_environment = metrics.get("first_environment_inspection_step")
+    levels = metrics.get("progress_advisory_level_counts", {})
+    return ProgressTracker(
+        policy=ProgressPolicy(max_steps=request.max_steps),
+        workspace_version=workspace_version,
+        first_patch_step=(
+            first_patch if isinstance(first_patch, int) and first_patch > 0 else None
+        ),
+        pre_edit_step_count=integer("pre_edit_step_count"),
+        pre_edit_tool_call_count=integer("pre_edit_tool_call_count"),
+        progress_advisory_count=integer("progress_advisory_count"),
+        progress_advisory_level_counts=(
+            {
+                str(key): int(value)
+                for key, value in levels.items()
+                if isinstance(value, int)
+            }
+            if isinstance(levels, dict)
+            else {}
+        ),
+        no_source_progress_pause_count=integer("no_source_progress_pause_count"),
+        max_no_source_progress_streak=integer("max_no_source_progress_streak"),
+        environment_inspection_count=integer("environment_inspection_count"),
+        initial_context_cache_hit_count=integer("initial_context_cache_hit_count"),
+        initial_context_reference_hit_count=integer(
+            "initial_context_reference_hit_count"
+        ),
+        source_progress_count=integer("source_progress_count"),
+        diagnostic_progress_count=integer("diagnostic_progress_count"),
+        first_environment_inspection_step=(
+            first_environment
+            if isinstance(first_environment, int) and first_environment > 0
+            else None
+        ),
+    )
+
+
+def _progress_metrics(progress: ProgressTracker) -> dict[str, object]:
+    return {
+        "first_patch_step": progress.first_patch_step,
+        "pre_edit_step_count": progress.pre_edit_step_count,
+        "pre_edit_tool_call_count": progress.pre_edit_tool_call_count,
+        "progress_advisory_count": progress.progress_advisory_count,
+        "progress_advisory_level_counts": dict(progress.progress_advisory_level_counts),
+        "no_source_progress_pause_count": progress.no_source_progress_pause_count,
+        "max_no_source_progress_streak": progress.max_no_source_progress_streak,
+        "environment_inspection_count": progress.environment_inspection_count,
+        "initial_context_cache_hit_count": progress.initial_context_cache_hit_count,
+        "initial_context_reference_hit_count": (
+            progress.initial_context_reference_hit_count
+        ),
+        "source_progress_count": progress.source_progress_count,
+        "diagnostic_progress_count": progress.diagnostic_progress_count,
+        "first_environment_inspection_step": (
+            progress.first_environment_inspection_step
+        ),
+    }
+
+
+def _initial_context_reuse_for_call(
+    snapshot: InitialContextSnapshot | None,
+    call,
+    workspace_version: int,
+) -> bool:
+    return _initial_context_reuse_for_arguments(
+        snapshot, call.name, call.arguments, workspace_version
+    )
+
+
+def _initial_context_reuse_for_arguments(
+    snapshot: InitialContextSnapshot | None,
+    name: str,
+    arguments: dict[str, Any],
+    workspace_version: int,
+) -> bool:
+    if snapshot is None or name != "read_file":
+        return False
+    path = arguments.get("path")
+    if not isinstance(path, str):
+        return False
+    if arguments.get("start_line") is not None:
+        return False
+    if arguments.get("end_line") is not None:
+        return False
+    return snapshot.reusable_file(path, workspace_version) is not None
 
 
 def _conversation_tokens(
@@ -752,9 +1022,7 @@ def _structured_context_message(
             if name == "read_file" and isinstance(path, str):
                 read_files.add(path)
             elif name == "search_code":
-                searches.add(
-                    json.dumps(arguments, ensure_ascii=False, sort_keys=True)
-                )
+                searches.add(json.dumps(arguments, ensure_ascii=False, sort_keys=True))
             elif name == "list_files" and isinstance(path, str):
                 listed_paths.add(path)
             elif name == "git_diff":
@@ -778,7 +1046,9 @@ def _structured_context_message(
             "searches": sorted(searches),
             "listed_paths": sorted(listed_paths),
             "workspace_version": workspace_version,
-            "changed_files": list(evidence.changed_files) if evidence is not None else [],
+            "changed_files": list(evidence.changed_files)
+            if evidence is not None
+            else [],
             "latest_verification": latest_verification,
             "git_diff_checked": (
                 evidence.git_diff_checked_version == evidence.workspace_version

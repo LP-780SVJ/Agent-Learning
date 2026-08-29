@@ -75,6 +75,7 @@ class CodingAgentRunRequest(BaseModel):
     initial_git_diff_checked_version: int | None = Field(default=None, ge=0)
     initial_workspace_fingerprint: str | None = None
     initial_workspace_hygiene_clean: bool = True
+    initial_progress_metrics: dict[str, object] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_model_budget(self) -> CodingAgentRunRequest:
@@ -149,3 +150,16 @@ class CodingAgentRunResult(BaseModel):
     completion_ready: bool = False
     post_ready_tool_calls: int = 0
     verification_workspace_mutations: int = 0
+    first_patch_step: int | None = None
+    pre_edit_step_count: int = 0
+    pre_edit_tool_call_count: int = 0
+    progress_advisory_count: int = 0
+    progress_advisory_level_counts: dict[str, int] = Field(default_factory=dict)
+    no_source_progress_pause_count: int = 0
+    max_no_source_progress_streak: int = 0
+    environment_inspection_count: int = 0
+    initial_context_cache_hit_count: int = 0
+    initial_context_reference_hit_count: int = 0
+    source_progress_count: int = 0
+    diagnostic_progress_count: int = 0
+    first_environment_inspection_step: int | None = None

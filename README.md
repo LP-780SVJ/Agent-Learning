@@ -34,7 +34,7 @@ The first four weeks are now at a closeout baseline.
 Latest closeout evidence:
 
 ```text
-normal sandbox:      1336 passed, 9 skipped
+normal sandbox:      1368 passed, 9 skipped
 Docker integration:  60 passed with the project-owned image
 ```
 
@@ -160,6 +160,18 @@ provider-neutral extension points.
 - Read-only exploration uses `(tool, canonical arguments, workspace version)`
   caching. One repeat receives cached evidence; a second unchanged repeat stops
   as `NO_PROGRESS`. A patch increments the version and permits a fresh read.
+- Runtime separately tracks source, diagnostic, and completion progress. At
+  proportional model-turn checkpoints it adds an advisory to the next normal
+  request without another Provider call; sustained no-source progress pauses as
+  `no_source_progress` instead of waiting for an undifferentiated `max_steps`.
+- `inspect_environment` answers one validated Python-module or executable
+  availability question inside the actual read-only verification sandbox. The
+  fixed Runtime probe is distinct from Agent commands; arbitrary `python -c`
+  and generic shell execution remain prohibited.
+- A versioned `InitialContextSnapshot` can satisfy a complete current full-file
+  reread with a compact reference while that content remains in the current
+  request, or with cached full content after compaction. Partial, ranged, stale,
+  and resume-drift cases use the real file tool.
 - Semantically equivalent test retries share one action fingerprint. A retry is
   allowed after the workspace version changes, but repeated failed variants in
   an unchanged workspace stop before spending another model/tool cycle.
@@ -546,6 +558,27 @@ When running inside a restricted terminal sandbox, Docker tests may skip. In a u
   toolchains; those require a future explicit environment contract.
 - Retrieval evaluation is still mostly Python and local fixtures, not a broad multi-language external benchmark.
 - Medium repo results show the context engine still needs better semantic retrieval and cross-module expansion.
+- Progress thresholds are control heuristics, not semantic code understanding;
+  they cannot prove that exploration is useful or a patch is correct. The
+  post-change F03/B01/11-task stability campaign remains user-run.
+- Environment inspection currently covers Python modules and bare executables
+  only. It does not install packages, resolve distribution/import-name aliases,
+  or generalize to Node/Rust/Java toolchains.
+
+Run the user-owned stability campaign after configuring the existing ignored
+provider settings:
+
+```bash
+scripts/run_single_agent_stability_validation.sh \
+  --output-root evals/week4/agent_runs/progress_stability_$(date +%Y%m%d_%H%M%S)
+```
+
+Set `CODETEAM_STABILITY_KEEP_WORKSPACES=true` only when retained worktrees are
+needed. Preview all ten commands without Provider calls or filesystem output:
+
+```bash
+scripts/run_single_agent_stability_validation.sh --dry-run
+```
 
 ## Repository Guide
 

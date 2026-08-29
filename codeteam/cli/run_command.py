@@ -172,9 +172,7 @@ def run_agent_task(request: RunRequest) -> None:
                             "step_count": state.step_count,
                             "tool_call_count": state.tool_call_count,
                             "repair_attempts": evidence.repair_attempts,
-                            "protocol_repair_attempts": (
-                                state.protocol_repair_count
-                            ),
+                            "protocol_repair_attempts": (state.protocol_repair_count),
                             "protocol_repair_streak": state.protocol_repair_streak,
                             "workspace_version": evidence.workspace_version,
                             "recent_messages": durable_recent_messages(state.messages),
@@ -190,6 +188,7 @@ def run_agent_task(request: RunRequest) -> None:
                             "workspace_hygiene_clean": (
                                 evidence.workspace_hygiene_clean
                             ),
+                            "progress_metrics": evidence.progress_metrics,
                         }
                     ),
                     "checkpoint_ids": tuple(
@@ -548,6 +547,7 @@ def resume_agent_session(request: ResumeRequest) -> None:
                             "workspace_hygiene_clean": (
                                 evidence.workspace_hygiene_clean
                             ),
+                            "progress_metrics": evidence.progress_metrics,
                         }
                     ),
                     "checkpoint_ids": tuple(
@@ -676,6 +676,7 @@ def resume_agent_session(request: ResumeRequest) -> None:
             initial_git_diff_checked_version=state.git_diff_checked_version,
             initial_workspace_fingerprint=state.workspace_fingerprint,
             initial_workspace_hygiene_clean=state.workspace_hygiene_clean,
+            initial_progress_metrics=state.progress_metrics,
         )
     )
     status = {
@@ -750,26 +751,28 @@ def diff_agent_session(request: DiffRequest) -> None:
         raise typer.Exit(2) from error
 
     if request.output_format == "json":
-        render_json({
-            "session_id": session.manifest.session_id,
-            "workspace": str(workspace_root),
-            "base_ref": diff.base_ref,
-            "additions": diff.additions,
-            "deletions": diff.deletions,
-            "patch_bytes": diff.patch_bytes,
-            "has_binary_changes": diff.has_binary_changes,
-            "changes": [
-                {
-                    "kind": change.kind.value,
-                    "path": change.path,
-                    "old_path": change.old_path,
-                    "similarity": change.similarity,
-                }
-                for change in diff.changes
-            ],
-            "untracked_paths": diff.untracked_paths,
-            "patch": diff.patch,
-        })
+        render_json(
+            {
+                "session_id": session.manifest.session_id,
+                "workspace": str(workspace_root),
+                "base_ref": diff.base_ref,
+                "additions": diff.additions,
+                "deletions": diff.deletions,
+                "patch_bytes": diff.patch_bytes,
+                "has_binary_changes": diff.has_binary_changes,
+                "changes": [
+                    {
+                        "kind": change.kind.value,
+                        "path": change.path,
+                        "old_path": change.old_path,
+                        "similarity": change.similarity,
+                    }
+                    for change in diff.changes
+                ],
+                "untracked_paths": diff.untracked_paths,
+                "patch": diff.patch,
+            }
+        )
         raise typer.Exit(0)
 
     _render_diff_text(
@@ -819,12 +822,7 @@ def _render_diff_text(
 
 
 def _checkpoint_state_root_for_repo(repo_root: Path) -> Path:
-    return (
-        repo_root.resolve().parent
-        / ".codeteam"
-        / "checkpoints"
-        / repo_root.name
-    )
+    return repo_root.resolve().parent / ".codeteam" / "checkpoints" / repo_root.name
 
 
 def rollback_agent_session(request: RollbackRequest) -> None:
@@ -887,8 +885,7 @@ def _find_checkpoint(
 
     if known_checkpoint_ids and checkpoint_id not in known_checkpoint_ids:
         raise typer.BadParameter(
-            f"checkpoint {checkpoint_id} 不属于 session "
-            f"{session.manifest.session_id}"
+            f"checkpoint {checkpoint_id} 不属于 session {session.manifest.session_id}"
         )
 
     if checkpoint.task_id != session.task.task_id:

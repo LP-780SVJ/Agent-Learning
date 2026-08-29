@@ -12,6 +12,7 @@ Durable（本文件模型）：
     锁、subprocess.Popen、DockerRunner ——
     Resume 时从 Durable 配方重建，而不是反序列化旧对象。
 """
+
 from __future__ import annotations
 
 import re
@@ -29,10 +30,10 @@ from codeteam.schemas.messages import Message
 from codeteam.task.models import TaskSpec
 from codeteam.task.state import TaskStatus
 
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4})
 """Loader 允许加载的 schema 代数。旧版本 ≠ 损坏（未来走 Migration）。"""
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 _SENSITIVE_METADATA_KEY_MARKERS = frozenset(
     {
@@ -61,9 +62,11 @@ def _is_sensitive_metadata_key(key: object) -> bool:
         "model_context_window",
     }:
         return False
-    return any(
-        marker in normalized for marker in _SENSITIVE_METADATA_KEY_MARKERS
-    ) or normalized in {"auth", "key"} or normalized.endswith("_key")
+    return (
+        any(marker in normalized for marker in _SENSITIVE_METADATA_KEY_MARKERS)
+        or normalized in {"auth", "key"}
+        or normalized.endswith("_key")
+    )
 
 
 def _redact_metadata(value: Any) -> Any:
@@ -98,16 +101,18 @@ class SessionStatus(str, Enum):
     SessionStatus=PAUSED + TaskStatus=VERIFYING 表示
     「任务执行到验证阶段时整个会话被暂停」。
     """
+
     CREATED = "created"
     RUNNING = "running"
     PAUSED = "paused"
     RECOVERY_REQUIRED = "recovery_required"  # stale RUNNING / drift 的中转态
-    COMPLETED = "completed"                  # Terminal
-    FAILED = "failed"                        # Terminal
+    COMPLETED = "completed"  # Terminal
+    FAILED = "failed"  # Terminal
 
 
 class OperationStatus(str, Enum):
     """in-flight 操作的三段边界（day4.md §十四）。"""
+
     PREPARED = "prepared"
     STARTED = "started"
     COMPLETED = "completed"
@@ -127,6 +132,7 @@ class SessionManifest(BaseModel):
     state_version：第几次快照更新（每次 save +1）。
     last_event_seq：与 events.jsonl 对齐的审计游标。
     """
+
     schema_version: int = CURRENT_SCHEMA_VERSION
     session_id: str
     state_version: int = 1
@@ -149,6 +155,7 @@ class RepositoryRef(BaseModel):
     但它们是不同的 Runtime 工作区。
     探测函数（需要跑 git）放 service，不放纯数据模型。
     """
+
     repo_id: str
     git_common_dir: str
     base_sha: str
@@ -161,6 +168,7 @@ class WorktreeRef(BaseModel):
     last_known_head_sha：最近一次 save 时的 HEAD（随快照更新）。
     两者不等 = 外部有人动过 worktree → RECOVERY_REQUIRED。
     """
+
     task_id: str
     branch_name: str
     path: str
@@ -177,6 +185,7 @@ class ActiveOperation(BaseModel):
     与 orchestrator._execute_with_recovery 的 operation 参数同名。
     status 必须 STOP 前落盘 STARTED，Resume 据此决定 reconcile。
     """
+
     operation_id: str
     kind: str
     status: OperationStatus
@@ -191,6 +200,7 @@ class SessionUsage(BaseModel):
     预算被绕过 / 停止条件失效。是 ephemeral UsageTracker 的
     durable 投影，不是序列化 UsageTracker 本身。
     """
+
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
@@ -229,6 +239,7 @@ class AgentRuntimeState(BaseModel):
     max_protocol_repairs: int = 2
     verification_commands: tuple[tuple[str, ...], ...] = ()
     task_verification_commands: tuple[tuple[str, ...], ...] = ()
+    progress_metrics: dict[str, Any] = Field(default_factory=dict)
 
 
 class SessionEvent(BaseModel):
@@ -237,6 +248,7 @@ class SessionEvent(BaseModel):
     seq 从 1 严格递增（发现缺失/重复/乱序）；
     state_version 把 event 与当时的 snapshot 对齐。
     """
+
     event_id: str
     session_id: str
     seq: int = Field(ge=1)
@@ -258,6 +270,7 @@ class ContextMetadata(BaseModel):
     expected_summary_version 与 session.json 对齐——错位 = CONTEXT_STALE
     → rebuild（派生状态，不 fail Session，day4 §九十四）。
     """
+
     context_version: int = 1
     summary: ContextSummary | None = None
     expected_summary_version: int | None = None
@@ -271,6 +284,7 @@ class Session(BaseModel):
 
     只存 checkpoint 的 id 引用，绝不复制 workspace 文件。
     """
+
     manifest: SessionManifest
     status: SessionStatus = SessionStatus.CREATED
     task: TaskSpec
@@ -323,6 +337,7 @@ class Session(BaseModel):
 
 class ReconciliationVerdict(str, Enum):
     """对账裁决。全序：INVALID > RECOVERY_REQUIRED > RESUMABLE。"""
+
     RESUMABLE = "resumable"
     RECOVERY_REQUIRED = "recovery_required"
     INVALID = "invalid"

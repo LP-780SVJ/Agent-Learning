@@ -17,6 +17,7 @@ from codeteam.agent.editing import (
     file_edits_to_patch,
     text_replacements_to_patch,
 )
+from codeteam.agent.initial_context import InitialContextSnapshot
 from codeteam.agent.runtime_models import (
     VerificationEvidence,
     VerificationOutcomeCategory,
@@ -36,6 +37,11 @@ from codeteam.execution.safe_execution_service import (
     SafePatchExecutionRequest,
 )
 from codeteam.git.workspace import GitWorkspace
+from codeteam.sandbox.environment_inspection import (
+    DockerEnvironmentInspector,
+    EnvironmentInspectionArgs,
+    EnvironmentInspector,
+)
 from codeteam.sandbox.models import SandboxProfile
 from codeteam.sandbox.verification_preflight import (
     classify_verification_environment_failure,
@@ -53,8 +59,7 @@ class ApplyPatchArgs(BaseModel):
     @model_validator(mode="after")
     def exactly_one_representation(self) -> ApplyPatchArgs:
         representations = sum(
-            value is not None
-            for value in (self.patch, self.edits, self.replacements)
+            value is not None for value in (self.patch, self.edits, self.replacements)
         )
         if representations != 1:
             raise ValueError("Provide exactly one of patch, edits, or replacements.")
@@ -107,12 +112,16 @@ class RuntimeEvidence:
     completion_ready_seen: bool = False
     post_ready_tool_calls: int = 0
     verification_workspace_mutations: int = 0
+    progress_metrics: dict[str, object] = field(default_factory=dict)
 
     @property
     def tests_passed(self) -> bool:
         required = tuple(
             dict.fromkeys(
-                (*self.task_verification_commands, *self.regression_verification_commands)
+                (
+                    *self.task_verification_commands,
+                    *self.regression_verification_commands,
+                )
             )
         )
         if not required:
@@ -147,6 +156,8 @@ def create_runtime_tools(
     task_verification_commands: tuple[tuple[str, ...], ...] = (),
     regression_verification_commands: tuple[tuple[str, ...], ...] = (),
     completion_gate_provider: Callable[[], CompletionGateDecision] | None = None,
+    environment_inspector: EnvironmentInspector | None = None,
+    initial_context_snapshot: InitialContextSnapshot | None = None,
     max_repairs: int = 3,
 ) -> ToolRegistry:
     root = workspace_root.resolve(strict=True)
@@ -173,7 +184,50 @@ def create_runtime_tools(
     registry = ToolRegistry()
     for tool in create_file_tools(root):
         if tool.name in {"list_files", "read_file", "search_code"}:
-            registry.register(tool)
+            if tool.name == "read_file" and initial_context_snapshot is not None:
+                original = tool.func
+
+                def read_file_with_initial_context(
+                    args: BaseModel,
+                    original_func: Callable[[BaseModel], str] = original,
+                ) -> str:
+                    path = getattr(args, "path", None)
+                    start_line = getattr(args, "start_line", None)
+                    end_line = getattr(args, "end_line", None)
+                    if (
+                        isinstance(path, str)
+                        and start_line is None
+                        and end_line is None
+                    ):
+                        reused = initial_context_snapshot.render_full_read(
+                            path, evidence.workspace_version
+                        )
+                        if reused is not None:
+                            return reused
+                    return original_func(args)
+
+                registry.register(
+                    RegisteredTool(
+                        name=tool.name,
+                        description=(
+                            tool.description
+                            + " A complete current initial-context copy may be "
+                            "returned as a compact reference."
+                        ),
+                        args_schema=tool.args_schema,
+                        func=read_file_with_initial_context,
+                    )
+                )
+            else:
+                registry.register(tool)
+
+    inspector = environment_inspector or DockerEnvironmentInspector(
+        profile=execution_profile
+    )
+
+    def inspect_environment(args: BaseModel) -> str:
+        parsed = EnvironmentInspectionArgs.model_validate(args)
+        return inspector.inspect(root, parsed).model_dump_json()
 
     def apply_patch(args: BaseModel) -> str:
         evidence.patch_attempts += 1
@@ -206,11 +260,11 @@ def create_runtime_tools(
             raise ValueError(detail)
         if is_repair:
             evidence.repair_attempts += 1
-            evidence.repair_duration_ms += int(
-                (time.monotonic() - started) * 1000
-            )
+            evidence.repair_duration_ms += int((time.monotonic() - started) * 1000)
         evidence.workspace_version += 1
-        changed = [change.path for change in (result.diff.changes if result.diff else [])]
+        changed = [
+            change.path for change in (result.diff.changes if result.diff else [])
+        ]
         evidence.changed_files = tuple(changed)
         evidence.git_diff_checked = False
         evidence.git_diff_checked_version = None
@@ -325,15 +379,17 @@ def create_runtime_tools(
         if mutations:
             evidence.paused_category = "workspace_hygiene_failed"
             evidence.paused_reason = (
-                "Verification mutated the source workspace: "
-                + ", ".join(mutations)
+                "Verification mutated the source workspace: " + ", ".join(mutations)
             )
         return item.model_dump_json()
 
     def git_status(_: BaseModel) -> str:
         changes = GitWorkspace(root).changed_files()
         return json.dumps(
-            [{"kind": item.kind.value, "path": item.path, "old_path": item.old_path} for item in changes],
+            [
+                {"kind": item.kind.value, "path": item.path, "old_path": item.old_path}
+                for item in changes
+            ],
             ensure_ascii=False,
         )
 
@@ -357,6 +413,18 @@ def create_runtime_tools(
             evidence.accepted_submission_notes = parsed.notes
         return json.dumps(payload, ensure_ascii=False)
 
+    registry.register(
+        RegisteredTool(
+            name="inspect_environment",
+            description=(
+                "Check one Python module or bare executable in the actual verification "
+                "Docker sandbox using a Runtime-owned fixed probe. The model cannot "
+                "supply code or command arguments."
+            ),
+            args_schema=EnvironmentInspectionArgs,
+            func=inspect_environment,
+        )
+    )
     registry.register(
         RegisteredTool(
             name="apply_patch",
@@ -421,6 +489,8 @@ def normalize_runtime_action(
         normalized.setdefault("end_line", None)
     elif tool_name == "search_code":
         normalized.setdefault("max_results", 50)
+    elif tool_name == "inspect_environment":
+        return normalized
     elif tool_name in {"git_status", "git_diff"}:
         return {}
     return normalized

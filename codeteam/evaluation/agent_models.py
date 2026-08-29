@@ -4,6 +4,7 @@ These models are separate from the Week2 retrieval eval models. Retrieval eval
 scores file ranking; agent eval scores an actor on a fresh workspace with an
 external grader.
 """
+
 from __future__ import annotations
 
 from enum import Enum
@@ -75,9 +76,7 @@ class AgentEvalTask(BaseModel):
             raise ValueError(
                 "setup_patch and setup_patch_sha256 must be provided together"
             )
-        if (self.public_test_patch is None) != (
-            self.public_test_patch_sha256 is None
-        ):
+        if (self.public_test_patch is None) != (self.public_test_patch_sha256 is None):
             raise ValueError(
                 "public_test_patch and public_test_patch_sha256 must be provided together"
             )
@@ -156,6 +155,19 @@ class PatchActorResult(BaseModel):
     completion_ready: bool = False
     post_ready_tool_calls: int = 0
     verification_workspace_mutations: int = 0
+    first_patch_step: int | None = None
+    pre_edit_step_count: int = 0
+    pre_edit_tool_call_count: int = 0
+    progress_advisory_count: int = 0
+    progress_advisory_level_counts: dict[str, int] = Field(default_factory=dict)
+    no_source_progress_pause_count: int = 0
+    max_no_source_progress_streak: int = 0
+    environment_inspection_count: int = 0
+    initial_context_cache_hit_count: int = 0
+    initial_context_reference_hit_count: int = 0
+    source_progress_count: int = 0
+    diagnostic_progress_count: int = 0
+    first_environment_inspection_step: int | None = None
 
 
 class GraderCommandResult(BaseModel):
@@ -240,6 +252,19 @@ class AgentEvalTaskResult(BaseModel):
     completion_ready: bool = False
     post_ready_tool_calls: int = 0
     verification_workspace_mutations: int = 0
+    first_patch_step: int | None = None
+    pre_edit_step_count: int = 0
+    pre_edit_tool_call_count: int = 0
+    progress_advisory_count: int = 0
+    progress_advisory_level_counts: dict[str, int] = Field(default_factory=dict)
+    no_source_progress_pause_count: int = 0
+    max_no_source_progress_streak: int = 0
+    environment_inspection_count: int = 0
+    initial_context_cache_hit_count: int = 0
+    initial_context_reference_hit_count: int = 0
+    source_progress_count: int = 0
+    diagnostic_progress_count: int = 0
+    first_environment_inspection_step: int | None = None
 
 
 class AgentEvalRunSummary(BaseModel):
@@ -264,3 +289,20 @@ class AgentEvalRunSummary(BaseModel):
     completion_ready_but_actor_failed_count: int = 0
     post_ready_tool_call_count: int = 0
     verification_workspace_mutation_count: int = 0
+    first_patch_step_count: int = 0
+    first_patch_step_by_task: dict[str, int | None] = Field(default_factory=dict)
+    pre_edit_step_count: int = 0
+    pre_edit_tool_call_count: int = 0
+    progress_advisory_count: int = 0
+    progress_advisory_level_counts: dict[str, int] = Field(default_factory=dict)
+    no_source_progress_pause_count: int = 0
+    max_no_source_progress_streak: int = 0
+    environment_inspection_count: int = 0
+    initial_context_cache_hit_count: int = 0
+    initial_context_reference_hit_count: int = 0
+    source_progress_count: int = 0
+    diagnostic_progress_count: int = 0
+    first_environment_inspection_step_count: int = 0
+    first_environment_inspection_step_by_task: dict[str, int | None] = Field(
+        default_factory=dict
+    )
