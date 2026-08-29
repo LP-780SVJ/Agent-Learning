@@ -1,0 +1,40 @@
+diff --git a/src/orders/events.py b/src/orders/events.py
+index b9144f4..b944016 100644
+--- a/src/orders/events.py
++++ b/src/orders/events.py
+@@ -3,9 +3,8 @@
+ from src.common.events import EventEnvelope, ORDER_CANCELLED
+ 
+ 
+-def order_cancelled_event(order_id: str, reason: str) -> EventEnvelope:
++def build_order_cancelled_event(order_id: str, reason: str) -> EventEnvelope:
+     return EventEnvelope(
+         name=ORDER_CANCELLED,
+         payload={"order_id": order_id, "reason": reason},
+     )
+-
+diff --git a/src/orders/service.py b/src/orders/service.py
+index 9f20edc..7d42dc9 100644
+--- a/src/orders/service.py
++++ b/src/orders/service.py
+@@ -2,7 +2,7 @@
+ 
+ from src.common.events import EventBus
+ from src.inventory.service import InventoryService
+-from src.orders.events import order_cancelled_event
++from src.orders.events import build_order_cancelled_event
+ 
+ 
+ class OrderService:
+@@ -18,10 +18,9 @@ class OrderService:
+ 
+     def cancel_order(self, order_id: str, reason: str) -> dict:
+         released = self.inventory.release_for_order(order_id)
+-        self.event_bus.publish(order_cancelled_event(order_id, reason))
++        self.event_bus.publish(build_order_cancelled_event(order_id, reason))
+         return {"order_id": order_id, "released_reservations": released}
+ 
+     def create_order(self, order_id: str, sku: str, quantity: int) -> dict:
+         reservation = self.inventory.reserve_for_order(order_id, sku, quantity)
+         return {"order_id": order_id, "reservation": reservation}
+-

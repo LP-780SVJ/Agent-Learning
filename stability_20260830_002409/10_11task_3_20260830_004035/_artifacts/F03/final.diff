@@ -1,0 +1,69 @@
+diff --git a/src/common/settings.py b/src/common/settings.py
+index 9da8c11..702a1de 100644
+--- a/src/common/settings.py
++++ b/src/common/settings.py
+@@ -10,3 +10,41 @@ def config_path(name: str) -> Path:
+ def load_retry_policy() -> dict:
+     return {"initial_delay_seconds": 30, "max_attempts": 5}
+ 
++
++def load_feature_flag(section: str, flag: str) -> bool | None:
++    """Read a boolean feature flag from configs/feature_flags.yaml.
++
++    Returns None when the file, section, or flag is missing so callers can
++    preserve their default behavior.
++    """
++    path = config_path("feature_flags.yaml")
++    if not path.exists():
++        return None
++
++    current_section: str | None = None
++    for raw_line in path.read_text(encoding="utf-8").splitlines():
++        line = raw_line.rstrip()
++        if not line.strip() or line.lstrip().startswith("#"):
++            continue
++
++        indent = len(line) - len(line.lstrip())
++        stripped = line.strip()
++
++        if indent == 0 and stripped.endswith(":"):
++            current_section = stripped[:-1].strip()
++            continue
++
++        if indent > 0 and current_section == section:
++            key, _, value = stripped.partition(":")
++            if key.strip() == flag:
++                return _parse_bool(value.strip())
++
++    return None
++
++
++def _parse_bool(value: str) -> bool | None:
++    if value.lower() in ("true", "yes", "on"):
++        return True
++    if value.lower() in ("false", "no", "off"):
++        return False
++    return None
+diff --git a/src/notifications/dispatcher.py b/src/notifications/dispatcher.py
+index 36d4e13..934dd51 100644
+--- a/src/notifications/dispatcher.py
++++ b/src/notifications/dispatcher.py
+@@ -1,6 +1,7 @@
+ """Event-driven notification dispatch."""
+ 
+ from src.common.events import EventEnvelope, INVOICE_RETRY_REQUESTED, ORDER_CANCELLED
++from src.common.settings import load_feature_flag
+ from src.notifications.email import EmailSender
+ from src.notifications.templates import TEMPLATE_INVOICE_RETRY, TEMPLATE_ORDER_CANCELLED
+ 
+@@ -12,8 +13,9 @@ class NotificationDispatcher:
+         self.sender = sender or EmailSender()
+ 
+     def handle(self, event: EventEnvelope) -> None:
++        if load_feature_flag("notifications", "email_dispatch_enabled") is False:
++            return
+         if event.name == ORDER_CANCELLED:
+             self.sender.send("ops@example.com", TEMPLATE_ORDER_CANCELLED, event.payload)
+         if event.name == INVOICE_RETRY_REQUESTED:
+             self.sender.send("billing@example.com", TEMPLATE_INVOICE_RETRY, event.payload)
+-

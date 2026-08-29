@@ -1,0 +1,121 @@
+diff --git a/src/billing/payment_gateway.py b/src/billing/payment_gateway.py
+index 340d338..5f4889e 100644
+--- a/src/billing/payment_gateway.py
++++ b/src/billing/payment_gateway.py
+@@ -1,17 +1,62 @@
+-"""Payment provider abstraction."""
++"""Payment gateway facade."""
+ 
++import time
++
++from src.billing.retries import (
++    InvoiceRetryPolicy,
++    RetryExecutor,
++    RetryPolicyProvider,
++    load_invoice_retry_policy,
++)
+ from vendor.third_party_payment import ProviderClient
+ 
+ 
++class _ClientExecutor:
++    """Default executor that delegates to the provider client."""
++
++    def __init__(self, client: ProviderClient) -> None:
++        self.client = client
++
++    def execute(self, invoice: dict) -> dict:
++        return self.client.charge(invoice["customer_id"], invoice["cents"])
++
++
++class _DefaultPolicyProvider:
++    """Default policy provider returning the configured invoice retry policy."""
++
++    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy:
++        return load_invoice_retry_policy()
++
++
+ class PaymentGateway:
+-    """Wraps the vendored provider client."""
++    """Facade over the third-party payment provider."""
+ 
+-    def __init__(self, client: ProviderClient | None = None) -> None:
++    def __init__(
++        self,
++        client: ProviderClient | None = None,
++        executor: RetryExecutor | None = None,
++        policy_provider: RetryPolicyProvider | None = None,
++    ) -> None:
+         self.client = client or ProviderClient()
++        self.executor = executor or _ClientExecutor(self.client)
++        self.policy_provider = policy_provider or _DefaultPolicyProvider()
+ 
+     def verify_signature(self, payload: bytes, signature: str) -> bool:
+         return self.client.verify(payload, signature)
+ 
+     def charge(self, customer_id: str, cents: int) -> dict:
+-        return self.client.charge(customer_id, cents)
++        invoice = {"customer_id": customer_id, "cents": cents}
++        policy = self.policy_provider.get_policy(invoice)
++
++        last_error: Exception | None = None
++        for attempt in range(policy.max_attempts):
++            try:
++                return self.executor.execute(invoice)
++            except Exception as exc:  # noqa: BLE001 - retry any provider failure
++                last_error = exc
++                if attempt < policy.max_attempts - 1:
++                    delay = policy.initial_delay_seconds * (policy.backoff_multiplier ** attempt)
++                    time.sleep(delay)
+ 
++        assert last_error is not None
++        raise last_error
+diff --git a/src/billing/retries.py b/src/billing/retries.py
+index 4cbef19..bc7db96 100644
+--- a/src/billing/retries.py
++++ b/src/billing/retries.py
+@@ -1,22 +1,42 @@
+-"""Invoice retry policy."""
++"""Retry policy and executor definitions for billing."""
+ 
+ from dataclasses import dataclass
++from typing import Protocol
+ 
+ from src.common.settings import load_retry_policy
+ 
+ 
+ @dataclass(frozen=True)
+ class InvoiceRetryPolicy:
++    """Retry policy for invoice charge attempts."""
++
+     initial_delay_seconds: int
+     max_attempts: int
+-    backoff_multiplier: int
++    backoff_multiplier: int = 2
++
++
++class RetryExecutor(Protocol):
++    """Executes a single charge attempt for an invoice."""
++
++    def execute(self, invoice: dict) -> dict:
++        """Attempt to charge the invoice and return the provider result."""
++        ...
++
++
++class RetryPolicyProvider(Protocol):
++    """Selects the retry policy to use for a given invoice."""
++
++    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy:
++        """Return the retry policy for the invoice."""
++        ...
+ 
+ 
+ def load_invoice_retry_policy() -> InvoiceRetryPolicy:
++    """Load the default invoice retry policy."""
++
+     raw = load_retry_policy()
+     return InvoiceRetryPolicy(
+         initial_delay_seconds=raw["initial_delay_seconds"],
+         max_attempts=raw["max_attempts"],
+         backoff_multiplier=raw.get("backoff_multiplier", 2),
+     )
+-

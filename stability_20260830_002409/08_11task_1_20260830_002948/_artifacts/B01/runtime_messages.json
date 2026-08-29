@@ -1,0 +1,177 @@
+[
+  {
+    "role": "system",
+    "content": "{\"role\": \"coding_agent\", \"protocol\": {\"rule\": \"Use provider-native tools when they are available. Only when native tools are unavailable, return exactly one raw JSON object containing non-empty tool_calls or a final output.\", \"tool_call_schema\": {\"tool_calls\": [{\"name\": \"read_file\", \"arguments\": {\"path\": \"src/example.py\"}}]}, \"tool_call_note\": \"Do not generate call_id; the Runtime assigns it after validation.\", \"preferred_patch_example\": {\"tool_calls\": [{\"name\": \"apply_patch\", \"arguments\": {\"replacements\": [{\"path\": \"src/example.py\", \"old_text\": \"OLD_VALUE\", \"new_text\": \"NEW_VALUE\", \"expected_replacements\": 1}]}}]}, \"final_output_schema\": {\"status\": \"completed | failed | needs_user_input\", \"summary\": \"short factual summary\", \"tests_passed\": true, \"error\": null, \"user_input_request\": null}, \"completion_tool\": {\"name\": \"submit_result\", \"arguments\": {\"summary\": \"short factual summary\", \"notes\": null}, \"rule\": \"Call submit_result alone; only the Runtime may accept completion.\"}}, \"tools\": [{\"name\": \"list_files\", \"description\": \"List files inside the workspace.\", \"arguments\": {\"properties\": {\"path\": {\"default\": \".\", \"title\": \"Path\", \"type\": \"string\"}, \"recursive\": {\"default\": true, \"title\": \"Recursive\", \"type\": \"boolean\"}}, \"title\": \"ListFilesArgs\", \"type\": \"object\"}}, {\"name\": \"read_file\", \"description\": \"Read a UTF-8 text file inside the workspace. A complete current initial-context copy may be returned as a compact reference.\", \"arguments\": {\"properties\": {\"path\": {\"title\": \"Path\", \"type\": \"string\"}, \"start_line\": {\"anyOf\": [{\"type\": \"integer\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Start Line\"}, \"end_line\": {\"anyOf\": [{\"type\": \"integer\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"End Line\"}}, \"required\": [\"path\"], \"title\": \"ReadFileArgs\", \"type\": \"object\"}}, {\"name\": \"search_code\", \"description\": \"Search text inside UTF-8 files in the workspace.\", \"arguments\": {\"properties\": {\"query\": {\"minLength\": 1, \"title\": \"Query\", \"type\": \"string\"}, \"path\": {\"default\": \".\", \"title\": \"Path\", \"type\": \"string\"}, \"max_results\": {\"default\": 50, \"minimum\": 1, \"title\": \"Max Results\", \"type\": \"integer\"}}, \"required\": [\"query\"], \"title\": \"SearchCodeArgs\", \"type\": \"object\"}}, {\"name\": \"inspect_environment\", \"description\": \"Check one Python module or bare executable in the actual verification Docker sandbox using a Runtime-owned fixed probe. The model cannot supply code or command arguments.\", \"arguments\": {\"properties\": {\"python_module\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Python Module\"}, \"executable\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Executable\"}}, \"title\": \"EnvironmentInspectionArgs\", \"type\": \"object\"}}, {\"name\": \"apply_patch\", \"description\": \"Apply a unified diff or complete structured file edits safely.\", \"arguments\": {\"$defs\": {\"FileEdit\": {\"description\": \"A complete replacement or deletion used by the provider-neutral protocol.\", \"properties\": {\"path\": {\"minLength\": 1, \"title\": \"Path\", \"type\": \"string\"}, \"content\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Content\"}, \"delete\": {\"default\": false, \"title\": \"Delete\", \"type\": \"boolean\"}}, \"required\": [\"path\"], \"title\": \"FileEdit\", \"type\": \"object\"}, \"TextReplacement\": {\"description\": \"A small exact text replacement converted to a local Git patch.\", \"properties\": {\"path\": {\"minLength\": 1, \"title\": \"Path\", \"type\": \"string\"}, \"old_text\": {\"minLength\": 1, \"title\": \"Old Text\", \"type\": \"string\"}, \"new_text\": {\"title\": \"New Text\", \"type\": \"string\"}, \"expected_replacements\": {\"default\": 1, \"minimum\": 1, \"title\": \"Expected Replacements\", \"type\": \"integer\"}}, \"required\": [\"path\", \"old_text\", \"new_text\"], \"title\": \"TextReplacement\", \"type\": \"object\"}}, \"properties\": {\"patch\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Patch\"}, \"edits\": {\"anyOf\": [{\"items\": {\"$ref\": \"#/$defs/FileEdit\"}, \"type\": \"array\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Edits\"}, \"replacements\": {\"anyOf\": [{\"items\": {\"$ref\": \"#/$defs/TextReplacement\"}, \"type\": \"array\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Replacements\"}}, \"title\": \"ApplyPatchArgs\", \"type\": \"object\"}}, {\"name\": \"run_tests\", \"description\": \"Run an argv-based visible verification command in Docker.\", \"arguments\": {\"properties\": {\"argv\": {\"items\": {\"type\": \"string\"}, \"minItems\": 1, \"title\": \"Argv\", \"type\": \"array\"}, \"cwd\": {\"default\": \".\", \"title\": \"Cwd\", \"type\": \"string\"}, \"timeout_seconds\": {\"default\": 120.0, \"exclusiveMinimum\": 0, \"maximum\": 900, \"title\": \"Timeout Seconds\", \"type\": \"number\"}}, \"required\": [\"argv\"], \"title\": \"RunTestsArgs\", \"type\": \"object\"}}, {\"name\": \"git_status\", \"description\": \"Inspect final changed files from Git.\", \"arguments\": {\"properties\": {}, \"title\": \"EmptyArgs\", \"type\": \"object\"}}, {\"name\": \"git_diff\", \"description\": \"Inspect the current source diff, including untracked text files.\", \"arguments\": {\"properties\": {}, \"title\": \"EmptyArgs\", \"type\": \"object\"}}, {\"name\": \"submit_result\", \"description\": \"Request Runtime-authorized completion after all current-version verification and diff-review requirements are satisfied. Call alone.\", \"arguments\": {\"properties\": {\"summary\": {\"minLength\": 1, \"title\": \"Summary\", \"type\": \"string\"}, \"notes\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Notes\"}}, \"required\": [\"summary\"], \"title\": \"SubmitResultArgs\", \"type\": \"object\"}}], \"budgets\": {\"max_steps\": 20, \"max_tool_calls\": 60, \"max_repairs\": 3, \"max_protocol_repairs\": 2, \"context_tokens\": 8192, \"max_output_tokens\": 4096, \"model_context_window\": 32768, \"safety_headroom_tokens\": 1024}, \"completion\": [\"Make a real Git diff.\", \"Run every task verification command successfully.\", \"Inspect the final diff before returning completed.\", \"After the Runtime reports completion-ready, call submit_result as the sole tool call. Readiness does not auto-terminate the run.\", \"Never claim hidden acceptance results.\", \"The initial context is a current snapshot. Do not reread the same file unless it was truncated or the workspace changed.\"], \"execution_boundary\": \"run_tests argv paths and cwd are relative to the workspace; use '.' for the workspace root and paths such as tests/auth. The Runtime maps them to Docker /workspace, so do not put /workspace or host-only .venv paths in tool arguments. Use python -m pytest. Commands are argv arrays; shell strings, pipes, and redirection are unavailable.\", \"verification_command_priority\": \"Task-specific verification commands supplied by the Runtime are authoritative for completion. Repository-discovered commands are general guidance and are not substitutes unless the Runtime lists them as visible verification commands.\"}",
+    "tool_calls": null,
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "user",
+    "content": "{\"task\": \"A refresh-token request returns a generic server error when the token is expired. Fix the behavior so expired refresh tokens map to the documented auth error response without changing public API names.\", \"workspace\": \"/Users/sqlee/.codeteam/worktrees/evals/baseline-6c8caa7b/tasks/B01\", \"planning_enabled\": true, \"task_verification_commands\": [[\"python\", \"-m\", \"pytest\", \"tests/task_verification/test_b01.py\", \"-q\"]], \"regression_commands\": [[\"python\", \"-m\", \"pytest\", \"tests/auth\", \"-q\"]], \"initial_context\": {\"repo_map\": \"# Repository map (query)\\n# Query: A refresh-token request returns a generic server error when the token is expired. Fix the behavior so expired refresh tokens map to the documented auth error response without changing public API names.\\n\\nsrc/auth/api.py:\\n│ (self, request: dict) -> dict\\n│ token\\n│ class AuthController\\n│ (self, service: AuthService | None) -> None\\n\\ntests/auth/test_refresh_flow.py:\\n│ response\\n│ () -> None\\n\\nsrc/auth/service.py:\\n│ class AuthService\\n│ (self, repository: RefreshTokenRepository | None) -> None\\n│ (self, raw_refresh_token: str) -> dict\\n│ (self, raw_refresh_token: str) -> None\\n\\nsrc/auth/tokens.py:\\n│ class RefreshPayload\\n│ (raw_token: str) -> RefreshPayload\\n│ (subject: str) -> str\\n\\ntests/task_verification/test_b01.py:\\n│ response\\n│ () -> None\\n\\nsrc/auth/exceptions.py:\\n│ class AuthError\\n│ class RefreshTokenExpired\\n│ class RefreshTokenRevoked\\n│ class TokenSubjectMissing\\n\\ntests/auth/test_token_repository.py:\\n│ () -> None\\n\\nsrc/orders/api.py:\\n│ class OrderController\\n\", \"files\": [{\"path\": \"src/auth/api.py\", \"compression_level\": \"full_file\", \"token_count\": 203, \"content\": \"\\\"\\\"\\\"Auth API boundary.\\\"\\\"\\\"\\n\\nfrom src.auth.exceptions import AuthError, RefreshTokenExpired, RefreshTokenRevoked\\nfrom src.auth.service import AuthService\\n\\n\\nclass AuthController:\\n    \\\"\\\"\\\"Controller for auth endpoints.\\\"\\\"\\\"\\n\\n    def __init__(self, service: AuthService | None = None) -> None:\\n        self.service = service or AuthService()\\n\\n    def refresh(self, request: dict) -> dict:\\n        token = request.get(\\\"refresh_token\\\", \\\"\\\")\\n        try:\\n            return {\\\"status\\\": 200, \\\"body\\\": self.service.refresh_session(token)}\\n        except RefreshTokenExpired:\\n            return {\\\"status\\\": 401, \\\"error\\\": \\\"internal server error\\\"}\\n        except RefreshTokenRevoked as exc:\\n            return {\\\"status\\\": 401, \\\"error\\\": str(exc)}\\n        except AuthError as exc:\\n            return {\\\"status\\\": 400, \\\"error\\\": str(exc)}\\n\\n\"}, {\"path\": \"tests/auth/test_refresh_flow.py\", \"compression_level\": \"full_file\", \"token_count\": 64, \"content\": \"\\\"\\\"\\\"Auth refresh flow tests.\\\"\\\"\\\"\\n\\nfrom src.auth.api import AuthController\\n\\n\\ndef test_expired_refresh_returns_401() -> None:\\n    controller = AuthController()\\n    response = controller.refresh({\\\"refresh_token\\\": \\\"expired\\\"})\\n    assert response[\\\"status\\\"] == 401\\n\\n\"}, {\"path\": \"src/auth/service.py\", \"compression_level\": \"full_file\", \"token_count\": 289, \"content\": \"\\\"\\\"\\\"Auth business logic.\\\"\\\"\\\"\\n\\nfrom src.auth.exceptions import RefreshTokenRevoked\\nfrom src.auth.repository import RefreshTokenRepository\\nfrom src.auth.tokens import build_access_token, decode_refresh_payload\\n\\n\\nclass AuthService:\\n    \\\"\\\"\\\"Coordinates token validation, repository state, and rotation.\\\"\\\"\\\"\\n\\n    def __init__(self, repository: RefreshTokenRepository | None = None) -> None:\\n        self.repository = repository or RefreshTokenRepository()\\n\\n    def refresh_session(self, raw_refresh_token: str) -> dict:\\n        \\\"\\\"\\\"Refresh a login session.\\\"\\\"\\\"\\n        payload = decode_refresh_payload(raw_refresh_token)\\n        record = self.repository.find_active(payload.token_id)\\n        if record is None or record.revoked:\\n            raise RefreshTokenRevoked(\\\"refresh credential revoked\\\")\\n        rotated = self.repository.rotate(payload.token_id)\\n        return {\\n            \\\"access_token\\\": build_access_token(payload.subject),\\n            \\\"refresh_token\\\": rotated.token_id,\\n        }\\n\\n    def revoke_session(self, raw_refresh_token: str) -> None:\\n        payload = decode_refresh_payload(raw_refresh_token)\\n        self.repository.rotate(payload.token_id)\\n\\n\"}, {\"path\": \"src/auth/tokens.py\", \"compression_level\": \"full_file\", \"token_count\": 192, \"content\": \"\\\"\\\"\\\"Token parsing helpers.\\\"\\\"\\\"\\n\\nfrom dataclasses import dataclass\\n\\nfrom src.auth.exceptions import RefreshTokenExpired, TokenSubjectMissing\\n\\n\\n@dataclass(frozen=True)\\nclass RefreshPayload:\\n    subject: str\\n    expires_at: int\\n    token_id: str\\n\\n\\ndef decode_refresh_payload(raw_token: str) -> RefreshPayload:\\n    \\\"\\\"\\\"Decode a refresh credential into a payload.\\\"\\\"\\\"\\n    if raw_token == \\\"expired\\\":\\n        raise RefreshTokenExpired(\\\"refresh credential expired\\\")\\n    if raw_token == \\\"missing-subject\\\":\\n        raise TokenSubjectMissing(\\\"subject is required\\\")\\n    return RefreshPayload(subject=\\\"user-123\\\", expires_at=4_102_444_800, token_id=raw_token)\\n\\n\\ndef build_access_token(subject: str) -> str:\\n    \\\"\\\"\\\"Build an access token for a subject.\\\"\\\"\\\"\\n    return f\\\"access:{subject}\\\"\\n\\n\"}, {\"path\": \"tests/task_verification/test_b01.py\", \"compression_level\": \"full_file\", \"token_count\": 65, \"content\": \"from src.auth.api import AuthController\\n\\n\\ndef test_expired_refresh_token_uses_auth_contract() -> None:\\n    response = AuthController().refresh({\\\"refresh_token\\\": \\\"expired\\\"})\\n    assert response[\\\"status\\\"] == 401\\n    assert \\\"expired\\\" in response[\\\"error\\\"].lower()\\n\"}], \"instructions\": [\"src/auth/api.py: AGENTS.md\", \"src/auth/api.py: src/auth/AGENTS.md\", \"tests/auth/test_refresh_flow.py: AGENTS.md\", \"src/auth/service.py: AGENTS.md\", \"src/auth/service.py: src/auth/AGENTS.md\", \"src/auth/tokens.py: AGENTS.md\", \"src/auth/tokens.py: src/auth/AGENTS.md\", \"tests/task_verification/test_b01.py: AGENTS.md\"], \"visible_test_commands\": [{\"category\": \"test\", \"command\": \"uv run pytest tests/ -q\", \"source\": \"AGENTS.md:7\", \"description\": \"从 AGENTS.md 显式标签提取\"}, {\"category\": \"lint\", \"command\": \"uv run ruff check src tests\", \"source\": \"AGENTS.md:8\", \"description\": \"从 AGENTS.md 显式标签提取\"}, {\"category\": \"typecheck\", \"command\": \"uv run mypy src\", \"source\": \"AGENTS.md:9\", \"description\": \"从 AGENTS.md 显式标签提取\"}], \"diagnostics\": [\"src/experimental/broken_parser_case.py: 解析失败\"]}}",
+    "tool_calls": null,
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "assistant",
+    "content": "I'll analyze the task. The issue is in `src/auth/api.py` where `RefreshTokenExpired` maps to a generic \"internal server error\" instead of the documented auth error response.\n\nLet me look at the relevant files to understand the full picture.",
+    "tool_calls": [
+      {
+        "call_id": "step-1-call-1",
+        "provider_call_id": "call_00_wTBsf39hqwyOjHLs9l9d5940",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/auth/exceptions.py"
+        }
+      },
+      {
+        "call_id": "step-1-call-2",
+        "provider_call_id": "call_01_SBw3Q8YzsGdkbKxg6qoL6553",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/auth/api.py"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Auth exceptions.\"\"\"\n\n\nclass AuthError(Exception):\n    \"\"\"Base auth error.\"\"\"\n\n\nclass RefreshTokenExpired(AuthError):\n    \"\"\"Raised when a refresh credential has expired.\"\"\"\n\n\nclass RefreshTokenRevoked(AuthError):\n    \"\"\"Raised when a refresh credential has already been revoked.\"\"\"\n\n\nclass TokenSubjectMissing(AuthError):\n    \"\"\"Raised when token payload lacks a subject.\"\"\"\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-1-call-1",
+    "provider_call_id": "call_00_wTBsf39hqwyOjHLs9l9d5940"
+  },
+  {
+    "role": "tool",
+    "content": "{\"initial_context_reference\":true,\"initial_context_cache_hit\":true,\"path\":\"src/auth/api.py\",\"content_hash\":\"c4427a1cf35f93bdd5691552e245818ab38f6c62d32716a65968c13dec85aafe\",\"workspace_version\":0,\"content_location\":\"current_model_request.initial_context\"}",
+    "tool_calls": null,
+    "tool_call_id": "step-1-call-2",
+    "provider_call_id": "call_01_SBw3Q8YzsGdkbKxg6qoL6553"
+  },
+  {
+    "role": "assistant",
+    "content": "The fix is clear. In `api.py`, the `RefreshTokenExpired` handler returns `\"internal server error\"` instead of the actual error message. The `RefreshTokenRevoked` handler correctly uses `str(exc)`. I need to make `RefreshTokenExpired` do the same.",
+    "tool_calls": [
+      {
+        "call_id": "step-2-call-1",
+        "provider_call_id": "call_00_oq6OX3pBZ3KytWbqOQyS8685",
+        "name": "apply_patch",
+        "arguments": {
+          "replacements": [
+            {
+              "path": "src/auth/api.py",
+              "old_text": "        except RefreshTokenExpired:\n            return {\"status\": 401, \"error\": \"internal server error\"}",
+              "new_text": "        except RefreshTokenExpired as exc:\n            return {\"status\": 401, \"error\": str(exc)}"
+            }
+          ]
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"applied\": true, \"changed_files\": [\"src/auth/api.py\"]}",
+    "tool_calls": null,
+    "tool_call_id": "step-2-call-1",
+    "provider_call_id": "call_00_oq6OX3pBZ3KytWbqOQyS8685"
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "call_id": "step-3-call-1",
+        "provider_call_id": "call_00_P5WmGuMG0TsRGp0DCXt60836",
+        "name": "run_tests",
+        "arguments": {
+          "argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/task_verification/test_b01.py",
+            "-q"
+          ]
+        }
+      },
+      {
+        "call_id": "step-3-call-2",
+        "provider_call_id": "call_01_M8r2FfZizVmQDUTqYFh45495",
+        "name": "run_tests",
+        "arguments": {
+          "argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/auth",
+            "-q"
+          ]
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"argv\":[\"python\",\"-m\",\"pytest\",\"tests/task_verification/test_b01.py\",\"-q\"],\"passed\":true,\"category\":\"passed\",\"environment_failure_category\":null,\"exit_code\":0,\"duration_ms\":400.5909590050578,\"stdout\":\".                                                                        [100%]\\n\",\"stderr\":\"\",\"error\":null,\"completion_required\":true,\"workspace_version\":1,\"workspace_fingerprint_before\":\"83aecb92a36425eb4f3790f41f297044b32d37e9c74816340329e76583b86109\",\"workspace_fingerprint_after\":\"83aecb92a36425eb4f3790f41f297044b32d37e9c74816340329e76583b86109\",\"workspace_mutations\":[]}",
+    "tool_calls": null,
+    "tool_call_id": "step-3-call-1",
+    "provider_call_id": "call_00_P5WmGuMG0TsRGp0DCXt60836"
+  },
+  {
+    "role": "tool",
+    "content": "{\"argv\":[\"python\",\"-m\",\"pytest\",\"tests/auth\",\"-q\"],\"passed\":true,\"category\":\"passed\",\"environment_failure_category\":null,\"exit_code\":0,\"duration_ms\":398.05737510323524,\"stdout\":\"..                                                                       [100%]\\n\",\"stderr\":\"\",\"error\":null,\"completion_required\":true,\"workspace_version\":1,\"workspace_fingerprint_before\":\"83aecb92a36425eb4f3790f41f297044b32d37e9c74816340329e76583b86109\",\"workspace_fingerprint_after\":\"83aecb92a36425eb4f3790f41f297044b32d37e9c74816340329e76583b86109\",\"workspace_mutations\":[]}",
+    "tool_calls": null,
+    "tool_call_id": "step-3-call-2",
+    "provider_call_id": "call_01_M8r2FfZizVmQDUTqYFh45495"
+  },
+  {
+    "role": "assistant",
+    "content": "Both tests pass. Let me review the final diff.",
+    "tool_calls": [
+      {
+        "call_id": "step-4-call-1",
+        "provider_call_id": "call_00_uzrJVzqBRvFvsc3P3REE4134",
+        "name": "git_diff",
+        "arguments": {}
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "diff --git a/src/auth/api.py b/src/auth/api.py\nindex 4eb5728..cacbc4b 100644\n--- a/src/auth/api.py\n+++ b/src/auth/api.py\n@@ -14,8 +14,8 @@ class AuthController:\n         token = request.get(\"refresh_token\", \"\")\n         try:\n             return {\"status\": 200, \"body\": self.service.refresh_session(token)}\n-        except RefreshTokenExpired:\n-            return {\"status\": 401, \"error\": \"internal server error\"}\n+        except RefreshTokenExpired as exc:\n+            return {\"status\": 401, \"error\": str(exc)}\n         except RefreshTokenRevoked as exc:\n             return {\"status\": 401, \"error\": str(exc)}\n         except AuthError as exc:\n\n\n{\"completion_ready\": true, \"workspace_version\": 1, \"next_action\": \"Call submit_result alone.\"}",
+    "tool_calls": null,
+    "tool_call_id": "step-4-call-1",
+    "provider_call_id": "call_00_uzrJVzqBRvFvsc3P3REE4134"
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "call_id": "step-5-call-1",
+        "provider_call_id": "call_00_ikQFAci0JexuCYCzJ1xq2743",
+        "name": "submit_result",
+        "arguments": {
+          "summary": "Fixed the expired refresh token handler in src/auth/api.py to return the actual exception message (str(exc)) instead of the generic \"internal server error\", matching the documented auth error contract. No public API names changed."
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"accepted\": true, \"ready\": true, \"workspace_version\": 1, \"missing_requirements\": []}",
+    "tool_calls": null,
+    "tool_call_id": "step-5-call-1",
+    "provider_call_id": "call_00_ikQFAci0JexuCYCzJ1xq2743"
+  }
+]

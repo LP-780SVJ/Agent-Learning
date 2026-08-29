@@ -1,0 +1,17 @@
+diff --git a/src/billing/webhooks.py b/src/billing/webhooks.py
+index fc86046..7e50b87 100644
+--- a/src/billing/webhooks.py
++++ b/src/billing/webhooks.py
+@@ -30,11 +30,7 @@ class BillingWebhookController:
+ 
+     def receive(self, payload: bytes, signature: str) -> dict:
+         if not self.verifier.verify(payload, signature):
+-            self.repository.mark_retry_requested("invoice-123")
+-            self.event_bus.publish(
+-                EventEnvelope(PAYMENT_WEBHOOK_ACCEPTED, {"invoice_id": "invoice-123"})
+-            )
+-            return {"status": 500, "error": "webhook processing failed"}
++            return {"status": 401, "error": "invalid signature"}
+         self.repository.mark_retry_requested("invoice-123")
+         self.event_bus.publish(EventEnvelope(PAYMENT_WEBHOOK_ACCEPTED, {"invoice_id": "invoice-123"}))
+         return {"status": 202}

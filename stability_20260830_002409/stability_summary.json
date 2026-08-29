@@ -1,0 +1,880 @@
+{
+  "campaign_root": "/Users/root/workspace/Agent-Learning/evals/week4/agent_runs/stability_20260830_002409",
+  "passed": false,
+  "checks": {
+    "f03_result_count_5": true,
+    "f03_success_at_least_4": true,
+    "f03_max_steps_0": false,
+    "f03_operational_failures_0": true,
+    "f03_workspace_mutation_0": true,
+    "b01_result_count_2": true,
+    "b01_success_2_of_2": true,
+    "b01_control_false_negative_0": true,
+    "full_result_count_33": true,
+    "full_security_33": true,
+    "full_success_at_least_90_percent": true,
+    "full_each_task_at_least_2_of_3": true,
+    "full_control_false_negative_0": true,
+    "full_workspace_mutation_0": true
+  },
+  "runs": [
+    {
+      "group": "F03",
+      "repetition": 1,
+      "output_dir": "/Users/root/workspace/Agent-Learning/evals/week4/agent_runs/stability_20260830_002409/01_F03_1_20260830_002409",
+      "exit_code": 0,
+      "summary": {
+        "run_id": "baseline-21390250",
+        "mode": "baseline",
+        "task_count": 1,
+        "success_count": 1,
+        "provider_blocked_count": 0,
+        "environment_blocked_count": 0,
+        "protocol_repair_attempt_count": 0,
+        "protocol_failed_count": 0,
+        "acceptance_passed_count": 1,
+        "regression_passed_count": 1,
+        "task_verification_passed_count": 1,
+        "security_passed_count": 1,
+        "pristine_acceptance_passed_count": 0,
+        "pristine_task_verification_passed_count": 0,
+        "actor_completed_count": 1,
+        "within_budget_count": 1,
+        "failure_category_counts": {},
+        "completion_ready_count": 1,
+        "completion_ready_but_actor_failed_count": 0,
+        "post_ready_tool_call_count": 0,
+        "verification_workspace_mutation_count": 0,
+        "first_patch_step_count": 1,
+        "first_patch_step_by_task": {
+          "F03": 9
+        },
+        "pre_edit_step_count": 9,
+        "pre_edit_tool_call_count": 24,
+        "progress_advisory_count": 1,
+        "progress_advisory_level_counts": {
+          "1": 1,
+          "2": 0
+        },
+        "no_source_progress_pause_count": 0,
+        "max_no_source_progress_streak": 9,
+        "environment_inspection_count": 1,
+        "initial_context_cache_hit_count": 5,
+        "initial_context_reference_hit_count": 2,
+        "source_progress_count": 2,
+        "diagnostic_progress_count": 25,
+        "first_environment_inspection_step_count": 1,
+        "first_environment_inspection_step_by_task": {
+          "F03": 5
+        }
+      },
+      "task_count": 1,
+      "steps": 14,
+      "input_tokens": 97118,
+      "output_tokens": 3207,
+      "cost_usd": 0.4803255
+    },
+    {
+      "group": "F03",
+      "repetition": 2,
+      "output_dir": "/Users/root/workspace/Agent-Learning/evals/week4/agent_runs/stability_20260830_002409/02_F03_2_20260830_002504",
+      "exit_code": 0,
+      "summary": {
+        "run_id": "baseline-04d782ac",
+        "mode": "baseline",
+        "task_count": 1,
+        "success_count": 1,
+        "provider_blocked_count": 0,
+        "environment_blocked_count": 0,
+        "protocol_repair_attempt_count": 0,
+        "protocol_failed_count": 0,
+        "acceptance_passed_count": 1,
+        "regression_passed_count": 1,
+        "task_verification_passed_count": 1,
+        "security_passed_count": 1,
+        "pristine_acceptance_passed_count": 0,
+        "pristine_task_verification_passed_count": 0,
+        "actor_completed_count": 1,
+        "within_budget_count": 1,
+        "failure_category_counts": {},
+        "completion_ready_count": 1,
+        "completion_ready_but_actor_failed_count": 0,
+        "post_ready_tool_call_count": 0,
+        "verification_workspace_mutation_count": 0,
+        "first_patch_step_count": 1,
+        "first_patch_step_by_task": {
+          "F03": 10
+        },
+        "pre_edit_step_count": 13,
+        "pre_edit_tool_call_count": 33,
+        "progress_advisory_count": 1,
+        "progress_advisory_level_counts": {
+          "1": 1,
+          "2": 0
+        },
+        "no_source_progress_pause_count": 0,
+        "max_no_source_progress_streak": 10,
+        "environment_inspection_count": 1,
+        "initial_context_cache_hit_count": 5,
+        "initial_context_reference_hit_count": 1,
+        "source_progress_count": 2,
+        "diagnostic_progress_count": 32,
+        "first_environment_inspection_step_count": 1,
+        "first_environment_inspection_step_by_task": {
+          "F03": 6
+        }
+      },
+      "task_count": 1,
+      "steps": 18,
+      "input_tokens": 128007,
+      "output_tokens": 4991,
+      "cost_usd": 0.6434099999999999
+    },
+    {
+      "group": "F03",
+      "repetition": 3,
+      "output_dir": "/Users/root/workspace/Agent-Learning/evals/week4/agent_runs/stability_20260830_002409/03_F03_3_20260830_002622",
+      "exit_code": 0,
+      "summary": {
+        "run_id": "baseline-3395d9db",
+        "mode": "baseline",
+        "task_count": 1,
+        "success_count": 0,
+        "provider_blocked_count": 0,
+        "environment_blocked_count": 0,
+        "protocol_repair_attempt_count": 0,
+        "protocol_failed_count": 0,
+        "acceptance_passed_count": 1,
+        "regression_passed_count": 1,
+        "task_verification_passed_count": 1,
+        "security_passed_count": 1,
+        "pristine_acceptance_passed_count": 0,
+        "pristine_task_verification_passed_count": 0,
+        "actor_completed_count": 0,
+        "within_budget_count": 1,
+        "failure_category_counts": {
+          "max_steps": 1
+        },
+        "completion_ready_count": 1,
+        "completion_ready_but_actor_failed_count": 1,
+        "post_ready_tool_call_count": 0,
+        "verification_workspace_mutation_count": 0,
+        "first_patch_step_count": 1,
+        "first_patch_step_by_task": {
+          "F03": 13
+        },
+        "pre_edit_step_count": 15,
+        "pre_edit_tool_call_count": 33,
+        "progress_advisory_count": 1,
+        "progress_advisory_level_counts": {
+          "1": 1,
+          "2": 0
+        },
+        "no_source_progress_pause_count": 0,
+        "max_no_source_progress_streak": 13,
+        "environment_inspection_count": 1,
+        "initial_context_cache_hit_count": 7,
+        "initial_context_reference_hit_count": 2,
+        "source_progress_count": 2,
+        "diagnostic_progress_count": 32,
+        "first_environment_inspection_step_count": 1,
+        "first_environment_inspection_step_by_task": {
+          "F03": 6
+        }
+      },
+      "task_count": 1,
+      "steps": 20,
+      "input_tokens": 142378,
+      "output_tokens": 3566,
+      "cost_usd": 0.6888420000000001
+    },
+    {
+      "group": "F03",
+      "repetition": 4,
+      "output_dir": "/Users/root/workspace/Agent-Learning/evals/week4/agent_runs/stability_20260830_002409/04_F03_4_20260830_002721",
+      "exit_code": 0,
+      "summary": {
+        "run_id": "baseline-7ac03de1",
+        "mode": "baseline",
+        "task_count": 1,
+        "success_count": 1,
+        "provider_blocked_count": 0,
+        "environment_blocked_count": 0,
+        "protocol_repair_attempt_count": 0,
+        "protocol_failed_count": 0,
+        "acceptance_passed_count": 1,
+        "regression_passed_count": 1,
+        "task_verification_passed_count": 1,
+        "security_passed_count": 1,
+        "pristine_acceptance_passed_count": 0,
+        "pristine_task_verification_passed_count": 0,
+        "actor_completed_count": 1,
+        "within_budget_count": 1,
+        "failure_category_counts": {},
+        "completion_ready_count": 1,
+        "completion_ready_but_actor_failed_count": 0,
+        "post_ready_tool_call_count": 0,
+        "verification_workspace_mutation_count": 0,
+        "first_patch_step_count": 1,
+        "first_patch_step_by_task": {
+          "F03": 14
+        },
+        "pre_edit_step_count": 14,
+        "pre_edit_tool_call_count": 42,
+        "progress_advisory_count": 2,
+        "progress_advisory_level_counts": {
+          "1": 1,
+          "2": 1
+        },
+        "no_source_progress_pause_count": 0,
+        "max_no_source_progress_streak": 14,
+        "environment_inspection_count": 5,
+        "initial_context_cache_hit_count": 6,
+        "initial_context_reference_hit_count": 1,
+        "source_progress_count": 2,
+        "diagnostic_progress_count": 40,
+        "first_environment_inspection_step_count": 1,
+        "first_environment_inspection_step_by_task": {
+          "F03": 6
+        }
+      },
+      "task_count": 1,
+      "steps": 19,
+      "input_tokens": 133598,
+      "output_tokens": 3546,
+      "cost_usd": 0.649062
+    },
+    {
+      "group": "F03",
+      "repetition": 5,
+      "output_dir": "/Users/root/workspace/Agent-Learning/evals/week4/agent_runs/stability_20260830_002409/05_F03_5_20260830_002822",
+      "exit_code": 0,
+      "summary": {
+        "run_id": "baseline-889ef97c",
+        "mode": "baseline",
+        "task_count": 1,
+        "success_count": 1,
+        "provider_blocked_count": 0,
+        "environment_blocked_count": 0,
+        "protocol_repair_attempt_count": 0,
+        "protocol_failed_count": 0,
+        "acceptance_passed_count": 1,
+        "regression_passed_count": 1,
+        "task_verification_passed_count": 1,
+        "security_passed_count": 1,
+        "pristine_acceptance_passed_count": 0,
+        "pristine_task_verification_passed_count": 0,
+        "actor_completed_count": 1,
+        "within_budget_count": 1,
+        "failure_category_counts": {},
+        "completion_ready_count": 1,
+        "completion_ready_but_actor_failed_count": 0,
+        "post_ready_tool_call_count": 0,
+        "verification_workspace_mutation_count": 0,
+        "first_patch_step_count": 1,
+        "first_patch_step_by_task": {
+          "F03": 11
+        },
+        "pre_edit_step_count": 11,
+        "pre_edit_tool_call_count": 30,
+        "progress_advisory_count": 1,
+        "progress_advisory_level_counts": {
+          "1": 1,
+          "2": 0
+        },
+        "no_source_progress_pause_count": 0,
+        "max_no_source_progress_streak": 11,
+        "environment_inspection_count": 3,
+        "initial_context_cache_hit_count": 6,
+        "initial_context_reference_hit_count": 1,
+        "source_progress_count": 2,
+        "diagnostic_progress_count": 30,
+        "first_environment_inspection_step_count": 1,
+        "first_environment_inspection_step_by_task": {
+          "F03": 5
+        }
+      },
+      "task_count": 1,
+      "steps": 17,
+      "input_tokens": 121526,
+      "output_tokens": 3461,
+      "cost_usd": 0.5935905
+    },
+    {
+      "group": "B01",
+      "repetition": 1,
+      "output_dir": "/Users/root/workspace/Agent-Learning/evals/week4/agent_runs/stability_20260830_002409/06_B01_1_20260830_002918",
+      "exit_code": 0,
+      "summary": {
+        "run_id": "baseline-f58dd054",
+        "mode": "baseline",
+        "task_count": 1,
+        "success_count": 1,
+        "provider_blocked_count": 0,
+        "environment_blocked_count": 0,
+        "protocol_repair_attempt_count": 0,
+        "protocol_failed_count": 0,
+        "acceptance_passed_count": 1,
+        "regression_passed_count": 1,
+        "task_verification_passed_count": 1,
+        "security_passed_count": 1,
+        "pristine_acceptance_passed_count": 0,
+        "pristine_task_verification_passed_count": 0,
+        "actor_completed_count": 1,
+        "within_budget_count": 1,
+        "failure_category_counts": {},
+        "completion_ready_count": 1,
+        "completion_ready_but_actor_failed_count": 0,
+        "post_ready_tool_call_count": 0,
+        "verification_workspace_mutation_count": 0,
+        "first_patch_step_count": 1,
+        "first_patch_step_by_task": {
+          "B01": 2
+        },
+        "pre_edit_step_count": 1,
+        "pre_edit_tool_call_count": 3,
+        "progress_advisory_count": 0,
+        "progress_advisory_level_counts": {
+          "1": 0,
+          "2": 0
+        },
+        "no_source_progress_pause_count": 0,
+        "max_no_source_progress_streak": 3,
+        "environment_inspection_count": 0,
+        "initial_context_cache_hit_count": 0,
+        "initial_context_reference_hit_count": 0,
+        "source_progress_count": 1,
+        "diagnostic_progress_count": 5,
+        "first_environment_inspection_step_count": 0,
+        "first_environment_inspection_step_by_task": {
+          "B01": null
+        }
+      },
+      "task_count": 1,
+      "steps": 5,
+      "input_tokens": 29342,
+      "output_tokens": 610,
+      "cost_usd": 0.140274
+    },
+    {
+      "group": "B01",
+      "repetition": 2,
+      "output_dir": "/Users/root/workspace/Agent-Learning/evals/week4/agent_runs/stability_20260830_002409/07_B01_2_20260830_002933",
+      "exit_code": 0,
+      "summary": {
+        "run_id": "baseline-9619c878",
+        "mode": "baseline",
+        "task_count": 1,
+        "success_count": 1,
+        "provider_blocked_count": 0,
+        "environment_blocked_count": 0,
+        "protocol_repair_attempt_count": 0,
+        "protocol_failed_count": 0,
+        "acceptance_passed_count": 1,
+        "regression_passed_count": 1,
+        "task_verification_passed_count": 1,
+        "security_passed_count": 1,
+        "pristine_acceptance_passed_count": 0,
+        "pristine_task_verification_passed_count": 0,
+        "actor_completed_count": 1,
+        "within_budget_count": 1,
+        "failure_category_counts": {},
+        "completion_ready_count": 1,
+        "completion_ready_but_actor_failed_count": 0,
+        "post_ready_tool_call_count": 0,
+        "verification_workspace_mutation_count": 0,
+        "first_patch_step_count": 1,
+        "first_patch_step_by_task": {
+          "B01": 2
+        },
+        "pre_edit_step_count": 1,
+        "pre_edit_tool_call_count": 2,
+        "progress_advisory_count": 0,
+        "progress_advisory_level_counts": {
+          "1": 0,
+          "2": 0
+        },
+        "no_source_progress_pause_count": 0,
+        "max_no_source_progress_streak": 3,
+        "environment_inspection_count": 0,
+        "initial_context_cache_hit_count": 1,
+        "initial_context_reference_hit_count": 1,
+        "source_progress_count": 1,
+        "diagnostic_progress_count": 4,
+        "first_environment_inspection_step_count": 0,
+        "first_environment_inspection_step_by_task": {
+          "B01": null
+        }
+      },
+      "task_count": 1,
+      "steps": 5,
+      "input_tokens": 28380,
+      "output_tokens": 530,
+      "cost_usd": 0.134865
+    },
+    {
+      "group": "11task",
+      "repetition": 1,
+      "output_dir": "/Users/root/workspace/Agent-Learning/evals/week4/agent_runs/stability_20260830_002409/08_11task_1_20260830_002948",
+      "exit_code": 0,
+      "summary": {
+        "run_id": "baseline-6c8caa7b",
+        "mode": "baseline",
+        "task_count": 11,
+        "success_count": 11,
+        "provider_blocked_count": 0,
+        "environment_blocked_count": 0,
+        "protocol_repair_attempt_count": 0,
+        "protocol_failed_count": 0,
+        "acceptance_passed_count": 11,
+        "regression_passed_count": 11,
+        "task_verification_passed_count": 11,
+        "security_passed_count": 11,
+        "pristine_acceptance_passed_count": 0,
+        "pristine_task_verification_passed_count": 0,
+        "actor_completed_count": 11,
+        "within_budget_count": 11,
+        "failure_category_counts": {},
+        "completion_ready_count": 11,
+        "completion_ready_but_actor_failed_count": 0,
+        "post_ready_tool_call_count": 2,
+        "verification_workspace_mutation_count": 0,
+        "first_patch_step_count": 11,
+        "first_patch_step_by_task": {
+          "B01": 2,
+          "B02": 2,
+          "B03": 7,
+          "B04": 2,
+          "B05": 4,
+          "F01": 4,
+          "F03": 12,
+          "F04": 5,
+          "R01": 4,
+          "R02": 6,
+          "R03": 3
+        },
+        "pre_edit_step_count": 48,
+        "pre_edit_tool_call_count": 114,
+        "progress_advisory_count": 1,
+        "progress_advisory_level_counts": {
+          "1": 1,
+          "2": 0
+        },
+        "no_source_progress_pause_count": 0,
+        "max_no_source_progress_streak": 12,
+        "environment_inspection_count": 2,
+        "initial_context_cache_hit_count": 17,
+        "initial_context_reference_hit_count": 13,
+        "source_progress_count": 17,
+        "diagnostic_progress_count": 132,
+        "first_environment_inspection_step_count": 2,
+        "first_environment_inspection_step_by_task": {
+          "B01": null,
+          "B02": null,
+          "B03": 6,
+          "B04": null,
+          "B05": null,
+          "F01": null,
+          "F03": 8,
+          "F04": null,
+          "R01": null,
+          "R02": null,
+          "R03": null
+        }
+      },
+      "task_count": 11,
+      "steps": 97,
+      "input_tokens": 653756,
+      "output_tokens": 18385,
+      "cost_usd": 3.1900995
+    },
+    {
+      "group": "11task",
+      "repetition": 2,
+      "output_dir": "/Users/root/workspace/Agent-Learning/evals/week4/agent_runs/stability_20260830_002409/09_11task_2_20260830_003505",
+      "exit_code": 0,
+      "summary": {
+        "run_id": "baseline-40ce44d1",
+        "mode": "baseline",
+        "task_count": 11,
+        "success_count": 10,
+        "provider_blocked_count": 0,
+        "environment_blocked_count": 0,
+        "protocol_repair_attempt_count": 0,
+        "protocol_failed_count": 0,
+        "acceptance_passed_count": 11,
+        "regression_passed_count": 11,
+        "task_verification_passed_count": 11,
+        "security_passed_count": 11,
+        "pristine_acceptance_passed_count": 0,
+        "pristine_task_verification_passed_count": 0,
+        "actor_completed_count": 10,
+        "within_budget_count": 11,
+        "failure_category_counts": {
+          "max_steps": 1
+        },
+        "completion_ready_count": 10,
+        "completion_ready_but_actor_failed_count": 0,
+        "post_ready_tool_call_count": 1,
+        "verification_workspace_mutation_count": 0,
+        "first_patch_step_count": 11,
+        "first_patch_step_by_task": {
+          "B01": 3,
+          "B02": 2,
+          "B03": 5,
+          "B04": 4,
+          "B05": 3,
+          "F01": 4,
+          "F03": 8,
+          "F04": 5,
+          "R01": 2,
+          "R02": 7,
+          "R03": 3
+        },
+        "pre_edit_step_count": 52,
+        "pre_edit_tool_call_count": 122,
+        "progress_advisory_count": 1,
+        "progress_advisory_level_counts": {
+          "1": 1,
+          "2": 0
+        },
+        "no_source_progress_pause_count": 0,
+        "max_no_source_progress_streak": 8,
+        "environment_inspection_count": 1,
+        "initial_context_cache_hit_count": 25,
+        "initial_context_reference_hit_count": 19,
+        "source_progress_count": 19,
+        "diagnostic_progress_count": 127,
+        "first_environment_inspection_step_count": 1,
+        "first_environment_inspection_step_by_task": {
+          "B01": null,
+          "B02": null,
+          "B03": null,
+          "B04": null,
+          "B05": null,
+          "F01": null,
+          "F03": 5,
+          "F04": null,
+          "R01": null,
+          "R02": null,
+          "R03": null
+        }
+      },
+      "task_count": 11,
+      "steps": 98,
+      "input_tokens": 660877,
+      "output_tokens": 19129,
+      "cost_usd": 3.232188
+    },
+    {
+      "group": "11task",
+      "repetition": 3,
+      "output_dir": "/Users/root/workspace/Agent-Learning/evals/week4/agent_runs/stability_20260830_002409/10_11task_3_20260830_004035",
+      "exit_code": 0,
+      "summary": {
+        "run_id": "baseline-0d191647",
+        "mode": "baseline",
+        "task_count": 11,
+        "success_count": 11,
+        "provider_blocked_count": 0,
+        "environment_blocked_count": 0,
+        "protocol_repair_attempt_count": 0,
+        "protocol_failed_count": 0,
+        "acceptance_passed_count": 11,
+        "regression_passed_count": 11,
+        "task_verification_passed_count": 11,
+        "security_passed_count": 11,
+        "pristine_acceptance_passed_count": 0,
+        "pristine_task_verification_passed_count": 0,
+        "actor_completed_count": 11,
+        "within_budget_count": 11,
+        "failure_category_counts": {},
+        "completion_ready_count": 11,
+        "completion_ready_but_actor_failed_count": 0,
+        "post_ready_tool_call_count": 0,
+        "verification_workspace_mutation_count": 0,
+        "first_patch_step_count": 11,
+        "first_patch_step_by_task": {
+          "B01": 2,
+          "B02": 2,
+          "B03": 7,
+          "B04": 2,
+          "B05": 3,
+          "F01": 2,
+          "F03": 10,
+          "F04": 5,
+          "R01": 2,
+          "R02": 5,
+          "R03": 3
+        },
+        "pre_edit_step_count": 39,
+        "pre_edit_tool_call_count": 101,
+        "progress_advisory_count": 1,
+        "progress_advisory_level_counts": {
+          "1": 1,
+          "2": 0
+        },
+        "no_source_progress_pause_count": 0,
+        "max_no_source_progress_streak": 10,
+        "environment_inspection_count": 5,
+        "initial_context_cache_hit_count": 21,
+        "initial_context_reference_hit_count": 16,
+        "source_progress_count": 16,
+        "diagnostic_progress_count": 116,
+        "first_environment_inspection_step_count": 2,
+        "first_environment_inspection_step_by_task": {
+          "B01": null,
+          "B02": null,
+          "B03": 4,
+          "B04": null,
+          "B05": null,
+          "F01": null,
+          "F03": 6,
+          "F04": null,
+          "R01": null,
+          "R02": null,
+          "R03": null
+        }
+      },
+      "task_count": 11,
+      "steps": 88,
+      "input_tokens": 578861,
+      "output_tokens": 17033,
+      "cost_usd": 2.83482
+    }
+  ],
+  "per_task_success": {
+    "F03": {
+      "F03": 4
+    },
+    "B01": {
+      "B01": 2
+    },
+    "11task": {
+      "B01": 3,
+      "B02": 3,
+      "B03": 3,
+      "B04": 3,
+      "B05": 3,
+      "F01": 3,
+      "F03": 3,
+      "F04": 2,
+      "R01": 3,
+      "R02": 3,
+      "R03": 3
+    }
+  },
+  "metrics": {
+    "F03": {
+      "result_count": 5,
+      "success_count": 4,
+      "failure_categories": {
+        "max_steps": 1
+      },
+      "first_patch_step_count": 5,
+      "first_patch_step_by_task": {
+        "F03": [
+          9,
+          10,
+          13,
+          14,
+          11
+        ]
+      },
+      "pre_edit_step_count": 62,
+      "pre_edit_tool_call_count": 162,
+      "progress_advisory_count": 6,
+      "progress_advisory_level_counts": {
+        "1": 5,
+        "2": 1
+      },
+      "no_source_progress_pause_count": 0,
+      "max_no_source_progress_streak": 14,
+      "environment_inspection_count": 11,
+      "first_environment_inspection_step_count": 5,
+      "first_environment_inspection_step_by_task": {
+        "F03": [
+          5,
+          6,
+          6,
+          6,
+          5
+        ]
+      },
+      "initial_context_cache_hit_count": 29,
+      "initial_context_reference_hit_count": 7,
+      "source_progress_count": 10,
+      "diagnostic_progress_count": 159
+    },
+    "B01": {
+      "result_count": 2,
+      "success_count": 2,
+      "failure_categories": {},
+      "first_patch_step_count": 2,
+      "first_patch_step_by_task": {
+        "B01": [
+          2,
+          2
+        ]
+      },
+      "pre_edit_step_count": 2,
+      "pre_edit_tool_call_count": 5,
+      "progress_advisory_count": 0,
+      "progress_advisory_level_counts": {
+        "1": 0,
+        "2": 0
+      },
+      "no_source_progress_pause_count": 0,
+      "max_no_source_progress_streak": 3,
+      "environment_inspection_count": 0,
+      "first_environment_inspection_step_count": 0,
+      "first_environment_inspection_step_by_task": {
+        "B01": [
+          null,
+          null
+        ]
+      },
+      "initial_context_cache_hit_count": 1,
+      "initial_context_reference_hit_count": 1,
+      "source_progress_count": 2,
+      "diagnostic_progress_count": 9
+    },
+    "11task": {
+      "result_count": 33,
+      "success_count": 32,
+      "failure_categories": {
+        "max_steps": 1
+      },
+      "first_patch_step_count": 33,
+      "first_patch_step_by_task": {
+        "B01": [
+          2,
+          3,
+          2
+        ],
+        "B02": [
+          2,
+          2,
+          2
+        ],
+        "B03": [
+          7,
+          5,
+          7
+        ],
+        "B04": [
+          2,
+          4,
+          2
+        ],
+        "B05": [
+          4,
+          3,
+          3
+        ],
+        "F01": [
+          4,
+          4,
+          2
+        ],
+        "F03": [
+          12,
+          8,
+          10
+        ],
+        "F04": [
+          5,
+          5,
+          5
+        ],
+        "R01": [
+          4,
+          2,
+          2
+        ],
+        "R02": [
+          6,
+          7,
+          5
+        ],
+        "R03": [
+          3,
+          3,
+          3
+        ]
+      },
+      "pre_edit_step_count": 139,
+      "pre_edit_tool_call_count": 337,
+      "progress_advisory_count": 3,
+      "progress_advisory_level_counts": {
+        "1": 3,
+        "2": 0
+      },
+      "no_source_progress_pause_count": 0,
+      "max_no_source_progress_streak": 12,
+      "environment_inspection_count": 8,
+      "first_environment_inspection_step_count": 5,
+      "first_environment_inspection_step_by_task": {
+        "B01": [
+          null,
+          null,
+          null
+        ],
+        "B02": [
+          null,
+          null,
+          null
+        ],
+        "B03": [
+          6,
+          null,
+          4
+        ],
+        "B04": [
+          null,
+          null,
+          null
+        ],
+        "B05": [
+          null,
+          null,
+          null
+        ],
+        "F01": [
+          null,
+          null,
+          null
+        ],
+        "F03": [
+          8,
+          5,
+          6
+        ],
+        "F04": [
+          null,
+          null,
+          null
+        ],
+        "R01": [
+          null,
+          null,
+          null
+        ],
+        "R02": [
+          null,
+          null,
+          null
+        ],
+        "R03": [
+          null,
+          null,
+          null
+        ]
+      },
+      "initial_context_cache_hit_count": 63,
+      "initial_context_reference_hit_count": 48,
+      "source_progress_count": 52,
+      "diagnostic_progress_count": 375
+    }
+  }
+}

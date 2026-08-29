@@ -1,0 +1,90 @@
+[
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/task_verification/test_r02.py",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 390.13499999418855,
+    "stdout": ".                                                                        [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true,
+    "workspace_version": 2,
+    "workspace_fingerprint_before": "f0fb179dc80c04f8bb6252c711e8fb97c42019b99f875c3f3144c1b8c2f16e45",
+    "workspace_fingerprint_after": "f0fb179dc80c04f8bb6252c711e8fb97c42019b99f875c3f3144c1b8c2f16e45",
+    "workspace_mutations": []
+  },
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/billing",
+      "-q"
+    ],
+    "passed": false,
+    "category": "test_failed",
+    "environment_failure_category": null,
+    "exit_code": 1,
+    "duration_ms": 395.1783333905041,
+    "stdout": ".F                                                                       [100%]\n=================================== FAILURES ===================================\n_______________________ test_valid_signature_is_accepted _______________________\n\n    def test_valid_signature_is_accepted() -> None:\n>       assert PaymentWebhookVerifier().verify(b\"{}\", \"valid\")\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\ntests/billing/test_webhook_signature.py:7: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nsrc/billing/webhooks.py:15: in verify\n    return self.gateway.verify_signature(payload, signature)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = <src.billing.payment_gateway.PaymentGateway object at 0xfb69903e7ed0>\npayload = b'{}', signature = 'valid'\n\n    def verify_signature(self, payload: bytes, signature: str) -> bool:\n>       return self.client.verify_signature(payload, signature)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       AttributeError: 'ProviderClient' object has no attribute 'verify_signature'\n\nsrc/billing/payment_gateway.py:45: AttributeError\n=========================== short test summary info ============================\nFAILED tests/billing/test_webhook_signature.py::test_valid_signature_is_accepted\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true,
+    "workspace_version": 2,
+    "workspace_fingerprint_before": "f0fb179dc80c04f8bb6252c711e8fb97c42019b99f875c3f3144c1b8c2f16e45",
+    "workspace_fingerprint_after": "f0fb179dc80c04f8bb6252c711e8fb97c42019b99f875c3f3144c1b8c2f16e45",
+    "workspace_mutations": []
+  },
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/task_verification/test_r02.py",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 509.6995416097343,
+    "stdout": ".                                                                        [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true,
+    "workspace_version": 3,
+    "workspace_fingerprint_before": "20426396e993f34a79a37d22177e661655a97fc0511387db44ea744aa9d0278d",
+    "workspace_fingerprint_after": "20426396e993f34a79a37d22177e661655a97fc0511387db44ea744aa9d0278d",
+    "workspace_mutations": []
+  },
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/billing",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 392.515332903713,
+    "stdout": "..                                                                       [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true,
+    "workspace_version": 3,
+    "workspace_fingerprint_before": "20426396e993f34a79a37d22177e661655a97fc0511387db44ea744aa9d0278d",
+    "workspace_fingerprint_after": "20426396e993f34a79a37d22177e661655a97fc0511387db44ea744aa9d0278d",
+    "workspace_mutations": []
+  }
+]

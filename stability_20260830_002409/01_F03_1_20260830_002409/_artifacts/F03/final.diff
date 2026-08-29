@@ -1,0 +1,111 @@
+diff --git a/src/common/settings.py b/src/common/settings.py
+index 9da8c11..c4974fd 100644
+--- a/src/common/settings.py
++++ b/src/common/settings.py
+@@ -10,3 +10,83 @@ def config_path(name: str) -> Path:
+ def load_retry_policy() -> dict:
+     return {"initial_delay_seconds": 30, "max_attempts": 5}
+ 
++
++def load_feature_flag(section: str, flag: str) -> bool | None:
++    """Read a boolean feature flag from configs/feature_flags.yaml.
++
++    Returns the flag value when the file, section, and flag are all present,
++    otherwise returns None so callers can preserve their default behavior.
++    """
++    path = config_path("feature_flags.yaml")
++    if not path.exists():
++        return None
++
++    try:
++        text = path.read_text(encoding="utf-8")
++    except OSError:
++        return None
++
++    value = _parse_yaml_flag(text, section, flag)
++    if value is None:
++        return None
++    if isinstance(value, bool):
++        return value
++    # Accept explicit string booleans as well.
++    if isinstance(value, str):
++        lowered = value.strip().lower()
++        if lowered == "true":
++            return True
++        if lowered == "false":
++            return False
++    return None
++
++
++def _parse_yaml_flag(text: str, section: str, flag: str) -> object:
++    """Parse a minimal subset of YAML for nested boolean flags.
++
++    Supports the simple structure used by configs/feature_flags.yaml:
++
++        section:
++          flag: true
++
++    and flat top-level entries:
++
++        section: true
++    """
++    lines = text.splitlines()
++    in_section = False
++    for raw_line in lines:
++        line = raw_line.rstrip()
++        if not line.strip() or line.strip().startswith("#"):
++            continue
++
++        indent = len(line) - len(line.lstrip())
++        content = line.strip()
++
++        if indent == 0:
++            # Top-level key, possibly a section header.
++            if content.endswith(":"):
++                key = content[:-1].strip()
++                in_section = key == section
++            else:
++                key, _, value = content.partition(":")
++                if key.strip() == section:
++                    return _coerce_bool(value.strip())
++                in_section = False
++            continue
++
++        if in_section:
++            key, _, value = content.partition(":")
++            if key.strip() == flag:
++                return _coerce_bool(value.strip())
++
++    return None
++
++
++def _coerce_bool(value: str) -> object:
++    lowered = value.strip().lower()
++    if lowered == "true":
++        return True
++    if lowered == "false":
++        return False
++    return value
+diff --git a/src/notifications/dispatcher.py b/src/notifications/dispatcher.py
+index 36d4e13..934dd51 100644
+--- a/src/notifications/dispatcher.py
++++ b/src/notifications/dispatcher.py
+@@ -1,6 +1,7 @@
+ """Event-driven notification dispatch."""
+ 
+ from src.common.events import EventEnvelope, INVOICE_RETRY_REQUESTED, ORDER_CANCELLED
++from src.common.settings import load_feature_flag
+ from src.notifications.email import EmailSender
+ from src.notifications.templates import TEMPLATE_INVOICE_RETRY, TEMPLATE_ORDER_CANCELLED
+ 
+@@ -12,8 +13,9 @@ class NotificationDispatcher:
+         self.sender = sender or EmailSender()
+ 
+     def handle(self, event: EventEnvelope) -> None:
++        if load_feature_flag("notifications", "email_dispatch_enabled") is False:
++            return
+         if event.name == ORDER_CANCELLED:
+             self.sender.send("ops@example.com", TEMPLATE_ORDER_CANCELLED, event.payload)
+         if event.name == INVOICE_RETRY_REQUESTED:
+             self.sender.send("billing@example.com", TEMPLATE_INVOICE_RETRY, event.payload)
+-
