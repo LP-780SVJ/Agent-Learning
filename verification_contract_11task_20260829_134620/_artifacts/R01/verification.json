@@ -1,0 +1,110 @@
+[
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/task_verification/test_r01.py",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 343.79675006493926,
+    "stdout": ".                                                                        [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true
+  },
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/auth",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 286.9295831769705,
+    "stdout": "..                                                                       [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": false
+  },
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/task_verification/test_r01.py",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 341.01412538439035,
+    "stdout": ".                                                                        [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true
+  },
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/auth",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 287.32274984940886,
+    "stdout": "..                                                                       [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": false
+  },
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/task_verification/test_r01.py",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 293.3085421100259,
+    "stdout": ".                                                                        [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true
+  },
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/auth",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 283.2845416851342,
+    "stdout": "..                                                                       [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": false
+  }
+]
