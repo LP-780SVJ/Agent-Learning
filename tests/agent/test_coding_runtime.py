@@ -915,6 +915,53 @@ def test_ready_batch_recomputes_gate_after_patch_before_authoritative_test(
     assert result.status is RuntimeStatus.COMPLETED
 
 
+def test_cached_read_then_patch_batch_records_source_progress(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    command = ("python", "-m", "pytest")
+    safe_execution = RecordingSafeExecution(
+        SafeExecutionService(sandbox_runner=PassingSandbox())
+    )
+    model = NativeScriptedModel(
+        [
+            _native_call(1, "read_file", {"path": "app.py"}),
+            _native_calls(
+                (2, "read_file", {"path": "app.py"}),
+                (
+                    3,
+                    "apply_patch",
+                    {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+                ),
+            ),
+            _native_call(4, "run_tests", {"argv": list(command)}),
+            _native_call(5, "git_diff", {}),
+            _native_call(6, "submit_result", {"summary": "done"}),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=safe_execution,
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="cached-read-patch-batch",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            verification_commands=(command,),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert safe_execution.patch_calls == 1
+    assert result.workspace_version == 1
+    assert result.source_progress_count == 1
+    assert result.batch_premature_stop_count == 0
+    assert result.progress_guard_unprocessed_safe_tool_call_count == 0
+
+
 def test_mixed_submit_result_batch_executes_nothing(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     mixed = ModelTurn(
@@ -974,6 +1021,11 @@ def test_mixed_submit_result_batch_executes_nothing(tmp_path: Path) -> None:
         and message.provider_call_id.startswith("provider-mixed-")
     ]
     assert len(mixed_results) == 2
+    assert result.declared_tool_calls == 2
+    assert result.processed_tool_calls == 2
+    assert result.rejected_tool_calls == 2
+    assert result.unprocessed_safe_tool_calls == 1
+    assert result.progress_guard_unprocessed_safe_tool_call_count == 0
 
 
 def test_verification_workspace_mutation_is_typed_and_stales_evidence(
@@ -1791,6 +1843,15 @@ def test_equivalent_failed_verification_stops_without_spending_more_steps(
                     "timeout_seconds": 120,
                 },
             ),
+            _call(
+                5,
+                "run_tests",
+                {
+                    "argv": ["python", "-m", "pytest", "tests"],
+                    "cwd": ".",
+                    "timeout_seconds": 120,
+                },
+            ),
         ]
     )
     result = CodingAgentRuntime(
@@ -1812,8 +1873,12 @@ def test_equivalent_failed_verification_stops_without_spending_more_steps(
 
     assert result.status is RuntimeStatus.FAILED
     assert result.failure_category == "repeated_action"
-    assert result.steps_used == 4
-    assert result.tool_calls_used == 3
+    assert result.failure_origin == "repeated_action_stall"
+    assert result.repeated_action_failure_count == 1
+    assert result.declared_tool_calls == 5
+    assert result.processed_tool_calls == 5
+    assert result.steps_used == 5
+    assert result.tool_calls_used == 5
     assert len(result.verification) == 1
 
 
@@ -1845,6 +1910,8 @@ def test_progress_advisories_share_normal_requests_then_pause_stagnation(
     assert len(model.requests) == 17
     assert result.progress_advisory_level_counts == {"1": 1, "2": 1}
     assert result.no_source_progress_pause_count == 1
+    assert result.source_no_progress_failure_count == 1
+    assert result.mechanical_no_progress_failure_count == 0
     advisories = [
         json.loads(message.content or "{}")
         for request_messages in model.requests

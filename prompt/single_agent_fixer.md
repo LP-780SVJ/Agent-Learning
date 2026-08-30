@@ -1,33 +1,33 @@
-# CodeTeam Week4 SingleAgent 下一轮 Runtime 修复：Finalization-aware Budgeting + Terminal Settlement
+# CodeTeam Week4 SingleAgent 当前已确认的 Runtime Correctness 修复：Batch-aware Stall Detection
 
 ## 角色
 
 你现在是 **CodeTeam / Coding Agent Runtime 的代码修改工程师**。
 
-本轮不是继续优化模型推理，不是扩大 Context，不是调整 Native Tool Calling，也不是重新设计 CompletionGate。
+本轮不是继续优化 CompletionGate、Finalization、Sandbox、Context、ProgressPolicy 阈值，也不是提升模型推理能力。
 
-当前 Week4 SingleAgent 已经经过多轮真实运行，Provider、协议、Sandbox、安全与 workspace hygiene 路径在最新 campaign 中没有失败；这不表示所有 Runtime completion/finalization 语义已经稳定。
+当前 Week4 SingleAgent 已经经过多轮真实稳定性验证，绝大多数 Runtime 主链路在最新有限样本中表现稳定；这不等于已经证明不存在其他缺陷。
 
-本轮只解决最新稳定性实验暴露出的一个剩余 Runtime correctness 问题：
+本轮只解决最新稳定性实验暴露出的一个明确 Runtime correctness 缺陷：
 
-> **复杂任务在接近 `max_steps` 时，正确代码、验证证据甚至 CompletionGate READY 可能已经出现，但因为没有剩余 Model Turn 完成 `submit_result` 或补齐最终 verification，Actor 仍被判定为 `MAX_STEPS`。**
+> **Native Provider 一次可以返回多个 ToolCall，但当前 AgentLoop 的 cached/repeated no-progress guard 会在 batch 中某一个 ToolCall 命中缓存或重复时立即停止整个 Agent，从而可能丢弃同一 batch 后续尚未执行的新动作。**
 
 本轮定义为：
 
 ```text
-Finalization-aware Budgeting
-+
-Terminal Runtime Settlement
+Batch-aware Stall Detection
 ```
 
 核心目标：
 
 ```text
-Model step budget
-负责限制进一步推理/修改
+Per-call Safety
+!=
+Per-turn Progress
 
-Runtime settlement
-负责在预算边界正确结算已经存在的客观完成证据
+单个 ToolCall 是否 cached / repeated
+不能直接代表
+整个 Model Turn 是否没有进展
 ```
 
 ---
@@ -46,7 +46,7 @@ https://github.com/LP-780SVJ/Agent-Learning
 week4
 ```
 
-必须基于当前 `week4` 最新代码修改。
+必须基于当前最新 `week4` 代码修改。
 
 ---
 
@@ -64,47 +64,49 @@ README.md
 重点阅读最新稳定性实验：
 
 ```text
-/Users/root/workspace/Agent-Learning/stability_20260830_002409
-```
-
-以及执行脚本：
-
-```text
-/Users/root/workspace/Agent-Learning/scripts/run_single_agent_stability_validation.sh
-```
-
-必须重点阅读真实失败轨迹：
-
-```text
-F03 × 5 中唯一 max_steps failure
-```
-
-以及：
-
-```text
-11-task × 3 中唯一失败的 F04
+/Users/root/workspace/Agent-Learning/evals/week4/agent_runs/stability_20260830_102307
 ```
 
 至少检查：
 
 ```text
 stability_summary.json
-results.jsonl
-
-对应 task 的：
-runtime_messages.json
-model_outputs.jsonl
-verification.json
-final.diff
 ```
 
-修改前先确认本提示词描述与最新真实代码、真实过程是否一致。
+以及 F03 × 5 中唯一失败的那一轮：
+
+```text
+results.jsonl
+_artifacts/F03/runtime_messages.json
+_artifacts/F03/model_outputs.jsonl
+_artifacts/F03/verification.json
+_artifacts/F03/final.diff
+```
+
+同时阅读当前：
+
+```text
+codeteam/agent_loop.py
+codeteam/agent/progress.py
+codeteam/agent/runtime.py
+codeteam/agent/runtime_tools.py
+codeteam/state.py
+codeteam/evaluation/stability.py
+```
+
+以及相关 tests。
+
+正式修改前先确认：
+
+> 本提示词描述是否与当前真实代码完全一致。
+
+若最新代码已经部分修复，必须以真实代码为准，不得重复实现。
 
 ---
 
-# 三、最新稳定性实验结果
+# 三、最新稳定性实验结论
 
-本轮稳定性脚本主要执行：
+本轮 stability script 主要运行：
 
 ```text
 F03 × 5
@@ -112,12 +114,72 @@ B01 × 2
 11-task × 3
 ```
 
-结果总体表现：
+整个 campaign 共 40 个 task episodes：
 
 ```text
-B01:
+actor success = 39 / 40
+security = 40 / 40
+```
+
+唯一失败是 targeted F03；同一 campaign 的三轮 full suite 中 F03 均成功，因此 F03 合计为 7 / 8。该结果说明 bug 具有偶发性，但真实可复现。
+
+结果：
+
+## B01
+
+```text
 2 / 2 success
 ```
+
+## 完整 11-task
+
+三轮：
+
+```text
+11 / 11
+11 / 11
+11 / 11
+```
+
+即：
+
+```text
+33 / 33
+```
+
+并且：
+
+```text
+grader_correct_but_actor_failed = 0
+completion_ready_but_actor_failed = 0
+
+provider failure = 0
+environment failure = 0
+protocol failure = 0
+workspace mutation = 0
+```
+
+因此此前以下能力已基本验证稳定：
+
+```text
+Native Tool Transport
+Verification Environment
+Sandbox Scratch Isolation
+Versioned Completion Evidence
+CompletionGate
+Native submit_result
+Finalization Reserve
+Terminal Settlement
+Progress Advisory
+Environment Introspection
+Initial Context Reuse
+```
+
+本轮不要重新打开这些已稳定主链路。
+
+---
+
+# 四、当前唯一失败：F03 × 5 中 1 次 `no_progress`
 
 F03：
 
@@ -125,1878 +187,1294 @@ F03：
 4 / 5 success
 ```
 
-11-task 三轮：
+唯一失败不再是：
 
 ```text
-11 / 11
-10 / 11
-11 / 11
+max_steps
 ```
 
-即：
+而是：
 
 ```text
-32 / 33 success
-≈ 97%
+no_progress
 ```
 
-整个 campaign 共 40 个 task episodes：
+失败轮关键数据：
 
 ```text
-actor success = 38 / 40
+steps          = 11
+tool_calls     = 33
 
-task verification = 40 / 40
-regression = 40 / 40
-hidden acceptance = 40 / 40
-security = 40 / 40
+patch_attempts = 0
+changed_files  = []
 
-provider/environment/protocol failure = 0
+source_progress     = 0
+diagnostic_progress = 31
 ```
 
-因此最新证据证明的是：
+错误语义：
 
 ```text
-Coding correctness 已经达到 40 / 40
-Actor orchestration / finalization 仍有 2 个 false negative
+Agent stopped after repeated cached exploration without workspace changes.
 ```
 
-其中三轮 11-task full suite 合计：
+这是一个已确认的 Runtime premature-stop 缺陷，但不能反向证明模型若继续执行就一定会完成正确代码。最终 workspace 没有 patch，公开验证、regression 与 hidden acceptance 均失败，因此应准确描述为：
 
 ```text
-security = 33 / 33
-workspace mutation = 0
-no_source_progress false pause = 0
+Runtime-induced opportunity loss
++
+model exploration inefficiency
 ```
 
-此前已经解决：
-
-```text
-Native Tool Transport
-Verification Environment
-Sandbox Scratch Isolation
-Normal-path submit_result ownership
-Versioned Completion Evidence
-Protocol Finalization
-Pre-edit Progress Control
-Environment Introspection
-Initial Context Reuse
-```
-
-因此本轮不要无理由重新打开这些已有最新通过证据的设计。Budget-boundary settlement 是 completion ownership 的新增边界语义，必须单独记录和验证，不能宣称原有 Completion Ownership 已经覆盖它。
+而不是已经完成正确代码后的评测 false negative。
 
 ---
 
-# 四、当前剩余失败并不是 Coding Correctness Failure
+# 五、失败发生前模型已经形成实现方向，但仍存在探索冗余
 
-最新两个真正失败都表现出：
+该 F03 失败轮里，模型已经完成：
 
 ```text
-最终代码 correctness 已通过 task verification、regression、hidden acceptance 和 security
+Task understanding       ✓
+Environment diagnosis    ✓
+Implementation direction ✓
 ```
 
-而不是模型不会做任务。
-
----
-
-# 五、F03 唯一失败：CompletionGate 已 READY，但 Actor 仍 MAX_STEPS
-
-这次 F03 failure 的关键状态：
+模型已经理解：
 
 ```text
-actor_status = failed
-failure_category = max_steps
+notifications.email_dispatch_enabled
 
-acceptance_passed = true
-regression_passed = true
-task_verification_passed = true
-security_passed = true
-within_budget = true
+明确 false
+→ suppress email
 
-completion_ready = true
+config / section / flag missing
+→ preserve existing behavior
 ```
 
-这意味着：
-
-> Runtime 自己已经知道当前 workspace 满足 completion requirements，但因为 step budget 已耗尽，没有剩余 Model Turn 调用 `submit_result`，最终仍然判失败。
-
----
-
-# 六、F03 最后几步真实轨迹
-
-关键过程：
+并通过：
 
 ```text
-Step 16
-apply_patch
+inspect_environment
 ```
 
-正确代码最终完成。
-
-随后：
+确认：
 
 ```text
-Step 17
-task verification
-PASS
+yaml unavailable
 ```
 
+随后已经决定：
+
 ```text
-Step 18
-regression
-PASS
+使用 dependency-free minimal implementation
 ```
 
-然后：
+但第 11 轮尚未执行的两个 fresh read 是：
 
 ```text
-Step 19
-模型尝试非 authoritative lint / typecheck
-Runtime 拒绝
+src/experimental/broken_parser_case.py
+src/plugins/loader.py
 ```
 
-最后：
+它们不是直接的任务实现动作，batch 中也没有 `apply_patch`。因此本轮修复只能证明 Runtime 不应在第一个 cached call 后丢弃后续调用，不能宣称后续调用必然带来任务成功。
+
+所以不能把本轮失败归因于：
 
 ```text
-Step 20
-git_diff
-```
-
-此时 Runtime 已经具备：
-
-```text
-real diff ✓
-current-version verification ✓
-current regression ✓
-current diff review ✓
-workspace hygiene ✓
-```
-
-因此：
-
-```text
-CompletionGate = READY
-```
-
-但没有 Step 21：
-
-```text
-submit_result
-```
-
-下一轮 Loop 直接：
-
-```text
-MAX_STEPS
+Context retrieval failed
+模型完全不理解需求
+Environment Inspector 无效
 ```
 
 ---
 
-# 七、当前 `max_steps` 混合了两个不同语义
+# 六、真正 Root Cause：Runtime 在 Multi-tool Batch 中途提前 STOP
 
-现在：
+失败关键点：
 
-```text
-max_steps = 20
-```
-
-同时表达：
-
-## A. Model Work Budget
+某一轮模型一次返回多个 native ToolCall，例如：
 
 ```text
-最多允许模型执行 20 个回合
+Assistant Turn N:
+
+1. read_file("AGENTS.md")
+2. read_file("src/experimental/broken_parser_case.py")
+3. read_file("src/plugins/loader.py")
 ```
 
-这是合理的。
+其中：
+
+```text
+Tool 1
+```
+
+命中 cache。
+
+而前一轮也已经出现 cached observation。
+
+当前 AgentLoop 在处理：
+
+```text
+Tool 1
+```
+
+时立即：
+
+```text
+cached_no_progress_count += 1
+```
+
+达到阈值后直接：
+
+```text
+return NO_PROGRESS
+```
+
+结果：
+
+```text
+Tool 2
+Tool 3
+```
+
+根本没有执行。
+
+这说明当前 Runtime 实际判断的是：
+
+> 连续多少个 ToolCall 是 cached。
+
+而不是：
+
+> 连续多少个完整 Model Turn 没有产生新 information / source progress。
+
+这个粒度是错误的。
 
 ---
 
-## B. Task Completion Failure Boundary
+# 七、Native Tool Calling 的正确抽象粒度
+
+Provider-native Tool Calling 允许：
 
 ```text
-第 20 个回合结束后没有 model final
-→ task failed
+Assistant Turn
+├── ToolCall A
+├── ToolCall B
+└── ToolCall C
 ```
 
-这不一定合理。
-
-F03 已经证明：
+因此应该明确区分：
 
 ```text
-Model Work Budget Exhausted
+ToolCall-level result
 ```
 
-不等于：
+与：
 
 ```text
-Task Incorrect
+Turn-level progress
 ```
 
-因为 Runtime 已经有足够客观证据证明任务完成。
+不能在：
+
+```text
+ToolCall A
+```
+
+结束后就断言：
+
+```text
+整个 Turn 没有 progress
+```
+
+尤其当：
+
+```text
+ToolCall B / C
+```
+
+尚未执行时。
 
 ---
 
-# 八、第一核心修改：Terminal Runtime Settlement
+# 八、本轮核心设计原则
 
-当前概念类似：
-
-```python
-while True:
-    if step_limit_reached:
-        return MAX_STEPS
-
-    call_model()
-```
-
-需要升级为：
+必须建立：
 
 ```text
-while True:
-
-    if model step budget exhausted:
-
-        evaluate CompletionGate
-
-        if READY:
-            Runtime settles COMPLETED
-        else:
-            MAX_STEPS
-
-    call_model()
+Per-call Safety
++
+Per-turn Progress Aggregation
 ```
 
-核心 invariant：
+### Per-call Safety
 
-> **Step limit prevents further model work; it must not invalidate already-satisfied Runtime completion evidence.**
+可以立即 fail fast。
+
+### Per-turn Progress
+
+必须处理完整个安全 Tool Batch 后才能判断。
 
 ---
 
-# 九、Terminal Settlement 不能额外调用一次模型
+# 九、哪些情况仍可以立即终止 Batch
 
-禁止：
+以下属于 Safety / Protocol invariant，可以继续 per-call fail-fast：
 
 ```text
-Step 20 用完
+Security violation
+Invalid tool schema
+Unknown/forbidden tool
+Tool-call budget exceeded
+Runtime halt / pause
+Mixed submit_result batch violation
+Unsafe execution
+Critical infrastructure failure
+```
+
+这些不是 progress heuristic。
+
+不要为了 batch-aware progress 而放松安全边界。
+
+---
+
+# 十、哪些情况不应立即终止 Batch
+
+以下属于：
+
+```text
+Progress / Loop heuristic
+```
+
+不应该在单个 ToolCall 后直接结束整个 Agent：
+
+```text
+cached read
+cached search
+cached list
+duplicate diagnostic observation
+repeated read/search
+semantic duplicate non-destructive exploration
+```
+
+正确逻辑应是：
+
+```text
+记录 duplicate/cached
 ↓
-免费给 Step 21
+继续处理 batch 中其余安全 ToolCall
 ↓
-让模型 submit_result
+batch 结束
+↓
+aggregate progress
+↓
+再决定是否增加 stall streak / STOP
 ```
-
-因为这样会破坏：
-
-```text
-max_steps = 20
-```
-
-的真实 budget 语义。
-
-正确行为：
-
-```text
-No additional provider call
-No additional reasoning
-No additional source mutation
-
-Runtime-only settlement
-```
-
-总 Model Turn 仍然不超过 20。
 
 ---
 
-# 十、Terminal Settlement 的安全前提
+# 十一、建议引入 Batch Progress Aggregation
 
-只有：
+不要造大型框架。
 
-```text
-CompletionGate.ready == true
-```
+可以在当前 `_handle_tool_calls()` 中维护小型局部状态。
 
-才允许 terminal settlement。
-
-仍然必须满足当前 CompletionGate 的真实 invariant，例如：
+例如概念上：
 
 ```text
-real intended Git diff
-current workspace-version required verification
-current diff review
-workspace hygiene
-no security/environment pause
+BatchProgress:
+    had_source_progress
+    had_uncached_observation
+    had_cached_observation
+    had_repeated_observation
+    processed_call_count
+    rejected_call_count
+    unprocessed_safe_call_count
 ```
 
-不要因为 step limit 到达而放宽任何 completion requirement。
+是否真的新增 dataclass，要看当前代码结构。
 
-在执行 Runtime-only settlement 前，还必须重新读取当前 workspace 指纹，并确认：
+如果几个 local bool 就能清晰实现，就不要为了抽象而新增文件。
+
+新 abstraction 必须购买：
+
+> Native multi-tool batch 层面的 progress aggregation。
+
+必须区分两个时钟：
 
 ```text
-fresh_workspace_fingerprint == completion_evidence.workspace_fingerprint
+Mechanical stall streak
+    判断整个 turn 是否只有 cached/repeated observation
+
+Source-progress streak
+    继续由 ProgressTracker 根据 successful apply_patch / workspace version change 推进
 ```
 
-如果二者不一致，说明 CompletionGate 计算后可能发生了 Runtime 未观察到的外部修改，必须拒绝 settlement，重新对账或进入明确失败/暂停状态。不能仅依赖内存中的 `workspace_version`。
-
-Terminal settlement 还必须记录独立完成来源，不得伪装成模型调用了 `submit_result`：
-
-```text
-completion_mode = model_submitted
-```
-
-或：
-
-```text
-completion_mode = runtime_budget_boundary_settlement
-```
-
-该字段至少传播到：
-
-```text
-CodingAgentRunResult
-Session / event payload
-Eval task result
-run summary / manifest
-```
-
-如果现有代码已有等价 provenance 字段，应复用并扩展枚举，不要创建语义重复字段。
+新读取一个此前未缓存但与任务无关的文件，只能说明该 turn 不是“纯机械重复”；它不能重置 source-progress clock，也不能自动宣称获得了有价值的语义进展。
 
 ---
 
-# 十一、Terminal Settlement 不得依赖 Hidden Grader
+# 十二、Cached No Progress 应改成 Turn-level Streak
 
-严禁：
+当前类似：
 
 ```text
-hidden acceptance passed
-→ actor success
+cached_no_progress_count
 ```
 
-Runtime 只能使用自己可见的 Completion Evidence。
+如果它实际按 ToolCall 计数，语义应调整。
 
-External Grader 继续保持独立评价边界。
+推荐概念：
+
+```text
+cached_no_progress_turn_streak
+```
+
+如果字段重命名会造成较大兼容影响，可以保留旧名字，但：
+
+```text
+必须修改语义
+```
+
+并在 Design Decision 中解释。
 
 ---
 
-# 十二、Terminal Summary
-
-如果 terminal settlement 不再调用 Model，就没有模型提供的：
-
-```text
-submit_result(summary=...)
-```
-
-因此 Runtime 可以生成一个 bounded fallback summary。
+# 十三、关键 Invariant：一个 Turn 最多 +1
 
 例如：
 
 ```text
-Completed verified changes in:
-- src/common/settings.py
-- src/notifications/dispatcher.py
+Assistant Turn:
+
+read A → cached
+read B → cached
+read C → cached
+read D → cached
 ```
 
-或者复用已有 Runtime evidence 生成：
+当前可能：
 
 ```text
-Verified task changes completed successfully.
++4
 ```
 
-不要加入：
+目标必须：
 
 ```text
-hidden test passed
-acceptance passed
-```
-
-这类 Runtime 不可见事实。
-
-Summary 只是 presentation，不是 correctness evidence。
-
----
-
-# 十三、第二核心问题：F04 暴露 Finalization Budget 缺失
-
-11-task 三轮唯一失败任务：
-
-```text
-F04
-```
-
-其最终：
-
-```text
-acceptance PASS
-task verification PASS
-regression PASS
-security PASS
-within budget PASS
-actor FAILED
-```
-
-但是：
-
-```text
-completion_ready = false
-```
-
-所以 Terminal Settlement 单独不能救它。
-
-同时必须记录一个容易被遗漏的预算事实：
-
-```text
-F04 task-declared max_steps = 30
-EvalRunConfig max_steps = 20
-effective max_steps = min(30, 20) = 20
-```
-
-当前 `agent-eval` CLI 没有显式暴露 `--max-steps`，因此 F04 实际按 20 步运行，而不是题目 JSONL 声明的 30 步。
-
-这不是 F04 独有。当前 11-task suite 中共有五题的声明预算高于 20：
-
-```text
-B02 = 25
-B05 = 25
-F04 = 30
-R02 = 30
-R03 = 30
-```
-
-它们在最新 campaign 中都被运行级默认值压到 20。其余四题虽然完成，但不能因此忽略预算来源不透明的问题。
-
-本轮为了与上一轮 campaign 做严格前后对照，**继续显式固定有效预算为 20 步**，不把它提高到 30。修复后稳定性脚本必须明确传入：
-
-```bash
---max-steps 20
-```
-
-而不是继续依赖隐藏默认值。
-
-这意味着本轮需要把预算来源变得可见和可审计，但不改变实验预算：
-
-```text
-task_declared_max_steps
-run_max_steps_cap
-effective_max_steps
-effective_budget_source
-```
-
-以上字段应进入 task result / manifest / stability summary。`agent-eval` CLI 必须新增或接通 `--max-steps`，并把它传入 `EvalRunConfig`。
-
----
-
-# 十四、F04 真实轨迹
-
-F04 在较早阶段已经：
-
-```text
-verification(v4) PASS
-regression(v4) PASS
-```
-
-但随后模型根据仓库 instruction：
-
-```text
-New domain events must be documented in docs/
-```
-
-做了一个合理文档 patch：
-
-```text
-workspace version
-4 → 5
-```
-
-因为我们已经实现 Versioned Completion Evidence：
-
-```text
-v4 verification
-```
-
-必须对：
-
-```text
-v5 workspace
-```
-
-失效。
-
-这是正确行为。
-
-**禁止放宽。**
-
----
-
-# 十五、F04 后续浪费了最后几个回合
-
-最后阶段大致：
-
-```text
-Step 17
-docs patch
-→ workspace v5
-→ old verification stale
-
-Step 18
-尝试 ruff / mypy
-→ Runtime 拒绝
-
-Step 19
-git_diff
-
-Step 20
-submit_result
-→ Runtime 正确拒绝：
-missing current-version verification
-
-然后 MAX_STEPS
-```
-
-所以：
-
-> F04 是复合型 orchestration failure：题目声明 30 步却被运行级默认上限静默压到 20 步；在这个固定的 20 步预算内，晚期有效 patch 又使旧 verification 正确失效，而 Runtime 没有为 current-version verification、diff review 和 submit 预留收尾回合。
-
-本轮修复目标不是靠恢复 30 步掩盖问题，而是在**显式固定 20 步**的同等预算下改善 finalization，并让预算裁剪完全可观测。题目声明预算与运行级 cap 的长期语义是否调整，留到本轮 A/B 稳定性验证之后单独决策。
-
----
-
-# 十六、不要通过放宽 Versioned Evidence 修 F04
-
-明确禁止：
-
-```text
-docs-only patch
-→ 不让 verification stale
-```
-
-或者：
-
-```text
-Runtime 自动判断 docs 修改不影响代码
-```
-
-当前没有可靠 File Impact Classifier。
-
-为了一个任务放宽：
-
-```text
-workspace version change invalidates old verification
-```
-
-会制造 False Success 风险。
-
-继续保持：
-
-```text
-任何 workspace version change
-→ previous verification stale
-```
-
----
-
-# 十七、第二核心修改：Finalization-aware Step Budget
-
-建议新增一个非常窄的：
-
-```text
-FinalizationBudgetPolicy
-```
-
-不要设计完整巨大：
-
-```text
-PLANNING
-CODING
-VERIFYING
-FINALIZING
-```
-
-状态机。
-
-它只回答：
-
-```text
-remaining model turns?
-current workspace has real diff?
-CompletionGate missing requirements?
-should Runtime apply finalization pressure?
-```
-
----
-
-# 十八、Finalization Reserve
-
-本轮 stability campaign 的有效预算继续固定为：
-
-```text
-max_steps = 20
-```
-
-`FinalizationBudgetPolicy` 必须使用确定性、可配置且可记录的 reserve。建议默认公式：
-
-```text
-finalization_reserve_steps = max(3, ceil(effective_max_steps * 0.20))
-```
-
-因此本轮 20 步 campaign 默认：
-
-```text
-finalization_reserve_steps = 4
-```
-
-如果现有配置结构更适合显式整数默认值，也可以采用等价实现，但必须满足：同一 `effective_max_steps` 结果确定、可由请求覆盖、进入 manifest，且单元测试覆盖边界值。不要根据 task id 或 F03/F04 特判。
-
-注意：
-
-```text
-总 Model Turns 仍然 <= 20
+整个 Turn 全部无新 progress
+→ stall streak +1
 ```
 
 不是：
 
 ```text
-20 + 3
+每个 cached ToolCall +1
 ```
 
-概念：
+核心原则：
 
-```text
-Steps 1–16
-normal work
-
-Steps 17–20
-finalization reserve
-```
-
-请求、Session、Eval result 和 manifest 至少记录：
-
-```text
-effective_max_steps
-finalization_reserve_steps
-finalization_reserve_entered
-finalization_reserve_entry_step
-```
+> Progress guards count stalled model turns, not cached calls inside a single turn.
 
 ---
 
-# 十九、进入 Finalization Reserve 的条件
-
-不要仅仅：
-
-```text
-step >= 18
-```
-
-就进入 finalization。
-
-至少应该考虑：
-
-```text
-real workspace diff exists
-```
-
-以及剩余预算。
+# 十四、如果一个 Batch 中存在 Uncached Observation，就不能判为纯 Mechanical Stall
 
 例如：
 
 ```text
-has_real_diff
-AND
-remaining_steps <= reserve
+read A → cached
+read B → cached
+search C → uncached observation
 ```
 
-这表示 Agent 已经进入“有实现结果但必须收尾”的阶段。
-
----
-
-# 二十、Finalization Reserve 不是代码冻结
-
-进入 reserve 后仍然允许：
+必须：
 
 ```text
-apply_patch
-```
-
-因为模型可能真的发现当前代码有问题。
-
-如果继续 patch：
-
-```text
-workspace_version++
-```
-
-旧 verification 自然失效。
-
-Runtime 再根据最新 CompletionGate 给出缺失 requirements。
-
-不要：
-
-```text
-step 18 后禁止修改代码
-```
-
----
-
-# 二十一、Finalization Advisory 必须使用真实 CompletionGate 状态
-
-不要再注入泛化：
-
-```text
-Please finish soon.
-```
-
-Runtime 已经知道具体缺什么。
-
-应该给结构化提示，例如：
-
-```json
-{
-  "finalization_budget": {
-    "remaining_turns": 3,
-    "workspace_version": 5,
-    "missing_requirements": [
-      "current_version_verification",
-      "current_diff_review"
-    ],
-    "guidance": "Prioritize authoritative completion requirements before optional diagnostics."
-  }
-}
-```
-
-Advisory 还必须提供：
-
-```text
-authoritative task verification commands
-authoritative regression commands
-whether git diff is current
-allowed completion actions
-```
-
-并明确告诉模型：一个合法 Model Turn 可以返回多个有顺序的工具调用；若剩余收尾工作互不冲突，可以在同一轮依次运行 task verification、regression 和 `git_diff`，避免把每个 deterministic action 人为拆成一个新 Model Turn。
-
-每次 `apply_patch` 或任意工具结果返回后，都必须基于最新 workspace version 和 CompletionGate 重新计算 advisory，不能复用上一轮缺失项。
-
----
-
-# 二十二、Finalization 优先级
-
-Finalization Advisory 必须与现有 safety、halt 和 progress guidance 组合，而不是覆盖它们。统一优先级：
-
-```text
-safety / environment halt
->
-CompletionGate READY
->
-finalization advisory
->
-normal progress guidance
-```
-
-不得为了加入 finalization 提示而替换或绕过现有 ProgressPolicy provider。
-
-当已经存在 real source diff 且进入 reserve：
-
-## 缺 verification
-
-优先：
-
-```text
-authoritative run_tests
-```
-
----
-
-## verification current，但缺 diff review
-
-优先：
-
-```text
-git_diff
-```
-
----
-
-## CompletionGate READY
-
-优先：
-
-```text
-submit_result
-```
-
----
-
-## 模型发现新问题
-
-允许：
-
-```text
-apply_patch
-```
-
-然后重新进入：
-
-```text
-verification stale
-```
-
-状态。
-
----
-
-# 二十三、不要让 optional lint/typecheck 抢 Finalization Budget
-
-F03 与 F04 两个失败都出现：
-
-```text
-required tests 已经完成或接近完成
-
+search C 真正执行
 ↓
-Agent 又尝试
-uv run ruff
-uv run mypy
-
+产生 uncached observation
 ↓
-Runtime exact allowlist 拒绝
-
+turn != purely mechanical stall
 ↓
-浪费 1 Model Turn
+mechanical stall streak reset / 不增加
 ```
 
-进入 Finalization Reserve 后应该明确告诉模型：
+但如果没有 workspace mutation：
 
 ```text
-Repository-discovered lint/typecheck commands are optional guidance.
-They do not contribute to Runtime completion unless explicitly listed as authoritative verification commands.
-
-Do not spend remaining finalization turns on non-authoritative diagnostics.
+ProgressTracker source-progress streak
 ```
 
-如果 authoritative commands 已明确列出，提示中直接给出规范化后的可调用形式，不要只给抽象描述，让模型再次猜测命令。
+仍然继续累积，最终仍可由既有 `NO_SOURCE_PROGRESS` 策略收口长期无源码推进的广泛探索。
 
----
-
-# 二十四、不要放宽 run_tests allowlist
-
-当前 Runtime 拒绝：
+同样：
 
 ```text
-uv run ruff
-uv run mypy
+read A → cached
+apply_patch → successful
 ```
 
-本身是正确行为。
-
-不要因为它浪费一步就允许 arbitrary repository commands。
-
-真正应该修的是：
-
-```text
-Agent 在剩余预算极低时，不应该再选择这些工具。
-```
-
-这是 Finalization Policy 问题，不是 CommandPolicy 问题。
-
----
-
-# 二十五、第三个修改：Completion-ready Tool Tightening
-
-当前 CompletionGate READY 后：
-
-```text
-submit_result
-```
-
-应该是默认正确下一步。
-
-但稳定性实验里 full suite 仍然记录到少量：
-
-```text
-post_ready_tool_call_count > 0
-```
-
-这只能说明 READY 之后仍发生了工具调用，**不能直接等同于浪费**。最新轨迹至少包含两种不同语义：
-
-```text
-READY 后尝试非 authoritative lint/typecheck
-→ 可避免的 optional work
-```
-
-以及：
-
-```text
-READY 后 apply_patch
-→ 模型发现问题并主动重开任务
-→ 合法行为
-```
-
-建议在：
-
-```text
-CompletionGate.ready == true
-```
-
-时做窄范围收敛和逐调用动态判断，而不是冻结工具面。
-
----
-
-# 二十六、READY 状态下允许的下一步
-
-默认优先级是：
-
-```text
-submit_result
-```
-
-或者：
+必须让：
 
 ```text
 apply_patch
 ```
 
-`apply_patch` 表示：
-
-> 模型主动重新打开任务并修改当前 workspace。
-
-必要的 `read_file` / `search_code` 仍可用于确认一个新发现的问题，但 Runtime 应优先返回已有 cache，避免重复昂贵探索。不要把所有 read/search 一刀切禁止，否则模型无法在决定重开任务前核实风险。
-
----
-
-# 二十七、READY 后跳过明确冗余或非 authoritative 的工具
-
-例如当前 gate 已 READY 时：
-
-```text
-run_tests
-inspect_environment
-```
-
-若命令不是 authoritative verification，或与当前版本已经通过的 authoritative command 语义等价，应 skip，并返回结构化 observation：
-
-```json
-{
-  "completion_ready": true,
-  "allowed_next_actions": [
-    "submit_result",
-    "apply_patch",
-    "targeted_read_or_search_when_reopening"
-  ],
-  "message": "Current workspace already satisfies completion requirements."
-}
-```
-
-`list_files`、`git_status`、已缓存的相同 `read_file/search_code` 也应尽量由 cache 或 completion-ready advisory 回答，但不要修改安全工具的正常语义，也不要禁止首次、针对性的风险核查。
-
-如果单个模型 action 含多个 tool calls，必须在**每个 tool call 前**重新计算 gate：
-
-```text
-READY
-→ apply_patch allowed
-→ workspace_version++
-→ gate becomes NOT READY
-→ 后续 run_tests 按新状态正常执行
-```
-
-不能基于 batch 开始时的 READY 状态跳过 patch 后必需的验证。
-
-这样：
-
-```text
-READY
-```
-
-之后不会再浪费 expensive tool calls。
-
----
-
-# 二十八、不要禁止 apply_patch
-
-即使 READY，模型也可能突然发现逻辑缺陷。
-
-如果它明确：
-
-```text
-apply_patch
-```
-
-应该允许。
+执行。
 
 成功 patch 后：
 
 ```text
 workspace_version++
+source progress ✓
+stall streak reset
 ```
-
-CompletionGate 自动失效。
-
-这是正确重新打开任务的方式。
-
-不要再只使用含义模糊的：
-
-```text
-post_ready_tool_call_count
-```
-
-至少拆分为：
-
-```text
-post_ready_reopen_patch_count
-post_ready_skipped_optional_tool_count
-post_ready_nonfinalization_tool_count
-```
-
-前者是合法重开，第二项体现策略节省，第三项才用于追踪 READY 后仍发生的非收尾调用。保留旧字段用于兼容时，必须在文档中说明它不是“浪费调用数”。
 
 ---
 
-# 二十九、第四项：修正 Stability / Eval False-negative Metric
+# 十五、Repeated Action 必须按工具副作用分类审计
 
-当前 stability script 对 control false negative 的检测过窄。
+当前已直接证明的是 cacheable exploration branch。`REPEATED_ACTION` 还必须审计，但不得假设所有 repeated tool 都能统一跳过并继续。
 
-如果当前仅检查：
-
-```text
-failure_category == no_source_progress
-```
-
-那么会漏掉：
+当前如果：
 
 ```text
-actor max_steps
-但 external correctness 全通过
+Tool 1
+repeated search
 ```
 
-例如最新 F04。
+立即：
 
-最新 `stability_summary.json` 曾出现 control false-negative 汇总为 0，但 campaign 实际存在 F04 的 `actor_status != completed` 且全部 Grader 维度通过。这证明脚本不能只围绕某一个 failure category 建立控制指标。
+```text
+REPEATED_ACTION
+```
+
+也可能丢掉同一 batch：
+
+```text
+Tool 2
+fresh read
+
+Tool 3
+apply_patch
+```
+
+所以本轮必须检查：
+
+```text
+REPEATED_ACTION
+```
+
+是不是也在：
+
+```text
+for call in tool_calls
+```
+
+内部直接终止整个 batch。
+
+如果是，应根据工具类别决定 skip、continue 或 fail-fast。
 
 ---
 
-# 三十、新增真正的 Correct-but-Actor-Failed 指标
+# 十六、Repeated Action 推荐语义
 
-建议定义：
-
-```text
-grader_correct_but_actor_failed_count
-```
-
-逻辑：
+对于：
 
 ```text
-actor_status != completed
-AND
-acceptance_passed
-AND
-regression_passed
-AND
-task_verification_passed
-AND
-security_passed
-AND
-within_budget
+read/search/list/inspect
 ```
 
-这可以真实测：
+等非 destructive exploration action：
 
-> Coding work 正确，但 Actor orchestration 没有成功收口。
+### 单个 call 重复
+
+可以：
+
+```text
+skip execution
+return duplicate/cached observation
+```
+
+但继续 batch。
 
 ---
 
-# 三十一、保留 completion-ready false negative 指标
+### Batch 中还有 fresh action
 
-同时保留：
+继续执行。
+
+---
+
+### 整个 Batch 全部是重复/cached，且连续多 Turn
+
+再进入：
 
 ```text
-completion_ready_but_actor_failed_count
+REPEATED_ACTION
 ```
 
-两个指标语义不同：
+或：
 
-### completion_ready_but_actor_failed
+```text
+NO_PROGRESS
+```
 
-Runtime 自己已经 READY，但 Actor 失败。
+具体使用哪个现有 StopReason，尽量保持当前 taxonomy。
+
+对于相同 workspace version 上语义等价的重复 `run_tests`：
+
+```text
+不要再次执行昂贵测试
+返回结构化 duplicate observation
+允许 batch 中后续安全调用继续
+```
+
+如果整个 turn 只有重复测试/缓存探索，再在 turn 结束时应用 stall policy。
+
+不要无意义新增多个近义 stop enum。
+
+---
+
+# 十七、不要让 Repeated Action 修复削弱 Safety
+
+对于可能产生副作用或改变控制状态的工具：
+
+```text
+apply_patch
+submit_result
+```
+
+需要遵循当前现有语义。
+
+尤其：
+
+```text
+submit_result
+```
+
+仍必须保持 completion/finalization invariant。
+
+不要为了统一 batch 处理，导致：
+
+```text
+重复 destructive action
+```
+
+被无条件执行。
+
+`apply_patch` 不得因为“后面还有调用”而重复执行；同一 workspace version 下重复失败/重复 patch 应保持专用拒绝或 fail-fast 语义。`submit_result` 仍必须独占一个 batch。
+
+必须结合工具语义判断：
+
+```text
+skip
+continue
+fail
+```
+
+---
+
+# 十八、和新 ProgressTracker 的职责边界
+
+当前已有：
+
+```text
+ProgressTracker / ProgressPolicy
+```
+
+能够区分：
+
+```text
+Source Progress
+Diagnostic Progress
+Progress Advisory
+Terminal no-source-progress
+```
+
+而 legacy AgentLoop 还有：
+
+```text
+cached_no_progress
+repeated_action
+```
+
+这两套机制不能互相抢职责。
+
+建议明确：
+
+## Legacy Guard
+
+负责：
+
+```text
+明显 mechanical loop
+```
 
 例如：
 
 ```text
-F03 terminal settlement bug
+整轮全部 cached
+连续多个 Turn
 ```
 
-### grader_correct_but_actor_failed
+---
 
-外部 Grader 证明正确，但 Runtime/Actor 没收口。
+## ProgressTracker
+
+负责：
+
+```text
+跨多个不同工具行为
+长期没有 source progress
+```
 
 例如：
 
 ```text
-F04 final verification 没来得及刷新
+read A
+search B
+inspect C
+read D
+...
 ```
 
-两个都应该保留。
+不要让 legacy：
+
+```text
+cached × 2
+```
+
+比 ProgressTracker 更激进。
 
 ---
 
-# 三十二、建议补充指标
+# 十九、本轮不要修改 ProgressPolicy Threshold
 
-如果实现成本低，建议新增：
+当前：
 
 ```text
-budget_boundary_completion_count
+40%
+70%
+85%
 ```
 
-表示：
+等 progress thresholds 在最新 campaign 中：
 
 ```text
-step budget reached
-but Runtime terminal settlement succeeded
+没有造成 false no_source_progress pause
+```
+
+所以本轮禁止无证据调整。
+
+不要：
+
+```text
+40% → 30%
+70% → 50%
+85% → 70%
+```
+
+也不要增加：
+
+```text
+hard exploration budget
+```
+
+本轮失败不是新的 ProgressPolicy 导致。
+
+---
+
+# 二十、必须增加的 Deterministic Regression Tests
+
+这是本轮最重要部分。
+
+## Case 1 — 精确复现本次 F03
+
+模拟：
+
+```text
+Turn N:
+list_files(".") → cached
+
+Turn N+1:
+read_file("AGENTS.md")     → cached
+read_file("new_file_a.py") → fresh
+read_file("new_file_b.py") → fresh
+```
+
+断言：
+
+```text
+不能在第一个 read_file 后 NO_PROGRESS
+```
+
+必须：
+
+```text
+new_file_a.py executed
+new_file_b.py executed
+Agent continues
+```
+
+并断言：
+
+```text
+declared_tool_calls = 3
+processed_tool_calls = 3
+unprocessed_safe_tool_calls = 0
+```
+
+最终 messages 中存在三个与 provider/runtime call id 对齐的 ToolResult。
+
+---
+
+## Case 2 — 单 Turn 多个 cached
+
+```text
+read A cached
+read B cached
+read C cached
+```
+
+整个 Turn：
+
+```text
+stall streak += 1
+```
+
+不能：
+
+```text
++= 3
+```
+
+---
+
+## Case 3 — 两个完整 stalled Turns
+
+```text
+Turn 1:
+all cached
+
+Turn 2:
+all cached
+```
+
+如果当前阈值语义仍是 2：
+
+```text
+此时才允许 NO_PROGRESS
+```
+
+不要在 Turn 1 内部就死。
+
+---
+
+## Case 4 — Cached + Fresh Observation
+
+```text
+read A cached
+search B fresh
+```
+
+必须：
+
+```text
+search B executed
+mechanical stall streak reset / not incremented
+source-progress streak remains unchanged
+```
+
+---
+
+## Case 5 — Cached + Apply Patch
+
+```text
+read A cached
+apply_patch
+```
+
+必须：
+
+```text
+apply_patch executes
+workspace_version advances
+source progress recorded
+stall streak reset
+```
+
+---
+
+## Case 6 — Repeated + Fresh Read
+
+```text
+search A repeated
+read B fresh
+```
+
+不能因为：
+
+```text
+search A
+```
+
+直接结束 batch。
+
+---
+
+## Case 7 — Repeated + Apply Patch
+
+```text
+read A repeated
+apply_patch B
+```
+
+新 patch 必须有机会执行。
+
+---
+
+## Case 8 — 真正 Mechanical Loop
+
+```text
+Turn 1:
+all calls cached/repeated
+no diagnostic novelty
+no workspace change
+
+Turn 2:
+same
+```
+
+仍然必须能够：
+
+```text
+NO_PROGRESS / REPEATED_ACTION
+```
+
+不能把 loop guard 修没。
+
+即使第二个 turn 达到停止阈值，也必须先处理完该 turn 中全部安全调用，再返回 stop；每个已接收的安全调用都必须有对应 ToolResult。
+
+---
+
+## Case 9 — Safety / Budget 仍可中途终止
+
+分别覆盖：
+
+```text
+tool-call budget exhausted
+Sandbox/backend halt
+unsafe/forbidden tool
+mixed submit_result batch
+```
+
+这些场景允许在 batch 中途 fail-fast，并记录未执行调用属于 safety/budget rejection，而不是 progress-heuristic 丢弃。
+
+---
+
+## Case 10 — Failure Origin
+
+分别触发：
+
+```text
+cached batch stall
+empty tool_calls
+model turn without tools/final
+completion-ready guidance ignored
+```
+
+断言它们可以通过结构化 origin/subcategory 区分，不能靠错误消息字符串判断。
+
+---
+
+# 二十一、必须覆盖 Multi-tool Native Turn
+
+测试不能只调用：
+
+```text
+一次一个 ToolCall
+```
+
+至少一个 deterministic FakeModel 必须返回：
+
+```text
+tool_calls = [
+  ...,
+  ...,
+  ...
+]
+```
+
+确保真实模拟 Provider-native multi-tool batch。
+
+否则无法验证本轮核心 bug。
+
+---
+
+# 二十二、Stability / Evaluation Metrics 需要补一个语义缺口
+
+当前存在两个容易混淆的失败：
+
+```text
+no_progress
+```
+
+和：
+
+```text
+no_source_progress
+```
+
+其中：
+
+```text
+no_progress
+```
+
+偏 Legacy AgentLoop mechanical stop。
+
+```text
+no_source_progress
+```
+
+来自新 ProgressTracker / ProgressPolicy。
+
+二者名字很接近，但语义不同。
+
+更重要的是，当前 `StopReason.NO_PROGRESS` 同时用于：
+
+```text
+cached exploration stall
+empty tool_calls
+model produced neither tools nor final
+completion-ready guidance ignored
+```
+
+因此仅凭：
+
+```text
+failure_category == "no_progress"
+```
+
+不能可靠判断 failure 是否来自 mechanical batch guard。
+
+---
+
+# 二十三、建议 Eval 层明确统计
+
+至少增加结构化 failure origin/subcategory，例如：
+
+```text
+failure_origin:
+  cached_batch_stall
+  empty_tool_batch
+  empty_model_turn
+  completion_guidance_ignored
+```
+
+字段名称可遵循现有模型风格，但必须从 AgentLoopResult 传播到 Runtime result、Eval task result、summary/manifest 和 stability aggregation。不得解析 `error` 文本。
+
+同时统计：
+
+```text
+mechanical_no_progress_failure_count
+batch_premature_stop_count
+progress_guard_unprocessed_safe_tool_call_count
+```
+
+其中 `mechanical_no_progress_failure_count` 是观察指标，不自动代表 Runtime bug；合法的两个完整 stalled turns 本来就应该触发 guard。
+
+另外保留：
+
+```text
+StopReason.NO_PROGRESS
 ```
 
 以及：
 
 ```text
-finalization_reserve_entry_count
+source_no_progress_failure_count
 ```
+
+对应：
 
 ```text
-finalization_reserve_success_count
+NO_SOURCE_PROGRESS
 ```
+
+以及现有：
 
 ```text
-grader_correct_actor_max_steps_count
+repeated_action_failure_count
 ```
 
-不要使用 `max_steps_after_correctness_count` 这个名字，因为 Grader 只知道最终 workspace 正确，未必能证明“在第几个 step 已经正确”。新名称只陈述可观察事实：最终 Grader 正确且 Actor 以 `max_steps` 失败。
+具体字段名称遵循当前 taxonomy。
 
-稳定性脚本必须对所有 task result 统一聚合，并至少在以下任一条件不满足时返回非零退出码：
-
-```text
-grader_correct_but_actor_failed_count == 0
-completion_ready_but_actor_failed_count == 0
-provider_blocked_count == 0
-environment_blocked_count == 0
-protocol_failure_count == 0
-workspace_mutation_count == 0
-```
-
-所有 `actor_status != completed` 都必须进入明确 failure-category 汇总，不能因为不属于 `no_source_progress` 就从 control false-negative 判据中消失。
-
-脚本继续执行相同 campaign：
-
-```text
-F03 × 5
-B01 × 2
-11-task × 3
-```
-
-并在每次 `agent-eval` 调用中显式传入：
-
-```bash
---max-steps 20
-```
-
-以保证修复前后预算一致。脚本输出还应确认每个 task 的 `effective_max_steps == 20`；若不是，实验应 fail-fast，不能把不同预算的结果合并比较。
+不要为了 metrics 大规模修改 StopReason enum。
 
 ---
 
-# 三十三、暂时不要实现 Submit-time Auto Verification
+# 二十四、Stability Gate 增加 Harness Premature-stop 检查
 
-存在一个可能的后续增强：
-
-```text
-submit_result
-↓
-唯一缺 current verification
-↓
-Runtime 自动执行 authoritative verification
-↓
-re-evaluate gate
-```
-
-这理论上可以解决 F04。
-
-但是本轮**不要优先实现**。
-
-因为这会改变：
+当前 stability campaign：
 
 ```text
-submit_result
+passed = true
 ```
 
-从：
+但 F03 实际存在一个：
 
 ```text
-check-only control tool
+NO_PROGRESS
 ```
 
-变成：
+Runtime premature stop。
+
+因为当前 gate 主要检查：
 
 ```text
-verification side-effect tool
+no_source_progress
 ```
 
-属于更大的语义变化。
-
-先通过：
+而没显式覆盖：
 
 ```text
-Terminal Settlement
-+
-Finalization Reserve
-+
-Finalization Advisory
+legacy no_progress
 ```
 
-解决问题。
+不要简单要求所有：
 
-如果真实稳定性实验仍出现类似 F04，再单独设计 Submit-time Verification Refresh。
+```text
+mechanical_no_progress_failure_count == 0
+```
+
+因为修复后的合法 mechanical loop 仍应被停止。真正的 correctness gate 应直接检查：
+
+```text
+batch_premature_stop_count == 0
+progress_guard_unprocessed_safe_tool_call_count == 0
+```
+
+目的：
+
+> 允许 F03 偶尔因为真正模型 reasoning failure 不成功，也允许 Runtime 正确终止完整 mechanical loop；但不能让 progress heuristic 在 batch 中丢弃尚未处理的安全调用并仍静默通过 stability gate。
 
 ---
 
-# 三十四、ProgressPolicy 本轮不要继续修改
+# 二十五、不要把 F03 Stability 标准强行改成 5/5
 
-最新稳定性实验：
-
-```text
-F03 × 5
-no_source_progress_pause = 0
-```
-
-且每次：
+本轮不要：
 
 ```text
-first_patch_step = 9–14
+F03 >= 4/5
 ```
 
-说明 ProgressPolicy 已经把此前：
+直接改：
 
 ```text
-20 steps / 0 patch
+F03 == 5/5
 ```
 
-问题解决。
+原因：
 
-不要继续：
+外部模型仍有行为方差。
+
+更合理的是：
 
 ```text
-调整 40% / 70% / 85% threshold
-增加 hard exploration budget
-提高 progress pressure
+F03 >= 4/5
 ```
 
-否则可能误杀正常复杂任务。
+继续作为 stress success floor。
+
+同时增加：
+
+```text
+progress-guard unprocessed safe calls = 0
+batch premature stop = 0
+```
+
+这样可以区分：
+
+```text
+模型偶发写错
+```
+
+和：
+
+```text
+Runtime 把模型提前杀死
+```
 
 ---
 
-# 三十五、Initial Context Cache 本轮不要修改
+# 二十六至二十八、Environment Inspector P2 本轮延期
 
-真实 stability 中：
+最新 campaign 中 environment inspection 数量仍偏高，stdlib portability warning 也可能较粗，但它们不是本次 batch premature-stop 的直接根因。
 
-```text
-initial_context_cache_hit
-```
-
-已经大量出现，说明 cache/reference 路径被实际触发；但这**不能证明上下文复用已经节省 token 或避免重复读取**。F03 轨迹中，模型曾把 compact reference 误解为内容为空，随后重新读取完整文件。
-
-因此本轮不重构 Initial Context Cache，但要把它记录为 P2 已知限制，而不是宣称完全稳定。后续可增加：
+本轮不要顺手修改：
 
 ```text
-initial_reference_followup_full_read_count
-estimated_initial_context_tokens_saved
+inspect_environment cache
+stdlib / project dependency classification
+cross-run environment metadata
 ```
 
-本轮这些指标若未实现，必须在 Remaining Limitations 中如实说明，不得编造 token savings。
+将以下内容写入 Remaining Limitations / 后续优化即可：
+
+```text
+P2: version-scoped environment inspection cache
+P2: distinguish stdlib, project dependency, sandbox-only and executable sources
+```
+
+这样可以避免在修复 AgentLoop 控制流时同时改变环境探测行为，保持稳定性实验的因果可解释性。
 
 ---
 
-# 三十六、Environment Introspection 的两个 P2 小问题
+# 二十九、本轮明确冻结的模块
 
-这两个问题可以顺手小修，但不能干扰主任务。
-
-## 1. `inspect_environment` 可以加入 version-scoped cache
-
-同一个：
+除非真实代码存在直接兼容需要，不要修改：
 
 ```text
-sandbox image
-workspace version
-query
-```
-
-重复 inspection 没必要再次执行。
-
-例如：
-
-```text
-yaml available?
-```
-
-同一版本查询两次可以直接 cache。
-
----
-
-## 2. portability warning 过于粗糙
-
-当前如果：
-
-```text
-tomllib
-```
-
-runtime available，但不在 project dependencies 中，可能提示：
-
-```text
-not portable
-```
-
-但：
-
-```text
-tomllib
-```
-
-属于 Python 3.11 stdlib。
-
-如果项目要求：
-
-```text
-Python >= 3.11
-```
-
-则这个 warning 不准确。
-
-未来可区分：
-
-```text
-stdlib
-project_dependency
-sandbox_only
-executable
-```
-
-但这是 P2。
-
-不要为了这一点大改 Environment Inspector。
-
----
-
-# 三十七、本轮明确不要修改
-
-除非存在直接兼容需求，禁止大改：
-
-```text
-Native Tool Calling
-ModelRequest / ModelTurn
+ModelRequest
+ModelTurn
 Provider Adapter
+Native Tool Calling
 
-VerificationEnvironmentPreflight
+Verification Environment
+Sandbox Scratch
 
-Sandbox tmpfs / scratch
+Versioned Completion Evidence
+CompletionGate
+submit_result
+Terminal Settlement
+Finalization Reserve
 
-Completion evidence versioning
-
-CompletionGate 核心规则
-
-ProgressPolicy 主阈值
+ProgressPolicy thresholds
 
 Initial Context Cache
 
-RepoMap / SymbolIndex / ImportGraph
-
+RepoMap
+SymbolIndex
+ImportGraph
 Context Budget
 
 Planner
-
 RepairLoop
 
-CheckpointManager security
+CheckpointManager
 
 Multi-Agent
+Scheduler
+Mailbox
 ```
 
 ---
 
-# 三十八、本轮禁止通过提高 max_steps 解决
+# 三十、不要通过提高 threshold 掩盖 Batch Bug
 
-明确禁止：
-
-```text
-20 → 30
-20 → 40
-```
-
-这只是扩大：
+禁止：
 
 ```text
-flat budget
+cached_no_progress threshold 2 → 5
 ```
 
-不能解决：
+作为主要修复。
+
+也不要：
 
 ```text
-finalization budget starvation
+REPEATED_ACTION threshold 增大
 ```
 
-而且会破坏之前所有 benchmark/stability 可比性。
+这种方式只是在降低复现概率。
 
-本轮要做的是：
+Root Cause 是：
 
 ```text
-保留 effective_max_steps = 20
-显式暴露并传递 --max-steps 20
-记录 task 声明预算、run cap 与 effective budget
+progress stop 粒度错在 ToolCall level
 ```
 
-不是继续依赖默认值，也不是把 F04 恢复到 30 步后宣称 finalization 已修复。
+所以必须修：
+
+```text
+Turn / Batch aggregation
+```
 
 ---
 
-# 三十九、本轮必须执行的 deterministic 验收
+# 三十一、不要删除 No-progress Protection
 
-只执行 deterministic 项目测试，但以下不是可选项：
+同样禁止：
 
-```bash
-.venv/bin/python -m pytest tests/agent -q
+```text
+关闭 cached no progress
+关闭 repeated action
 ```
 
-```bash
-.venv/bin/python -m pytest tests/evaluation -q
+因为真实 pathological loop 仍需要保护。
+
+正确设计：
+
+```text
+Detection 保留
+Decision 粒度从 ToolCall → Model Turn
 ```
-
-因为本轮必须接通 `agent-eval --max-steps`，还必须执行：
-
-```bash
-.venv/bin/python -m pytest tests/cli -q
-```
-
-若 completion mode/provenance 写入 Session，必须执行：
-
-```bash
-.venv/bin/python -m pytest tests/session -q
-```
-
-触达 execution policy 时执行：
-
-```bash
-.venv/bin/python -m pytest tests/execution -q
-```
-
-全量回归必须执行：
-
-```bash
-.venv/bin/python -m pytest -q
-```
-
-同时执行：
-
-```bash
-.venv/bin/python -m ruff check <本轮触达的 Python 路径>
-.venv/bin/python -m mypy <本轮触达的 Python 路径>
-git diff --check
-bash -n scripts/run_single_agent_stability_validation.sh
-bash scripts/run_single_agent_stability_validation.sh --dry-run
-```
-
-若全量 mypy 仍受历史 import-chain/type debt 影响，必须区分本轮触达文件与历史错误；本轮不得新增 mypy error。
 
 ---
 
-# 四十、本轮不要由 coder 运行 Stability Campaign
+# 三十二、推荐变更分组
 
-真实：
-
-```text
-F03 × 5
-B01 × 2
-11-task × 3
-```
-
-由用户本人运行。
-
-Coder 不要执行：
+## Change Group F1
 
 ```text
-scripts/run_single_agent_stability_validation.sh
-```
-
-也不要运行真实 LLM suite。
-
-允许且必须运行：
-
-```bash
-bash -n scripts/run_single_agent_stability_validation.sh
-bash scripts/run_single_agent_stability_validation.sh --dry-run
-```
-
-`--dry-run` 不得调用 Provider、Docker task runtime 或 hidden grader，只输出将要执行的 F03×5、B01×2、11-task×3 命令，并显示每条命令都包含 `--max-steps 20`。
-
----
-
-# 四十一、不要执行 Benchmark / Ablation
-
-本轮 coder：
-
-```text
-不执行 benchmark
-不执行 ablation
-不执行 11-task
-不执行 F03×5
-```
-
-Design Decision 中可以记录未来 validation plan。
-
-统一标记：
-
-```text
-Pending user-run stability validation.
-```
-
-不得编造成功率、token savings 或 latency。
-
----
-
-# 四十二、推荐变更分组
-
-## Change Group E1
-
-```text
-fix(runtime): settle ready tasks at model-step boundary
+fix(agent-loop): make stall detection native-batch aware
 ```
 
 内容：
 
 ```text
-Terminal Settlement
-budget-boundary completion
-fallback Runtime summary
-tests
+batch progress aggregation
+turn-level cached stall streak
+batch-aware repeated action
+deterministic regression tests
 ```
+
+这是本轮核心变更组。
 
 ---
 
-## Change Group E2
+## Change Group F2
 
 ```text
-feat(runtime): reserve model turns for deterministic finalization
+fix(eval): distinguish mechanical and source-progress stalls
 ```
 
 内容：
 
 ```text
-FinalizationBudgetPolicy
-remaining-turn advisory
-completion missing requirements
-tests
+failure_origin / stall subtype
+mechanical_no_progress observation metric
+batch premature-stop metric
+unprocessed safe call metric
+source_no_progress metric
+repeated_action metric
+stability gate update
 ```
+
+Coder 不得自行创建 commit，除非用户另行明确授权。最终按变更组汇报，由用户统一检查并提交。
 
 ---
 
-## Change Group E3
+# 三十三、Design Decision
 
-```text
-fix(runtime): harden ready-state tools and eval false-negative metrics
-```
+新增或更新：
 
-内容：
+## DD — Batch-aware Stall Detection
 
-```text
-READY tool tightening
-grader_correct_but_actor_failed_count
-budget-boundary metrics
-optional inspect_environment cache
-```
-
-如果 E1/E2 在真实架构中高度耦合，可以合并，但必须说明原因。
-
-本轮 Coder 不要自行创建 commit，除非用户另行明确授权。最终只按上述分组汇报文件和逻辑，由用户统一检查并提交。
-
----
-
-# 四十三、E1 必须覆盖的核心测试
-
-## E1-1
-
-```text
-max_steps reached
-CompletionGate NOT READY
-→ MAX_STEPS
-```
-
-原行为保持。
-
----
-
-## E1-2 — F03 Regression
-
-模拟：
-
-```text
-Step 20
-git_diff
-↓
-CompletionGate READY
-↓
-step budget exhausted
-```
-
-预期：
-
-```text
-no extra provider call
-
-RuntimeStatus.COMPLETED
-```
-
-不是：
-
-```text
-MAX_STEPS
-```
-
----
-
-## E1-3
-
-断言：
-
-```text
-provider call count <= max_steps
-```
-
-Terminal Settlement 不能隐藏额外 LLM call。
-
----
-
-## E1-4
-
-存在：
-
-```text
-security pause
-environment failure
-unsafe workspace
-```
-
-即使表面 gate 条件部分满足，也不能 settlement。
-
----
-
-## E1-5
-
-stale verification：
-
-```text
-v1 tests pass
-v2 patch
-```
-
-仍不能因为 step limit settlement。
-
----
-
-## E1-6
-
-模拟 CompletionGate 计算后发生 Runtime 未观察到的外部 workspace mutation：
-
-```text
-fresh fingerprint != evidence fingerprint
-```
-
-即使内存中的 gate 曾是 READY，也不得 terminal settlement。
-
----
-
-## E1-7
-
-分别断言正常模型提交与预算边界结算的 provenance：
-
-```text
-model_submitted
-runtime_budget_boundary_settlement
-```
-
-并验证它传播到 Runtime result、Session/event 和 Eval result，不把 Runtime fallback summary 伪装为模型输出。
-
----
-
-# 四十四、E2 必须覆盖 F04 场景
-
-模拟：
-
-```text
-verification v4 PASS
-
-late patch
-→ workspace v5
-→ verification stale
-
-remaining_turns = 3
-```
-
-Runtime advisory：
-
-```text
-missing:
-current_version_verification
-current_diff_review
-```
-
-下一步：
-
-```text
-run required verification
-```
-
-再：
-
-```text
-git_diff
-```
-
-最终：
-
-```text
-submit_result
-```
-
-或者如果最后一个合法回合完成：
-
-```text
-git_diff
-→ gate READY
-→ Terminal Settlement
-```
-
-也必须成功。
-
-还必须覆盖预算裁剪事实：
-
-```text
-task declared max_steps = 30
-run cap = 20
-effective max_steps = 20
-```
-
-断言 CLI 参数被传入 `EvalRunConfig`，Runtime 最多调用 Provider 20 次，result/manifest 同时记录三种预算值及来源。本轮测试不得把 effective budget 改成 30。
-
-对 B02/B05/F04/R02/R03 做参数化预算测试，证明它们的声明值分别为 25/25/30/30/30，但本轮脚本显式 run cap 下 effective budget 均为 20；不要只为 F04 写 task-specific 分支。
-
-补一个 batch tool-call 测试：同一 action 在 READY 时先 `apply_patch`，随后调用 authoritative `run_tests`。Runtime 必须在 patch 后重新计算 gate，允许新版本验证，不能沿用 batch 开始时的 READY 状态把它跳过。
-
----
-
-# 四十五、E2 不能强制错误行为
-
-测试：
-
-```text
-进入 finalization reserve
-但模型发现真实 source bug
-↓
-apply_patch
-```
-
-必须允许。
-
-然后：
-
-```text
-workspace_version++
-verification stale
-```
-
-重新计算 completion requirements。
-
----
-
-# 四十六、E3 READY-state Tests
-
-## READY + submit_result
-
-```text
-accepted
-```
-
----
-
-## READY + apply_patch
-
-```text
-allowed
-workspace version advances
-gate invalidated
-```
-
----
-
-## READY + optional/non-authoritative run_tests
-
-应该：
-
-```text
-skip expensive execution
-return completion-ready advisory
-```
-
-## READY + authoritative command already current
-
-语义等价的重复验证应 skip，并计入：
-
-```text
-post_ready_skipped_optional_tool_count
-```
-
-## READY + targeted first read/search
-
-允许模型在明确准备重开任务时做针对性核查；相同参数优先使用 cache。不得把所有 read/search 一刀切拒绝。
-
-## READY + cached list/status/read/search
-
-返回 cache/advisory，不重复调用昂贵 backend。
-
----
-
-# 四十七、Eval Metric Tests
-
-必须验证：
-
-```text
-actor failed
-+
-acceptance PASS
-+
-regression PASS
-+
-task verification PASS
-+
-security PASS
-+
-within budget
-```
-
-统计为：
-
-```text
-grader_correct_but_actor_failed_count += 1
-```
-
-不管 failure category 是：
-
-```text
-max_steps
-no_source_progress
-repeated_action
-```
-
-都应该被捕获。
-
-还必须验证 stability script 的聚合判据：即使 `no_source_progress` 为 0，只要存在一个上述 Actor false negative，脚本仍返回非零；所有任务完成且控制指标为 0 时才返回 0。
-
----
-
-# 四十八、Design Decision
-
-新增/更新：
-
-## DD — Finalization-aware Step Budget
-
-至少：
+必须至少包括：
 
 ```text
 Problem
@@ -2009,39 +1487,7 @@ Limitations
 Interview Version
 ```
 
-Problem：
-
-> A flat model-step budget allowed complex tasks to consume all turns before deterministic completion requirements could be finalized, causing correct work to be reported as MAX_STEPS.
-
-Alternatives：
-
-```text
-Increase max_steps
-Free extra LLM finalization turns
-Relax completion evidence
-Runtime terminal settlement
-Finalization reserve
-```
-
-Decision：
-
-```text
-Terminal Runtime Settlement
-+
-Finalization-aware reserve within existing model-step budget
-```
-
-DD 还必须记录：
-
-```text
-completion_mode / provenance
-fresh workspace fingerprint settlement guard
-task-declared budget vs run cap vs effective budget
-为什么本轮显式固定 20 步而不采用 F04 声明的 30 步
-READY 后合法 reopen patch 与冗余 optional tool 的区别
-```
-
-同步更新以下持续维护文档：
+同时同步更新持续维护文档：
 
 ```text
 README.md
@@ -2051,108 +1497,279 @@ learning-plan/单Agent执行闭环修复记录.md
 对应的 Week4 Day7 Design Decision / Failure Case 文档
 ```
 
-`单Agent执行闭环修复记录.md` 必须继续使用连贯的：
+`单Agent执行闭环修复记录.md` 继续使用：
 
 ```text
 问题 → 方法 → 新问题 → 新方法 → 证据
 ```
 
-叙事，并明确最新 campaign 的“40/40 correctness、38/40 actor success”与本轮预算边界修复，不得只写最终方案。
+叙事，记录上一轮 finalization 修复后 40 次 campaign 达到 39/40，以及新出现的 batch premature-stop 问题。
 
 ---
 
-# 四十九、Failure Case
+# 三十四、Problem 应写清楚
 
-至少记录两个真实 Failure Case。
+类似：
 
-## F03
+> Native providers can emit multiple tool calls in a single assistant turn. The legacy cached/repeated-action guard evaluated progress after each individual tool call and could terminate the entire agent before later fresh calls in the same batch were executed.
+
+---
+
+# 三十五、Alternatives 至少比较
+
+### Alternative A
+
+提高：
 
 ```text
-correct final patch
+cached_no_progress threshold
+```
+
+拒绝原因：
+
+```text
+只降低复现概率
+不修粒度错误
+```
+
+---
+
+### Alternative B
+
+删除 cached/repeated guards。
+
+拒绝原因：
+
+```text
+会失去 pathological loop protection
+```
+
+---
+
+### Alternative C
+
+只依赖 ProgressPolicy。
+
+讨论：
+
+```text
+ProgressPolicy 负责跨-turn source progress
+但 mechanical duplicate loop 仍值得快速保护
+```
+
+---
+
+### Alternative D
+
+Batch aggregation + Turn-level stall decision。
+
+当前 Decision。
+
+---
+
+# 三十六、核心 Invariant
+
+DD 中必须写：
+
+> A model turn must not be classified as stalled until all safe executable tool calls in that turn have been considered.
+
+以及：
+
+> Multiple cached tool calls inside one turn count as at most one stalled turn.
+
+以及：
+
+> Any fresh observation or source progress in the same batch prevents that turn from being classified as fully stalled.
+
+这里的 `fresh observation` 只表示“未从 action cache 返回的 observation”，不能描述为 source progress；只有 workspace mutation 才推进 source-progress clock。
+
+---
+
+# 三十七、Failure Case
+
+新增本次真实 F03 Failure Case：
+
+```text
+model understands the main behavior
 ↓
-current verification pass
+environment uncertainty resolved
 ↓
-current regression pass
+implementation direction selected
 ↓
-last legal turn git_diff
+assistant emits multi-tool batch
+
+Tool 1 = cached read
+Tool 2 = fresh read
+Tool 3 = fresh read
+
 ↓
-CompletionGate READY
+legacy cached-no-progress counter reaches threshold at Tool 1
 ↓
-no remaining model turn for submit_result
+Agent returns NO_PROGRESS
 ↓
-MAX_STEPS false failure
+Tool 2 / Tool 3 never execute
+↓
+0 patch
 ```
 
 Root Cause：
 
-> Model work budget exhaustion incorrectly prevented Runtime settlement of already-ready completion evidence.
+> The stall detector operated at ToolCall granularity instead of native assistant-turn granularity.
+
+Limit：
+
+> The dropped calls were fresh reads rather than a patch, so this trace proves lost execution opportunity, not that the model would certainly have completed the task.
 
 ---
 
-## F04
+# 三十八、Benchmark / Ablation
+
+本轮 coder 不执行。
+
+Design Decision 中可以设计未来 Ablation：
 
 ```text
-verification v4 pass
-↓
-late valid docs patch
-↓
-workspace v5
-↓
-old verification correctly stale
-↓
-remaining turns consumed by optional diagnostics/diff
-↓
-submit_result reports missing current verification
-↓
-MAX_STEPS
-↓
-external grader proves final code correct
+A:
+legacy per-call stall detection
+
+B:
+batch-aware turn-level stall detection
 ```
 
-Root Cause：
+比较：
 
-> F04 declared a 30-step task budget but was silently capped by the run-level 20-step default. Within that fixed 20-step experiment, a late valid workspace mutation correctly invalidated prior verification, while the flat budget reserved no turns for current-version verification and finalization.
+```text
+mechanical premature stops
+F03 success
+first_patch_step
+pre-edit tool calls
+tool calls
+tokens
+```
+
+但是本轮只写：
+
+```text
+Pending user-run stability validation.
+```
+
+不得自行填写数字。
 
 ---
 
-# 五十、不要把这两个 Failure Case 归因为模型不会写代码
+# 三十九、Coder 不执行 Stability Campaign
 
-因为两者：
+真实：
 
 ```text
-external correctness
+F03 × 5
+B01 × 2
+11-task × 3
 ```
 
-均已通过。
+仍由用户本人执行。
 
-应该归类：
+Coder 不得执行：
 
 ```text
-Finalization Budget / Actor Orchestration False Negative
+scripts/run_single_agent_stability_validation.sh
+```
+
+也不要自行跑完整 11-task。
+
+允许且必须执行：
+
+```bash
+bash -n scripts/run_single_agent_stability_validation.sh
+bash scripts/run_single_agent_stability_validation.sh --dry-run
+```
+
+`--dry-run` 不得调用 Provider、Docker task runtime 或 Grader，只验证 F03×5、B01×2、11-task×3 命令仍正确生成，且显式保持 `--max-steps 20`。
+
+---
+
+# 四十、Coder 不执行 Benchmark
+
+明确禁止：
+
+```text
+benchmark
+ablation
+multi-run LLM benchmark
+11-task benchmark
+F03 stress benchmark
+```
+
+只允许：
+
+```text
+unit tests
+deterministic integration tests
+FakeModel tests
 ```
 
 ---
 
-# 五十一、修改完成后的汇报格式
+# 四十一、必须执行的 deterministic 验收
 
-完成后必须按以下结构回复。
+必须执行：
+
+```bash
+.venv/bin/python -m pytest tests/agent -q
+```
+
+```bash
+.venv/bin/python -m pytest tests/evaluation -q
+```
+
+如改到 Runtime Tool：
+
+```bash
+.venv/bin/python -m pytest tests/execution -q
+```
+
+全量回归必须执行：
+
+```bash
+.venv/bin/python -m pytest -q
+```
+
+同时必须执行：
+
+```bash
+.venv/bin/python -m ruff check <本轮触达的 Python 路径>
+.venv/bin/python -m mypy <本轮触达的 Python 路径>
+git diff --check
+bash -n scripts/run_single_agent_stability_validation.sh
+bash scripts/run_single_agent_stability_validation.sh --dry-run
+```
+
+若全量 mypy 仍受历史 import-chain/type debt 影响，必须区分本轮触达文件与历史错误；本轮不得新增 mypy error。
+
+不要调用真实 Provider。
+
+---
+
+# 四十二、修改完成后的汇报格式
+
+完成后按以下结构回答。
 
 ## 1. Root Cause Confirmation
 
-确认：
+明确：
 
 ```text
-F03 gate-ready-at-step-limit 是否与真实代码一致
-F04 late-patch verification invalidation 是否与真实代码一致
-flat step budget 是否是当前根因
-F04 declared 30 / run cap 20 / effective 20 是否与真实代码一致
+cached no-progress 是否真实按 ToolCall 计数？
+是否在 batch 中途 return？
+Repeated Action 是否存在同类风险？
+F03 轨迹是否能由当前代码完全解释？
 ```
 
 ---
 
 ## 2. Files Changed
 
-逐文件：
+逐项：
 
 ```text
 path
@@ -2160,92 +1777,92 @@ what changed
 why
 ```
 
-新增 abstraction 必须说明：
+任何新增 abstraction：
 
-> 为什么不能复用现有模块？
+> 为什么不能复用已有逻辑？
 
 ---
 
-## 3. Budget Lifecycle
+## 3. Old vs New Batch Semantics
 
-画出：
+旧：
 
 ```text
-Normal Work Budget
+Tool 1 cached
+→ threshold reached
+→ STOP
+→ Tool 2/3 dropped
+```
+
+新：
+
+```text
+Tool 1 cached
+Tool 2 fresh
+Tool 3 fresh
 ↓
-Finalization Reserve
+aggregate batch
 ↓
-CompletionGate
+turn is not a pure mechanical stall
 ↓
-submit_result
-or
-Terminal Settlement
+continue
 ```
 
 ---
 
-## 4. Terminal Settlement Invariants
+## 4. Stall Invariants
 
 说明：
 
 ```text
-什么时候可以 settlement
-什么时候必须 MAX_STEPS
-是否额外调用 Provider
-是否使用 hidden grader
-fresh workspace fingerprint 如何防止未观察 mutation
-completion_mode 如何记录和传播
+一个 Turn 最多增加多少 stall streak
+什么算 fresh observation
+什么算 source progress
+什么情况下仍然立即 fail-fast
 ```
 
 ---
 
-## 5. Finalization Reserve
+## 5. Repeated Action Semantics
 
 说明：
 
 ```text
-reserve 如何计算
-remaining turns 如何传给模型
-missing requirements 如何生成
-为什么本轮 effective max_steps 固定为 20
-task budget / run cap / effective budget 如何记录
-```
-
----
-
-## 6. READY Tool Behavior
-
-说明：
-
-```text
-submit_result
-apply_patch
-其他 read/search/test/status
+重复 exploration call
+重复 destructive call
+mixed repeated + fresh batch
+all repeated batch
 ```
 
 分别如何处理。
 
-必须区分：
+---
+
+## 6. Compatibility
+
+说明是否影响：
 
 ```text
-legitimate reopen patch
-skipped optional tool
-remaining non-finalization tool call
+ProgressPolicy
+CompletionGate
+Finalization
+Tool-call budget
+Native Tool Calling
+SafeExecution
+Session
 ```
 
 ---
 
-## 7. Eval Metrics
+## 7. Failure Origin And Metrics
 
-说明新增：
+说明：
 
 ```text
-grader_correct_but_actor_failed_count
-budget_boundary_completion_count
-其他指标
+NO_PROGRESS 的不同 origin 如何区分
+declared / processed / rejected / unprocessed-safe tool calls 如何统计
+stability gate 为什么检查 batch premature stop，而不是禁止所有 mechanical stop
 ```
-
-说明稳定性脚本如何在 `no_source_progress == 0` 但存在其他 Actor false negative 时仍 fail。
 
 ---
 
@@ -2254,13 +1871,11 @@ budget_boundary_completion_count
 列出：
 
 ```text
-test path
+test file
 case
 command
 actual result
 ```
-
-不得编造。
 
 ---
 
@@ -2291,9 +1906,9 @@ No benchmark or ablation was executed.
 
 ---
 
-## 12. Failure Cases
+## 12. Failure Case
 
-列出 F03 / F04 Failure Case 更新路径。
+列出 F03 batch premature-stop Failure Case 路径。
 
 ---
 
@@ -2302,105 +1917,87 @@ No benchmark or ablation was executed.
 至少说明：
 
 ```text
-Finalization reserve is budget-aware, not a full semantic phase planner.
+Turn-level stall detection remains heuristic.
 
-Terminal settlement only applies when current Runtime completion evidence is already READY.
+ProgressPolicy still measures source-state progress rather than semantic task completion.
 
-No submit-time automatic verification is implemented yet.
+External LLM reasoning variance remains possible.
 
-Environment introspection portability classification may still be coarse.
+F03 may still occasionally fail for genuine model reasoning reasons.
 
-Complex tasks may still have model reasoning variance.
+No claim of deterministic 100% success is made.
 
-Initial Context Cache hit does not yet prove token savings; compact references may trigger follow-up full reads.
+The failed F03 trace proves lost execution opportunity, not guaranteed counterfactual success.
 
-Task-declared budgets and run-level caps remain a separate policy decision; this campaign intentionally fixes effective max_steps at 20 for causal comparison.
+Environment inspection caching and stdlib portability classification remain deferred P2 work.
 ```
 
 ---
 
-# 五十二、最终验收清单
+# 四十三、最终验收清单
 
-只有同时满足这些条件才算完成：
+只有全部满足才算完成：
 
 ```text
-[ ] max_steps 到达时先检查 Runtime completion readiness
+[ ] cached no-progress 不再在单个 ToolCall 中途直接决定整个 Turn
 
-[ ] READY 可以 Runtime-only terminal settlement
+[ ] multi-tool batch 中后续 fresh calls 不会被前面的 cached call 丢弃
 
-[ ] terminal settlement 前重新校验 fresh workspace fingerprint
+[ ] 一个 assistant turn 最多贡献一个 cached-stall count
 
-[ ] model_submitted 与 runtime_budget_boundary_settlement provenance 可区分并持久化
+[ ] batch 中存在 fresh observation 时，不判整个 turn stalled
 
-[ ] NOT READY 仍然 MAX_STEPS
+[ ] fresh observation 不会错误重置 source-progress clock
 
-[ ] Terminal Settlement 不产生额外 Provider call
+[ ] batch 中存在 successful apply_patch 时，source progress 正确记录
 
-[ ] 总 model turns 不超过 max_steps
+[ ] repeated exploration + fresh action 不会 premature stop
 
-[ ] stale verification 仍不能 settlement
+[ ] repeated action guard 仍保留 pathological loop protection
 
-[ ] security/environment failure 仍不能 settlement
+[ ] 真正连续 stalled turns 仍能 NO_PROGRESS
 
-[ ] Finalization reserve 位于原有 max_steps 内部
+[ ] progress heuristic stop 前已处理完整个安全 batch
 
-[ ] reserve 由确定性配置计算并记录，本轮 20 步默认 reserve 为 4
+[ ] safety/budget halt 仍可在 batch 中途停止并记录 rejection 原因
 
-[ ] reserve 不等于禁止 apply_patch
+[ ] per-call safety invariant 没有放宽
 
-[ ] Runtime 能告诉模型剩余 turns
+[ ] tool-call budget 没有放宽
 
-[ ] Runtime 能告诉模型当前 completion missing requirements
+[ ] Security / Protocol / Runtime halt 仍能立即 fail-fast
 
-[ ] finalization reserve 优先 authoritative verification / diff / submit
+[ ] ProgressPolicy thresholds 未无理由修改
 
-[ ] optional lint/typecheck 不再轻易消耗最后几个 turns
+[ ] CompletionGate 未修改
 
-[ ] CompletionGate READY 后冗余或非 authoritative 工具可被收敛
+[ ] Finalization Budget 未修改
 
-[ ] READY 后 targeted first read/search 未被一刀切禁止
+[ ] Terminal Settlement 未修改
 
-[ ] multi-tool batch 在每个调用前重新计算 CompletionGate
+[ ] Sandbox 未修改
 
-[ ] READY 后 apply_patch 仍可重新打开任务
+[ ] Native Tool protocol 未修改
 
-[ ] Versioned Completion Evidence 未放宽
+[ ] Context Retrieval 未修改
 
-[ ] docs-only patch 仍使 previous verification stale
+[ ] Eval 能用结构化 failure origin 区分 cached stall、empty batch、empty model turn 与 completion guidance ignored
 
-[ ] max_steps 未提高
+[ ] declared / processed / rejected / unprocessed-safe tool-call 指标一致
 
-[ ] agent-eval 显式支持并传递 --max-steps 20
+[ ] stability gate 检查 batch premature stop 和未处理安全调用，而不是禁止所有合法 mechanical stop
 
-[ ] task-declared / run-cap / effective max_steps 全部进入结果与 manifest
+[ ] deterministic multi-tool FakeModel regression tests 真实通过
 
-[ ] CompletionGate 核心 correctness 未降低
+[ ] 项目自身 tests 真实通过
 
-[ ] ProgressPolicy 主逻辑未无理由修改
-
-[ ] Native Tool Calling 未无理由修改
-
-[ ] Sandbox scratch 未无理由修改
-
-[ ] Initial Context Cache 未无理由重构
-
-[ ] grader_correct_but_actor_failed 指标能捕获 max_steps false negative
-
-[ ] stability script 不再只检查 no_source_progress
-
-[ ] stability script 聚合 F03×5、B01×2、11-task×3 并在控制指标非零时失败
-
-[ ] stability script --dry-run 不调用 Provider/Docker/Grader
-
-[ ] 项目 deterministic tests 真实通过
-
-[ ] tests/agent、tests/evaluation、tests/cli 与全量 pytest 均真实通过
+[ ] tests/agent、tests/evaluation 与全量 pytest 均真实通过
 
 [ ] 触达范围 Ruff/mypy、git diff --check、脚本 bash -n/dry-run 已执行
 
 [ ] Design Decision 已更新
 
-[ ] Failure Cases 已更新
+[ ] Failure Case 已更新
 
 [ ] README、代码架构、设计决策、单 Agent 修复记录已同步
 
@@ -2408,86 +2005,91 @@ Task-declared budgets and run-level caps remain a separate policy decision; this
 
 [ ] coder 没有执行 11-task
 
-[ ] coder 没有执行 Benchmark / Ablation
+[ ] coder 没有执行 benchmark / ablation
 ```
 
 ---
 
-# 五十三、核心设计原则
+# 四十四、核心设计原则
 
 本轮始终坚持：
 
 ```text
-Model Budget Exhausted
-!=
-Task Incorrect
+ToolCall != Model Turn
 ```
 
 ---
 
 ```text
-Step budget limits further model work.
-CompletionGate decides whether existing work is complete.
+Cached observation != Stalled turn
 ```
 
 ---
 
 ```text
-Finalization must fit inside the declared budget,
-not receive hidden free LLM turns.
+A turn is stalled only when the whole safe tool batch produces no new progress.
 ```
 
 ---
 
 ```text
-Runtime may settle objective completion,
-but must never relax current-version verification or use hidden grader evidence.
+Safety may stop immediately.
+Progress heuristics must aggregate before stopping.
 ```
 
-最终希望把当前偶发路径：
+最终目标是把当前错误路径：
 
 ```text
-correct code
+Assistant Turn
+├── cached call
+├── fresh call
+└── fresh call
+
 ↓
-tests pass
+cached threshold reached at first call
+
 ↓
-budget nearly exhausted
+NO_PROGRESS
+
 ↓
-last diff / late patch
-↓
-no turn left
-↓
-MAX_STEPS
+fresh calls discarded
 ```
 
-变成：
+改成：
 
 ```text
-correct code
+Assistant Turn
+├── cached call → record
+├── fresh call  → execute
+└── fresh call  → execute
+
 ↓
-finalization reserve
+aggregate batch
+
 ↓
-current verification
+fresh progress exists
+
 ↓
-current diff review
-↓
-submit_result
+continue Agent Loop
 ```
 
-或者在最后合法回合恰好使：
+本轮修复完成后，由用户本人重新执行相同 stability campaign：
 
 ```text
-CompletionGate READY
+F03 × 5
+B01 × 2
+11-task × 3
 ```
 
-时：
+重点验证：
 
 ```text
-Terminal Runtime Settlement
-↓
-COMPLETED
+batch premature stop = 0
+progress-guard unprocessed safe tool calls = 0
+grader_correct_but_actor_failed = 0
+completion_ready_but_actor_failed = 0
+B01 stable
+full 11-task stable
 ```
 
-而不增加任何额外模型预算。
-
-本轮完成后，由用户本人使用更新后的 stability script 在**显式 `--max-steps 20`** 下重新执行 F03×5、B01×2、11-task×3，判断是否消除 `grader-correct / actor-failed` 的 finalization false negative。Coder 最终只提供可直接运行的脚本、dry-run 证据和预期判据，不执行真实 campaign。
+如果这些 Runtime-induced failure 均不再出现，应停止继续打磨 Week4 SingleAgent correctness，将当前 Week4 固化为稳定 SingleAgent baseline，并继续 Week5 Agent Team / Task DAG / Scheduler。

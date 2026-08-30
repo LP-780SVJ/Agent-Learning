@@ -109,6 +109,12 @@ def aggregate_stability_campaign(
         int(item.get("verification_workspace_mutations", 0) or 0)
         for item in every_result
     )
+    batch_premature_stops = _sum_int(
+        every_result, "batch_premature_stop_count"
+    )
+    progress_guard_unprocessed_safe_calls = _sum_int(
+        every_result, "progress_guard_unprocessed_safe_tool_call_count"
+    )
     checks = {
         "all_run_exit_codes_0": all(code == 0 for code in run_exit_codes),
         "f03_result_count_5": len(f03) == 5,
@@ -137,6 +143,10 @@ def aggregate_stability_campaign(
         "environment_failures_0": len(environment_failures) == 0,
         "protocol_failures_0": len(protocol_failures) == 0,
         "workspace_mutation_0": workspace_mutations == 0,
+        "batch_premature_stop_0": batch_premature_stops == 0,
+        "progress_guard_unprocessed_safe_tool_calls_0": (
+            progress_guard_unprocessed_safe_calls == 0
+        ),
         "effective_max_steps_all_20": bool(every_result)
         and all(item.get("effective_max_steps") == 20 for item in every_result),
         "actor_failures_are_categorized": all(
@@ -175,6 +185,19 @@ def aggregate_stability_campaign(
             "environment_failure_count": len(environment_failures),
             "protocol_failure_count": len(protocol_failures),
             "verification_workspace_mutation_count": workspace_mutations,
+            "mechanical_no_progress_failure_count": _sum_int(
+                every_result, "mechanical_no_progress_failure_count"
+            ),
+            "batch_premature_stop_count": batch_premature_stops,
+            "progress_guard_unprocessed_safe_tool_call_count": (
+                progress_guard_unprocessed_safe_calls
+            ),
+            "source_no_progress_failure_count": _sum_int(
+                every_result, "source_no_progress_failure_count"
+            ),
+            "repeated_action_failure_count": _sum_int(
+                every_result, "repeated_action_failure_count"
+            ),
             "budget_boundary_completion_count": sum(
                 int(item.get("budget_boundary_completion_count", 0) or 0)
                 for item in every_result
@@ -244,6 +267,10 @@ def _count(
     return sum(item.get(field) == value for item in items)
 
 
+def _sum_int(items: list[dict[str, Any]], field: str) -> int:
+    return sum(int(item.get(field, 0) or 0) for item in items)
+
+
 def _group_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
     task_ids = sorted({str(item.get("task_id")) for item in items})
     return {
@@ -255,6 +282,34 @@ def _group_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
                 for item in items
                 if item.get("failure_category") is not None
             )
+        ),
+        "failure_origins": dict(
+            Counter(
+                str(item.get("failure_origin"))
+                for item in items
+                if item.get("failure_origin") is not None
+            )
+        ),
+        "declared_tool_call_count": _sum_int(items, "declared_tool_calls"),
+        "processed_tool_call_count": _sum_int(items, "processed_tool_calls"),
+        "rejected_tool_call_count": _sum_int(items, "rejected_tool_calls"),
+        "unprocessed_safe_tool_call_count": _sum_int(
+            items, "unprocessed_safe_tool_calls"
+        ),
+        "mechanical_no_progress_failure_count": _sum_int(
+            items, "mechanical_no_progress_failure_count"
+        ),
+        "batch_premature_stop_count": _sum_int(
+            items, "batch_premature_stop_count"
+        ),
+        "progress_guard_unprocessed_safe_tool_call_count": _sum_int(
+            items, "progress_guard_unprocessed_safe_tool_call_count"
+        ),
+        "source_no_progress_failure_count": _sum_int(
+            items, "source_no_progress_failure_count"
+        ),
+        "repeated_action_failure_count": _sum_int(
+            items, "repeated_action_failure_count"
         ),
         "completion_mode_counts": dict(
             Counter(

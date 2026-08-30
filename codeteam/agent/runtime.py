@@ -46,7 +46,7 @@ from codeteam.sandbox.verification_preflight import (
 )
 from codeteam.schemas.final_output import CompletionStatus
 from codeteam.schemas.messages import Message
-from codeteam.state import AgentLoopState, StopReason
+from codeteam.state import AgentLoopState, FailureOrigin, StopReason
 from codeteam.usage.token_counter import ApproximateTokenCounter
 
 StateCallback = Callable[[AgentLoopState, RuntimeEvidence], None]
@@ -261,7 +261,6 @@ class CodingAgentRuntime:
         def observe_tool_result(
             state, call, result, workspace_version, cached, batch_complete
         ) -> None:
-            del cached
             cache_hit, reference_hit = InitialContextSnapshot.result_flags(
                 result.content if result.success else ""
             )
@@ -299,6 +298,7 @@ class CodingAgentRuntime:
                 completion_ready=decision.ready,
                 initial_context_cache_hit=cache_hit,
                 initial_context_reference_hit=reference_hit,
+                mechanical_duplicate=cached,
             )
             if progress.paused_reason is not None and batch_complete:
                 evidence.paused_category = "no_source_progress"
@@ -563,7 +563,28 @@ class CodingAgentRuntime:
             ),
             repair_duration_ms=evidence.repair_duration_ms,
             failure_category=category,
+            failure_origin=loop.failure_origin,
             error=error,
+            declared_tool_calls=loop.declared_tool_calls,
+            processed_tool_calls=loop.processed_tool_calls,
+            rejected_tool_calls=loop.rejected_tool_calls,
+            unprocessed_safe_tool_calls=loop.unprocessed_safe_tool_calls,
+            mechanical_no_progress_failure_count=int(
+                loop.stop_reason is StopReason.NO_PROGRESS
+                and loop.failure_origin
+                in {
+                    FailureOrigin.CACHED_BATCH_STALL,
+                    FailureOrigin.COMPLETION_GUIDANCE_IGNORED,
+                }
+            ),
+            batch_premature_stop_count=loop.batch_premature_stop_count,
+            progress_guard_unprocessed_safe_tool_call_count=(
+                loop.progress_guard_unprocessed_safe_tool_call_count
+            ),
+            source_no_progress_failure_count=int(category == "no_source_progress"),
+            repeated_action_failure_count=int(
+                loop.stop_reason is StopReason.REPEATED_ACTION
+            ),
             sandbox_preflight_available=True,
             verification_preflight_available=True,
             verification_preflight_category=verification_preflight.category,

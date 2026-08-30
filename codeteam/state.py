@@ -24,6 +24,17 @@ class StopReason(str, Enum):
     INCOMPLETE_PROVIDER_TURN = "incomplete_provider_turn"
     INVALID_TOOL_CALL = "invalid_tool_call"
 
+
+class FailureOrigin(str, Enum):
+    """Structured ownership for otherwise ambiguous loop stop reasons."""
+
+    CACHED_BATCH_STALL = "cached_batch_stall"
+    EMPTY_TOOL_BATCH = "empty_tool_batch"
+    EMPTY_MODEL_TURN = "empty_model_turn"
+    COMPLETION_GUIDANCE_IGNORED = "completion_guidance_ignored"
+    REPEATED_ACTION_STALL = "repeated_action_stall"
+    REPEATED_DESTRUCTIVE_ACTION = "repeated_destructive_action"
+
 @dataclass(frozen=True)
 class ActionFingerprint:# 检测重复动作 工具动作指纹
     tool_name: str
@@ -43,6 +54,12 @@ class AgentLoopState:
     action_history: set[ActionFingerprint] = field(default_factory=set)
     tool_result_cache: dict[ActionFingerprint, ToolResult] = field(default_factory=dict)
     cached_no_progress_count: int = 0
+    declared_tool_call_count: int = 0
+    processed_tool_call_count: int = 0
+    rejected_tool_call_count: int = 0
+    unprocessed_safe_tool_call_count: int = 0
+    batch_premature_stop_count: int = 0
+    progress_guard_unprocessed_safe_tool_call_count: int = 0
     stop_reason: StopReason | None = None
 
 def normalize_arguments(arguments: dict[str, Any]) -> str:
@@ -74,6 +91,7 @@ def record_tool_call(
     workspace_version: int = 0,
 ) -> None:
     state.tool_call_count += 1
+    state.processed_tool_call_count += 1
     fingerprint = make_action_fingerprint(
         tool_name,
         arguments,

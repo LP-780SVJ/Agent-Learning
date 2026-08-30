@@ -525,6 +525,36 @@ See [DD-W4-D7-14](docs/design_decisions/DD-W4-D7-14.md),
 [FC-W4-D7-06](docs/failure_cases/FC-W4-D7-06.md). Real stability validation is
 pending user execution; no new benchmark or ablation result is claimed.
 
+### Batch-aware mechanical stall detection
+
+Provider-native assistant turns may contain several ordered tool calls. The
+Agent Loop now detects cache hits and semantic repeats per call but decides
+whether the turn is mechanically stalled only after every safe executable call
+in that batch has been considered. Multiple cache hits contribute at most one
+stalled turn; an uncached observation or successful patch makes the turn
+non-pure mechanical. Two complete stalled turns still stop the loop.
+
+Repeated read/search/list/inspection and equivalent `run_tests` calls return a
+correlated cached or structured duplicate ToolResult and allow later fresh
+calls to proceed. Repeated `apply_patch`/`submit_result`, mixed completion
+batches, tool-budget exhaustion, and Runtime/sandbox halt retain fail-fast
+semantics. Safety/budget-rejected calls are explicitly accounted and are not
+reported as progress-guard drops.
+
+`failure_origin` separates `cached_batch_stall`, `empty_tool_batch`,
+`empty_model_turn`, and `completion_guidance_ignored` without parsing error
+text. Declared/processed/rejected/unprocessed-safe call metrics propagate from
+Agent Loop through Runtime and Eval. Stability permits a legitimate completed
+mechanical-loop stop but requires both `batch_premature_stop_count` and
+`progress_guard_unprocessed_safe_tool_call_count` to be zero.
+
+The user-run `stability_20260830_102307` baseline recorded Actor 39/40,
+security 40/40, targeted F03 4/5, B01 2/2, and three full 11-task runs at 33/33.
+Its sole F03 failure exposed the old mid-batch return; this revision has not
+rerun that campaign. See
+[DD-W4-D7-15](docs/design_decisions/DD-W4-D7-15.md) and
+[FC-W4-D7-07](docs/failure_cases/FC-W4-D7-07.md).
+
 ## Testing
 
 Common commands:

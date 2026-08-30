@@ -155,7 +155,17 @@ class CodingAgentRunResult(BaseModel):
     tool_duration_ms: int = 0
     repair_duration_ms: int = 0
     failure_category: str | None = None
+    failure_origin: str | None = None
     error: str | None = None
+    declared_tool_calls: int = 0
+    processed_tool_calls: int = 0
+    rejected_tool_calls: int = 0
+    unprocessed_safe_tool_calls: int = 0
+    mechanical_no_progress_failure_count: int = 0
+    batch_premature_stop_count: int = 0
+    progress_guard_unprocessed_safe_tool_call_count: int = 0
+    source_no_progress_failure_count: int = 0
+    repeated_action_failure_count: int = 0
     sandbox_preflight_available: bool | None = None
     sandbox_preflight_category: str | None = None
     verification_preflight_available: bool | None = None

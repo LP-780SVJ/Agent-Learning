@@ -6,7 +6,7 @@ from codeteam.agent_loop import run_agent_loop
 from codeteam.events import AgentEventType
 from codeteam.limits import AgentLoopLimits
 from codeteam.llm.mock import MockModelClient
-from codeteam.state import StopReason
+from codeteam.state import FailureOrigin, StopReason
 from codeteam.tools.calculator import create_calculator_tool
 from codeteam.tools.registry import ToolRegistry
 
@@ -170,7 +170,10 @@ def test_repeated_read_only_action_uses_cache_then_stops_no_progress() -> None:
 
     assert result.stop_reason is StopReason.NO_PROGRESS
     assert result.tool_calls_used == 3
-    assert "cached exploration" in (result.error or "")
+    assert "cached or repeated exploration turns" in (result.error or "")
+    assert result.failure_origin is FailureOrigin.CACHED_BATCH_STALL
+    assert result.processed_tool_calls == 3
+    assert result.progress_guard_unprocessed_safe_tool_call_count == 0
 
 
 def test_resumed_protocol_streak_uses_consecutive_budget_then_resets() -> None:

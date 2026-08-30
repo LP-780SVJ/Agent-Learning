@@ -1,0 +1,46 @@
+[
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/task_verification/test_r01.py",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 395.27304098010063,
+    "stdout": ".                                                                        [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true,
+    "workspace_version": 1,
+    "workspace_fingerprint_before": "6e287b83fbbdc2013999cd2e379f2436d89b99f8a3407e125b9e826d7240ead0",
+    "workspace_fingerprint_after": "6e287b83fbbdc2013999cd2e379f2436d89b99f8a3407e125b9e826d7240ead0",
+    "workspace_mutations": []
+  },
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/auth",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 393.28691689297557,
+    "stdout": "..                                                                       [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true,
+    "workspace_version": 1,
+    "workspace_fingerprint_before": "6e287b83fbbdc2013999cd2e379f2436d89b99f8a3407e125b9e826d7240ead0",
+    "workspace_fingerprint_after": "6e287b83fbbdc2013999cd2e379f2436d89b99f8a3407e125b9e826d7240ead0",
+    "workspace_mutations": []
+  }
+]

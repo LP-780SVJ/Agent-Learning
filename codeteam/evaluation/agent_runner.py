@@ -221,6 +221,28 @@ class AgentEvalRunner:
                     cost_usd=actor_result.cost_usd,
                     artifact_paths=actor_result.artifact_paths,
                     failure_category=grade.failure_category,
+                    failure_origin=actor_result.failure_origin,
+                    declared_tool_calls=actor_result.declared_tool_calls,
+                    processed_tool_calls=actor_result.processed_tool_calls,
+                    rejected_tool_calls=actor_result.rejected_tool_calls,
+                    unprocessed_safe_tool_calls=(
+                        actor_result.unprocessed_safe_tool_calls
+                    ),
+                    mechanical_no_progress_failure_count=(
+                        actor_result.mechanical_no_progress_failure_count
+                    ),
+                    batch_premature_stop_count=(
+                        actor_result.batch_premature_stop_count
+                    ),
+                    progress_guard_unprocessed_safe_tool_call_count=(
+                        actor_result.progress_guard_unprocessed_safe_tool_call_count
+                    ),
+                    source_no_progress_failure_count=(
+                        actor_result.source_no_progress_failure_count
+                    ),
+                    repeated_action_failure_count=(
+                        actor_result.repeated_action_failure_count
+                    ),
                     error=grade.error,
                     sandbox_preflight_available=(
                         actor_result.sandbox_preflight_available
@@ -377,6 +399,41 @@ class AgentEvalRunner:
                             ),
                             "budget_boundary_completion_count": next(
                                 result.budget_boundary_completion_count
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "failure_origin": next(
+                                result.failure_origin
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "declared_tool_calls": next(
+                                result.declared_tool_calls
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "processed_tool_calls": next(
+                                result.processed_tool_calls
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "rejected_tool_calls": next(
+                                result.rejected_tool_calls
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "unprocessed_safe_tool_calls": next(
+                                result.unprocessed_safe_tool_calls
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "batch_premature_stop_count": next(
+                                result.batch_premature_stop_count
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "progress_guard_unprocessed_safe_tool_call_count": next(
+                                result.progress_guard_unprocessed_safe_tool_call_count
                                 for result in results
                                 if result.task_id == task.task_id
                             ),
@@ -719,6 +776,41 @@ def summarize_agent_eval_results(
         ),
         within_budget_count=sum(result.within_budget for result in results),
         failure_category_counts=failure_category_counts,
+        failure_origin_counts=dict(
+            Counter(
+                result.failure_origin
+                for result in results
+                if result.failure_origin is not None
+            )
+        ),
+        declared_tool_call_count=sum(
+            result.declared_tool_calls for result in results
+        ),
+        processed_tool_call_count=sum(
+            result.processed_tool_calls for result in results
+        ),
+        rejected_tool_call_count=sum(
+            result.rejected_tool_calls for result in results
+        ),
+        unprocessed_safe_tool_call_count=sum(
+            result.unprocessed_safe_tool_calls for result in results
+        ),
+        mechanical_no_progress_failure_count=sum(
+            result.mechanical_no_progress_failure_count for result in results
+        ),
+        batch_premature_stop_count=sum(
+            result.batch_premature_stop_count for result in results
+        ),
+        progress_guard_unprocessed_safe_tool_call_count=sum(
+            result.progress_guard_unprocessed_safe_tool_call_count
+            for result in results
+        ),
+        source_no_progress_failure_count=sum(
+            result.source_no_progress_failure_count for result in results
+        ),
+        repeated_action_failure_count=sum(
+            result.repeated_action_failure_count for result in results
+        ),
         completion_ready_count=sum(result.completion_ready for result in results),
         completion_ready_but_actor_failed_count=sum(
             result.completion_ready
@@ -958,6 +1050,20 @@ def _runtime_to_actor_result(
         applied_patch=bool(result.changed_files),
         error=result.error,
         failure_category=result.failure_category,
+        failure_origin=result.failure_origin,
+        declared_tool_calls=result.declared_tool_calls,
+        processed_tool_calls=result.processed_tool_calls,
+        rejected_tool_calls=result.rejected_tool_calls,
+        unprocessed_safe_tool_calls=result.unprocessed_safe_tool_calls,
+        mechanical_no_progress_failure_count=(
+            result.mechanical_no_progress_failure_count
+        ),
+        batch_premature_stop_count=result.batch_premature_stop_count,
+        progress_guard_unprocessed_safe_tool_call_count=(
+            result.progress_guard_unprocessed_safe_tool_call_count
+        ),
+        source_no_progress_failure_count=result.source_no_progress_failure_count,
+        repeated_action_failure_count=result.repeated_action_failure_count,
         events=result.events,
         completion_ready=result.completion_ready,
         post_ready_tool_calls=result.post_ready_tool_calls,

@@ -21,6 +21,11 @@ def _completed_result(task_id: str) -> dict[str, object]:
         "completion_mode": "model_submitted",
         "effective_max_steps": 20,
         "verification_workspace_mutations": 0,
+        "mechanical_no_progress_failure_count": 0,
+        "batch_premature_stop_count": 0,
+        "progress_guard_unprocessed_safe_tool_call_count": 0,
+        "source_no_progress_failure_count": 0,
+        "repeated_action_failure_count": 0,
     }
 
 
@@ -111,4 +116,78 @@ def test_stability_aggregation_fails_for_grader_correct_actor_max_steps(
     assert payload["control_metrics"][
         "grader_correct_actor_max_steps_count"
     ] == 1
+    assert payload["passed"] is False
+
+
+def test_stability_allows_one_complete_mechanical_f03_failure(
+    tmp_path: Path,
+) -> None:
+    directories, groups, repetitions, exit_codes, run_results = _campaign_inputs(
+        tmp_path
+    )
+    false_result = run_results[groups.index("F03")][0]
+    false_result.update(
+        {
+            "success": False,
+            "actor_status": "failed",
+            "acceptance_passed": False,
+            "regression_passed": False,
+            "task_verification_passed": False,
+            "completion_ready": False,
+            "failure_category": "no_progress",
+            "failure_origin": "cached_batch_stall",
+            "mechanical_no_progress_failure_count": 1,
+        }
+    )
+    (directories[groups.index("F03")] / "results.jsonl").write_text(
+        json.dumps(false_result) + "\n",
+        encoding="utf-8",
+    )
+
+    payload = aggregate_stability_campaign(
+        campaign_root=tmp_path,
+        run_directories=directories,
+        run_groups=groups,
+        run_repetitions=repetitions,
+        run_exit_codes=exit_codes,
+    )
+
+    assert payload["checks"]["f03_success_at_least_4"] is True
+    assert payload["checks"]["batch_premature_stop_0"] is True
+    assert payload["control_metrics"][
+        "mechanical_no_progress_failure_count"
+    ] == 1
+    assert payload["passed"] is True
+
+
+def test_stability_fails_for_progress_guard_dropped_safe_calls(
+    tmp_path: Path,
+) -> None:
+    directories, groups, repetitions, exit_codes, run_results = _campaign_inputs(
+        tmp_path
+    )
+    bad_result = run_results[groups.index("F03")][0]
+    bad_result.update(
+        {
+            "batch_premature_stop_count": 1,
+            "progress_guard_unprocessed_safe_tool_call_count": 2,
+        }
+    )
+    (directories[groups.index("F03")] / "results.jsonl").write_text(
+        json.dumps(bad_result) + "\n",
+        encoding="utf-8",
+    )
+
+    payload = aggregate_stability_campaign(
+        campaign_root=tmp_path,
+        run_directories=directories,
+        run_groups=groups,
+        run_repetitions=repetitions,
+        run_exit_codes=exit_codes,
+    )
+
+    assert payload["checks"]["batch_premature_stop_0"] is False
+    assert payload["checks"][
+        "progress_guard_unprocessed_safe_tool_calls_0"
+    ] is False
     assert payload["passed"] is False

@@ -35,6 +35,7 @@ from codeteam.schemas.messages import Message
 from codeteam.schemas.tool_calls import ToolCall, ToolResult
 from codeteam.state import (
     AgentLoopState,
+    FailureOrigin,
     StopReason,
     is_repeated_action,
     make_action_fingerprint,
@@ -83,6 +84,13 @@ class AgentLoopResult:
     protocol_repairs_used: int = 0
     protocol_repair_streak: int = 0
     model_outputs: list[ModelOutputEvidence] = field(default_factory=list)
+    failure_origin: FailureOrigin | None = None
+    declared_tool_calls: int = 0
+    processed_tool_calls: int = 0
+    rejected_tool_calls: int = 0
+    unprocessed_safe_tool_calls: int = 0
+    batch_premature_stop_count: int = 0
+    progress_guard_unprocessed_safe_tool_call_count: int = 0
 
     events: list[AgentEvent] = field(default_factory=list)
     total_input_tokens: int = 0
@@ -101,6 +109,7 @@ class ParsedModelOutput:
     error: str | None = None
     dialect: ModelOutputDialect | None = None
     canonical_payload: dict[str, object] | None = None
+    failure_origin: FailureOrigin | None = None
 
 
 def run_agent_loop(
@@ -370,16 +379,23 @@ def run_agent_loop(
                 canonical_payload=canonical_payload,
             )
         elif early_stop is None:
-            tests_passed = (
-                actual_tests_passed()
-                if callable(actual_tests_passed)
-                else actual_tests_passed
-            )
-            parsed_output = _parse_model_output(
-                model_turn.text or "",
-                actual_tests_passed=tests_passed,
-                call_id_prefix=f"step-{state.step_count}",
-            )
+            if model_turn.text is None or not model_turn.text.strip():
+                parsed_output = ParsedModelOutput(
+                    stop_reason=StopReason.NO_PROGRESS,
+                    error="Model produced an empty turn without tools or final output.",
+                    failure_origin=FailureOrigin.EMPTY_MODEL_TURN,
+                )
+            else:
+                tests_passed = (
+                    actual_tests_passed()
+                    if callable(actual_tests_passed)
+                    else actual_tests_passed
+                )
+                parsed_output = _parse_model_output(
+                    model_turn.text,
+                    actual_tests_passed=tests_passed,
+                    call_id_prefix=f"step-{state.step_count}",
+                )
             canonical_payload = parsed_output.canonical_payload
         else:
             parsed_output = ParsedModelOutput(
@@ -479,6 +495,7 @@ def run_agent_loop(
                 start_time,
                 usage_tracker,
                 events,
+                failure_origin=parsed_output.failure_origin,
             )
 
         if parsed_output.tool_calls is not None:
@@ -539,6 +556,7 @@ def run_agent_loop(
             start_time,
             usage_tracker,
             events,
+            failure_origin=FailureOrigin.EMPTY_MODEL_TURN,
         )
 
 
@@ -563,6 +581,7 @@ def _parse_model_output(
             return ParsedModelOutput(
                 stop_reason=StopReason.NO_PROGRESS,
                 error="Model produced an empty tool_calls list.",
+                failure_origin=FailureOrigin.EMPTY_TOOL_BATCH,
             )
         if not isinstance(tool_calls_data, list):
             return ParsedModelOutput(
@@ -608,6 +627,7 @@ def _parse_model_output(
         return ParsedModelOutput(
             stop_reason=StopReason.NO_PROGRESS,
             error="Model produced neither tool calls nor final output.",
+            failure_origin=FailureOrigin.EMPTY_MODEL_TURN,
         )
 
     try:
@@ -713,37 +733,29 @@ def _handle_tool_calls(
     | None = None,
     cached_no_progress_exempt_provider: Callable[[ToolCall, int], bool] | None = None,
 ) -> AgentLoopResult | None:
+    state.declared_tool_call_count += len(tool_calls)
     if any(call.name == "submit_result" for call in tool_calls) and (
         len(tool_calls) != 1 or tool_calls[0].name != "submit_result"
     ):
-        for call in tool_calls:
-            if call.call_id is None:
-                continue
-            result = ToolResult(
-                call_id=call.call_id,
-                provider_call_id=call.provider_call_id,
-                name=call.name,
-                content="",
-                success=False,
-                error=(
-                    "submit_result must be the sole tool call in an assistant turn; "
-                    "no calls in this batch were executed."
-                ),
-            )
-            record_tool_call(state, call.name, call.arguments, 0)
-            state.messages.append(_tool_result_to_message(result))
-            events.append(
-                make_event(
-                    AgentEventType.TOOL_RESULT,
-                    "Mixed completion batch rejected without execution.",
-                    step_index=state.step_count,
-                    data={"name": call.name, "success": False},
-                )
-            )
+        _reject_tool_calls(
+            state,
+            tool_calls,
+            tool_registry,
+            events,
+            reason=(
+                "submit_result must be the sole tool call in an assistant turn; "
+                "no calls in this batch were executed."
+            ),
+            event_message="Mixed completion batch rejected without execution.",
+            count_against_tool_budget=True,
+        )
+        state.cached_no_progress_count = 0
         if state_callback is not None:
             state_callback(state)
         return None
 
+    batch_had_fresh_observation = False
+    mechanical_origins: set[FailureOrigin] = set()
     for call_index, call in enumerate(tool_calls):
         batch_complete = call_index == len(tool_calls) - 1
         if call.call_id is None:
@@ -756,6 +768,16 @@ def _handle_tool_calls(
                 events,
             )
         if check_tool_call_limit(state, limits):
+            _reject_tool_calls(
+                state,
+                tool_calls[call_index:],
+                tool_registry,
+                events,
+                reason="Tool-call budget exhausted before execution.",
+                event_message="Tool call rejected by the tool-call budget.",
+            )
+            if state_callback is not None:
+                state_callback(state)
             return _stop_with_failure(
                 state,
                 StopReason.MAX_TOOL_CALLS,
@@ -848,6 +870,7 @@ def _handle_tool_calls(
             )
             if state_callback is not None:
                 state_callback(state)
+            mechanical_origins.add(FailureOrigin.COMPLETION_GUIDANCE_IGNORED)
             continue
         repeated = is_repeated_action(
             state,
@@ -879,9 +902,17 @@ def _handle_tool_calls(
                 ),
                 success=True,
             )
-            state.cached_no_progress_count += 1
             record_tool_call(state, call.name, fingerprint_arguments, workspace_version)
             state.messages.append(_tool_result_to_message(advisory))
+            if tool_result_observer is not None:
+                tool_result_observer(
+                    state,
+                    call,
+                    advisory,
+                    workspace_version,
+                    True,
+                    batch_complete,
+                )
             events.append(
                 make_event(
                     AgentEventType.TOOL_RESULT,
@@ -892,15 +923,7 @@ def _handle_tool_calls(
             )
             if state_callback is not None:
                 state_callback(state)
-            if state.cached_no_progress_count >= 2:
-                return _stop_with_failure(
-                    state,
-                    StopReason.NO_PROGRESS,
-                    "Agent ignored completion-ready guidance repeatedly.",
-                    start_time,
-                    usage_tracker,
-                    events,
-                )
+            mechanical_origins.add(FailureOrigin.COMPLETION_GUIDANCE_IGNORED)
             continue
         if call.name in cacheable_tools and fingerprint in state.tool_result_cache:
             cached = state.tool_result_cache[fingerprint].model_copy(
@@ -915,7 +938,9 @@ def _handle_tool_calls(
                 else False
             )
             if not cache_exempt:
-                state.cached_no_progress_count += 1
+                mechanical_origins.add(FailureOrigin.CACHED_BATCH_STALL)
+            else:
+                batch_had_fresh_observation = True
             if was_completion_ready and post_ready_action_callback is not None:
                 post_ready_action_callback("skipped_optional")
             record_tool_call(
@@ -950,15 +975,6 @@ def _handle_tool_calls(
             )
             if state_callback is not None:
                 state_callback(state)
-            if not cache_exempt and state.cached_no_progress_count >= 2:
-                return _stop_with_failure(
-                    state,
-                    StopReason.NO_PROGRESS,
-                    "Agent stopped after repeated cached exploration without workspace changes.",
-                    start_time,
-                    usage_tracker,
-                    events,
-                )
             halt = (
                 halt_signal_provider()
                 if halt_signal_provider is not None
@@ -966,6 +982,16 @@ def _handle_tool_calls(
             )
             if halt is not None:
                 stop_reason, error = halt
+                _reject_tool_calls(
+                    state,
+                    tool_calls[call_index + 1 :],
+                    tool_registry,
+                    events,
+                    reason=f"Batch halted before execution: {error}",
+                    event_message="Tool call rejected after Runtime halt.",
+                )
+                if state_callback is not None:
+                    state_callback(state)
                 return _stop_with_pause(
                     state,
                     stop_reason,
@@ -976,15 +1002,93 @@ def _handle_tool_calls(
                 )
             continue
 
-        state.cached_no_progress_count = 0
         if repeated:
+            if _can_skip_repeated_call(
+                call.name,
+                cacheable_tools=cacheable_tools,
+                semantic_repeat_tools=semantic_repeat_tools,
+            ):
+                duplicate = _duplicate_tool_result(
+                    call,
+                    state.tool_result_cache.get(fingerprint),
+                    workspace_version,
+                )
+                record_tool_call(
+                    state,
+                    call.name,
+                    fingerprint_arguments,
+                    workspace_version,
+                )
+                state.messages.append(_tool_result_to_message(duplicate))
+                if tool_result_observer is not None:
+                    tool_result_observer(
+                        state,
+                        call,
+                        duplicate,
+                        workspace_version,
+                        True,
+                        batch_complete,
+                    )
+                events.append(
+                    make_event(
+                        AgentEventType.TOOL_RESULT,
+                        "Repeated non-destructive tool observation returned.",
+                        step_index=state.step_count,
+                        data={
+                            "name": call.name,
+                            "success": True,
+                            "repeated": True,
+                        },
+                    )
+                )
+                mechanical_origins.add(FailureOrigin.REPEATED_ACTION_STALL)
+                if state_callback is not None:
+                    state_callback(state)
+                halt = (
+                    halt_signal_provider()
+                    if halt_signal_provider is not None
+                    else None
+                )
+                if halt is not None:
+                    stop_reason, error = halt
+                    _reject_tool_calls(
+                        state,
+                        tool_calls[call_index + 1 :],
+                        tool_registry,
+                        events,
+                        reason=f"Batch halted before execution: {error}",
+                        event_message="Tool call rejected after Runtime halt.",
+                    )
+                    if state_callback is not None:
+                        state_callback(state)
+                    return _stop_with_pause(
+                        state,
+                        stop_reason,
+                        error,
+                        start_time,
+                        usage_tracker,
+                        events,
+                    )
+                continue
+
+            _reject_tool_calls(
+                state,
+                tool_calls[call_index:],
+                tool_registry,
+                events,
+                reason="Repeated destructive or control action was not executed.",
+                event_message="Repeated destructive tool call rejected.",
+            )
+            if state_callback is not None:
+                state_callback(state)
             return _stop_with_failure(
                 state,
                 StopReason.REPEATED_ACTION,
-                "Agent stopped because it repeated the same tool call.",
+                "Agent stopped because it repeated a destructive or control tool call.",
                 start_time,
                 usage_tracker,
                 events,
+                failure_origin=FailureOrigin.REPEATED_DESTRUCTIVE_ACTION,
             )
 
         events.append(
@@ -1020,6 +1124,7 @@ def _handle_tool_calls(
             )
 
         result = tool_registry.execute(call)
+        batch_had_fresh_observation = True
         if (
             was_completion_ready
             and call.name == "apply_patch"
@@ -1052,7 +1157,11 @@ def _handle_tool_calls(
                         )
                     }
                 )
-        if call.name in cacheable_tools:
+        if call.name in cacheable_tools or _can_skip_repeated_call(
+            call.name,
+            cacheable_tools=cacheable_tools,
+            semantic_repeat_tools=semantic_repeat_tools,
+        ):
             state.tool_result_cache[fingerprint] = result
 
         if lifecycle_callback is not None:
@@ -1124,6 +1233,16 @@ def _handle_tool_calls(
         halt = halt_signal_provider() if halt_signal_provider is not None else None
         if halt is not None:
             stop_reason, error = halt
+            _reject_tool_calls(
+                state,
+                tool_calls[call_index + 1 :],
+                tool_registry,
+                events,
+                reason=f"Batch halted before execution: {error}",
+                event_message="Tool call rejected after Runtime halt.",
+            )
+            if state_callback is not None:
+                state_callback(state)
             return _stop_with_pause(
                 state,
                 stop_reason,
@@ -1133,7 +1252,144 @@ def _handle_tool_calls(
                 events,
             )
 
+    if batch_had_fresh_observation:
+        state.cached_no_progress_count = 0
+    elif mechanical_origins:
+        state.cached_no_progress_count += 1
+        if state.cached_no_progress_count >= 2:
+            unprocessed = max(
+                0,
+                state.declared_tool_call_count - state.processed_tool_call_count,
+            )
+            if unprocessed:
+                state.batch_premature_stop_count += 1
+                state.progress_guard_unprocessed_safe_tool_call_count += unprocessed
+            if mechanical_origins == {FailureOrigin.COMPLETION_GUIDANCE_IGNORED}:
+                origin = FailureOrigin.COMPLETION_GUIDANCE_IGNORED
+                stop_reason = StopReason.NO_PROGRESS
+                error = "Agent ignored completion-ready guidance repeatedly."
+            elif mechanical_origins == {FailureOrigin.REPEATED_ACTION_STALL}:
+                origin = FailureOrigin.REPEATED_ACTION_STALL
+                stop_reason = StopReason.REPEATED_ACTION
+                error = "Agent repeated a complete non-destructive tool batch."
+            else:
+                origin = FailureOrigin.CACHED_BATCH_STALL
+                stop_reason = StopReason.NO_PROGRESS
+                error = (
+                    "Agent stopped after two complete cached or repeated "
+                    "exploration turns without workspace changes."
+                )
+            if state_callback is not None:
+                state_callback(state)
+            return _stop_with_failure(
+                state,
+                stop_reason,
+                error,
+                start_time,
+                usage_tracker,
+                events,
+                failure_origin=origin,
+            )
+    else:
+        state.cached_no_progress_count = 0
+    if state_callback is not None:
+        state_callback(state)
     return None
+
+
+def _can_skip_repeated_call(
+    tool_name: str,
+    *,
+    cacheable_tools: frozenset[str],
+    semantic_repeat_tools: frozenset[str],
+) -> bool:
+    return tool_name in (
+        cacheable_tools | semantic_repeat_tools | frozenset({"inspect_environment"})
+    )
+
+
+def _duplicate_tool_result(
+    call: ToolCall,
+    previous: ToolResult | None,
+    workspace_version: int,
+) -> ToolResult:
+    assert call.call_id is not None
+    payload: dict[str, object] = {
+        "skipped": True,
+        "duplicate": True,
+        "workspace_version": workspace_version,
+        "message": (
+            "Equivalent non-destructive action was already processed for this "
+            "workspace version."
+        ),
+    }
+    if previous is not None:
+        payload["previous_success"] = previous.success
+        payload["previous_content"] = previous.content
+        payload["previous_error"] = previous.error
+    return ToolResult(
+        call_id=call.call_id,
+        provider_call_id=call.provider_call_id,
+        name=call.name,
+        content=json.dumps(payload, ensure_ascii=False),
+        success=True,
+    )
+
+
+def _reject_tool_calls(
+    state: AgentLoopState,
+    calls: list[ToolCall],
+    tool_registry: ToolRegistry,
+    events: list[AgentEvent],
+    *,
+    reason: str,
+    event_message: str,
+    count_against_tool_budget: bool = False,
+) -> None:
+    for call in calls:
+        if call.call_id is None:
+            continue
+        if count_against_tool_budget:
+            record_tool_call(state, call.name, call.arguments, 0)
+        else:
+            state.processed_tool_call_count += 1
+        state.rejected_tool_call_count += 1
+        if _is_known_noncompletion_call(tool_registry, call.name):
+            state.unprocessed_safe_tool_call_count += 1
+        result = ToolResult(
+            call_id=call.call_id,
+            provider_call_id=call.provider_call_id,
+            name=call.name,
+            content="",
+            success=False,
+            error=reason,
+        )
+        state.messages.append(_tool_result_to_message(result))
+        events.append(
+            make_event(
+                AgentEventType.TOOL_RESULT,
+                event_message,
+                step_index=state.step_count,
+                data={
+                    "call_id": call.call_id,
+                    "provider_call_id": call.provider_call_id,
+                    "name": call.name,
+                    "success": False,
+                    "rejected": True,
+                    "reason": reason,
+                },
+            )
+        )
+
+
+def _is_known_noncompletion_call(tool_registry: ToolRegistry, name: str) -> bool:
+    if name == "submit_result":
+        return False
+    try:
+        tool_registry.get(name)
+    except ValueError:
+        return False
+    return True
 
 
 def _tool_result_to_message(result: ToolResult) -> Message:
@@ -1152,6 +1408,8 @@ def _stop_with_failure(
     start_time: float,
     usage_tracker: UsageTracker,
     events: list[AgentEvent],
+    *,
+    failure_origin: FailureOrigin | None = None,
 ) -> AgentLoopResult:
     return _build_loop_result(
         state=state,
@@ -1161,6 +1419,7 @@ def _stop_with_failure(
         usage_tracker=usage_tracker,
         events=events,
         error=error,
+        failure_origin=failure_origin,
     )
 
 
@@ -1274,6 +1533,7 @@ def _build_loop_result(
     events: list[AgentEvent],
     final_output: AgentFinalOutput | None = None,
     error: str | None = None,
+    failure_origin: FailureOrigin | None = None,
 ) -> AgentLoopResult:
     duration_seconds = time.monotonic() - start_time
 
@@ -1284,6 +1544,9 @@ def _build_loop_result(
             step_index=state.step_count,
             data={
                 "stop_reason": stop_reason.value,
+                "failure_origin": (
+                    failure_origin.value if failure_origin is not None else None
+                ),
                 "total_cost": usage_tracker.total_cost(),
                 "duration_seconds": duration_seconds,
             },
@@ -1301,6 +1564,15 @@ def _build_loop_result(
         protocol_repairs_used=state.protocol_repair_count,
         protocol_repair_streak=state.protocol_repair_streak,
         model_outputs=state.model_outputs,
+        failure_origin=failure_origin,
+        declared_tool_calls=state.declared_tool_call_count,
+        processed_tool_calls=state.processed_tool_call_count,
+        rejected_tool_calls=state.rejected_tool_call_count,
+        unprocessed_safe_tool_calls=state.unprocessed_safe_tool_call_count,
+        batch_premature_stop_count=state.batch_premature_stop_count,
+        progress_guard_unprocessed_safe_tool_call_count=(
+            state.progress_guard_unprocessed_safe_tool_call_count
+        ),
         events=events,
         total_input_tokens=usage_tracker.total_input_tokens(),
         total_output_tokens=usage_tracker.total_output_tokens(),

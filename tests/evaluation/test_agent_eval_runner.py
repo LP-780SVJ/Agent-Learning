@@ -397,6 +397,13 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
             "finalization_reserve_entry_step": None,
             "completion_mode": None,
             "budget_boundary_completion_count": 0,
+            "failure_origin": None,
+            "declared_tool_calls": 0,
+            "processed_tool_calls": 0,
+            "rejected_tool_calls": 0,
+            "unprocessed_safe_tool_calls": 0,
+            "batch_premature_stop_count": 0,
+            "progress_guard_unprocessed_safe_tool_call_count": 0,
         }
     ]
     runtime_request = runtime.requests[0]
@@ -472,6 +479,16 @@ def test_summary_separates_protocol_repair_and_exhaustion() -> None:
         completion_ready=True,
         post_ready_tool_calls=3,
         verification_workspace_mutations=1,
+        failure_origin="empty_model_turn",
+        declared_tool_calls=4,
+        processed_tool_calls=3,
+        rejected_tool_calls=1,
+        unprocessed_safe_tool_calls=1,
+        mechanical_no_progress_failure_count=0,
+        batch_premature_stop_count=1,
+        progress_guard_unprocessed_safe_tool_call_count=1,
+        source_no_progress_failure_count=0,
+        repeated_action_failure_count=0,
     )
 
     summary = summarize_agent_eval_results(
@@ -489,6 +506,13 @@ def test_summary_separates_protocol_repair_and_exhaustion() -> None:
     assert summary.completion_ready_but_actor_failed_count == 1
     assert summary.post_ready_tool_call_count == 3
     assert summary.verification_workspace_mutation_count == 1
+    assert summary.failure_origin_counts == {"empty_model_turn": 1}
+    assert summary.declared_tool_call_count == 4
+    assert summary.processed_tool_call_count == 3
+    assert summary.rejected_tool_call_count == 1
+    assert summary.unprocessed_safe_tool_call_count == 1
+    assert summary.batch_premature_stop_count == 1
+    assert summary.progress_guard_unprocessed_safe_tool_call_count == 1
 
 
 @pytest.mark.parametrize(
@@ -540,6 +564,15 @@ def test_runtime_completion_provenance_propagates_to_eval_actor() -> None:
         budget_boundary_completion_count=1,
         finalization_reserve_entered=True,
         finalization_reserve_entry_step=17,
+        failure_category="no_progress",
+        failure_origin="cached_batch_stall",
+        declared_tool_calls=9,
+        processed_tool_calls=9,
+        rejected_tool_calls=0,
+        unprocessed_safe_tool_calls=0,
+        mechanical_no_progress_failure_count=1,
+        batch_premature_stop_count=0,
+        progress_guard_unprocessed_safe_tool_call_count=0,
     )
 
     actor = _runtime_to_actor_result(
@@ -551,6 +584,11 @@ def test_runtime_completion_provenance_propagates_to_eval_actor() -> None:
     assert actor.budget_boundary_completion_count == 1
     assert actor.finalization_reserve_entered
     assert actor.finalization_reserve_entry_step == 17
+    assert actor.failure_origin == "cached_batch_stall"
+    assert actor.declared_tool_calls == 9
+    assert actor.processed_tool_calls == 9
+    assert actor.mechanical_no_progress_failure_count == 1
+    assert actor.batch_premature_stop_count == 0
 
 
 def test_grader_treats_public_task_test_changes_as_safety_violation() -> None:

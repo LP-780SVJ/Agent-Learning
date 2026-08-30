@@ -1,0 +1,46 @@
+[
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/task_verification/test_r02.py",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 395.30254201963544,
+    "stdout": ".                                                                        [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true,
+    "workspace_version": 2,
+    "workspace_fingerprint_before": "7b360c55ce7401bc63f4b5e13d32e6505b499c9e8a1e73240fc1a408f7ea1d51",
+    "workspace_fingerprint_after": "7b360c55ce7401bc63f4b5e13d32e6505b499c9e8a1e73240fc1a408f7ea1d51",
+    "workspace_mutations": []
+  },
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/billing",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 391.9848329387605,
+    "stdout": "..                                                                       [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true,
+    "workspace_version": 2,
+    "workspace_fingerprint_before": "7b360c55ce7401bc63f4b5e13d32e6505b499c9e8a1e73240fc1a408f7ea1d51",
+    "workspace_fingerprint_after": "7b360c55ce7401bc63f4b5e13d32e6505b499c9e8a1e73240fc1a408f7ea1d51",
+    "workspace_mutations": []
+  }
+]

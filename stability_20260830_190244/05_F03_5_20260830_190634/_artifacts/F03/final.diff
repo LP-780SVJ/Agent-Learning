@@ -1,0 +1,90 @@
+diff --git a/src/common/settings.py b/src/common/settings.py
+index 9da8c11..eae3897 100644
+--- a/src/common/settings.py
++++ b/src/common/settings.py
+@@ -10,3 +10,55 @@ def config_path(name: str) -> Path:
+ def load_retry_policy() -> dict:
+     return {"initial_delay_seconds": 30, "max_attempts": 5}
+ 
++
++def _parse_yaml_scalar(value: str):
++    """Parse a simple YAML scalar value."""
++    if value == "":
++        return None
++    lowered = value.lower()
++    if lowered == "true":
++        return True
++    if lowered == "false":
++        return False
++    if lowered in ("null", "~"):
++        return None
++    try:
++        return int(value)
++    except ValueError:
++        pass
++    try:
++        return float(value)
++    except ValueError:
++        pass
++    return value
++
++
++def load_feature_flags() -> dict:
++    """Load feature flags from configs/feature_flags.yaml.
++
++    Returns a nested dict keyed by section then flag. A missing file yields an
++    empty dict, so callers can fall back to their default behavior.
++    """
++    path = config_path("feature_flags.yaml")
++    if not path.exists():
++        return {}
++
++    flags: dict = {}
++    section: str | None = None
++    for raw in path.read_text(encoding="utf-8").splitlines():
++        line = raw.rstrip("\n")
++        stripped = line.strip()
++        if not stripped or stripped.startswith("#"):
++            continue
++        indent = len(line) - len(line.lstrip(" "))
++        key, sep, value = stripped.partition(":")
++        if not sep:
++            continue
++        key = key.strip()
++        value = value.strip()
++        if indent == 0:
++            section = key
++            flags[section] = {}
++        elif section is not None:
++            flags[section][key] = _parse_yaml_scalar(value)
++    return flags
+diff --git a/src/notifications/dispatcher.py b/src/notifications/dispatcher.py
+index 36d4e13..48d416a 100644
+--- a/src/notifications/dispatcher.py
++++ b/src/notifications/dispatcher.py
+@@ -1,6 +1,7 @@
+ """Event-driven notification dispatch."""
+ 
+ from src.common.events import EventEnvelope, INVOICE_RETRY_REQUESTED, ORDER_CANCELLED
++from src.common.settings import load_feature_flags
+ from src.notifications.email import EmailSender
+ from src.notifications.templates import TEMPLATE_INVOICE_RETRY, TEMPLATE_ORDER_CANCELLED
+ 
+@@ -11,9 +12,16 @@ class NotificationDispatcher:
+     def __init__(self, sender: EmailSender | None = None) -> None:
+         self.sender = sender or EmailSender()
+ 
++    def _email_dispatch_enabled(self) -> bool:
++        flags = load_feature_flags()
++        value = flags.get("notifications", {}).get("email_dispatch_enabled")
++        # Suppress dispatch only when the flag is explicitly false.
++        return value is not False
++
+     def handle(self, event: EventEnvelope) -> None:
++        if not self._email_dispatch_enabled():
++            return
+         if event.name == ORDER_CANCELLED:
+             self.sender.send("ops@example.com", TEMPLATE_ORDER_CANCELLED, event.payload)
+         if event.name == INVOICE_RETRY_REQUESTED:
+             self.sender.send("billing@example.com", TEMPLATE_INVOICE_RETRY, event.payload)
+-

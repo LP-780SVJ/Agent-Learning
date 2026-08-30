@@ -154,6 +154,16 @@ class PatchActorResult(BaseModel):
     patch_apply_stderr: str = ""
     error: str | None = None
     failure_category: str | None = None
+    failure_origin: str | None = None
+    declared_tool_calls: int = 0
+    processed_tool_calls: int = 0
+    rejected_tool_calls: int = 0
+    unprocessed_safe_tool_calls: int = 0
+    mechanical_no_progress_failure_count: int = 0
+    batch_premature_stop_count: int = 0
+    progress_guard_unprocessed_safe_tool_call_count: int = 0
+    source_no_progress_failure_count: int = 0
+    repeated_action_failure_count: int = 0
     events: tuple[str, ...] = ()
     sandbox_preflight_available: bool | None = None
     sandbox_preflight_category: str | None = None
@@ -265,6 +275,16 @@ class AgentEvalTaskResult(BaseModel):
     cost_usd: float = 0.0
     artifact_paths: tuple[str, ...] = ()
     failure_category: str | None = None
+    failure_origin: str | None = None
+    declared_tool_calls: int = 0
+    processed_tool_calls: int = 0
+    rejected_tool_calls: int = 0
+    unprocessed_safe_tool_calls: int = 0
+    mechanical_no_progress_failure_count: int = 0
+    batch_premature_stop_count: int = 0
+    progress_guard_unprocessed_safe_tool_call_count: int = 0
+    source_no_progress_failure_count: int = 0
+    repeated_action_failure_count: int = 0
     error: str | None = None
     sandbox_preflight_available: bool | None = None
     sandbox_preflight_category: str | None = None
@@ -321,6 +341,16 @@ class AgentEvalRunSummary(BaseModel):
     actor_completed_count: int = 0
     within_budget_count: int = 0
     failure_category_counts: dict[str, int] = Field(default_factory=dict)
+    failure_origin_counts: dict[str, int] = Field(default_factory=dict)
+    declared_tool_call_count: int = 0
+    processed_tool_call_count: int = 0
+    rejected_tool_call_count: int = 0
+    unprocessed_safe_tool_call_count: int = 0
+    mechanical_no_progress_failure_count: int = 0
+    batch_premature_stop_count: int = 0
+    progress_guard_unprocessed_safe_tool_call_count: int = 0
+    source_no_progress_failure_count: int = 0
+    repeated_action_failure_count: int = 0
     completion_ready_count: int = 0
     completion_ready_but_actor_failed_count: int = 0
     post_ready_tool_call_count: int = 0

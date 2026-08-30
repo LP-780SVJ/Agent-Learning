@@ -136,12 +136,13 @@ class ProgressTracker:
         completion_ready: bool,
         initial_context_cache_hit: bool = False,
         initial_context_reference_hit: bool = False,
+        mechanical_duplicate: bool = False,
     ) -> None:
         if initial_context_cache_hit:
             self.initial_context_cache_hit_count += 1
         if initial_context_reference_hit:
             self.initial_context_reference_hit_count += 1
-        if tool_name == "inspect_environment":
+        if tool_name == "inspect_environment" and not mechanical_duplicate:
             self.environment_inspection_count += 1
             if self.first_environment_inspection_step is None:
                 self.first_environment_inspection_step = step
@@ -167,6 +168,7 @@ class ProgressTracker:
         if (
             success
             and tool_name in DIAGNOSTIC_TOOLS
+            and not mechanical_duplicate
             and evidence_key not in self._diagnostic_evidence
         ):
             self._diagnostic_evidence.add(evidence_key)

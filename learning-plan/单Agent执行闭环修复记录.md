@@ -3,7 +3,7 @@
 > 文档状态：持续维护  
 > 首次建立：2026-08-27  
 > 当前分支：`week4`  
-> 当前记录终点：第四刀 Progress Control、受限环境探测与 Initial Context 复用已离线实现；等待用户运行稳定性 campaign
+> 当前记录终点：第六刀 Batch-aware Stall Detection 已离线实现；等待用户运行修复后 stability campaign
 > 维护范围：从第一次真实 15-task benchmark 开始，持续记录单 Agent 生产闭环的故障、修复、实验和架构演进
 
 ## 1. 文档目的
@@ -1316,3 +1316,108 @@ environment、protocol、ready-actor failure、workspace mutation 或非 20 effe
 
 Coder 只执行 deterministic tests、`bash -n` 和 stability `--dry-run`；F03 x5、B01 x2、
 11-task x3 真实 campaign 仍由用户运行。没有执行 benchmark、ablation 或 11-task。
+
+### 2026-08-30：第六刀——Batch-aware Stall Detection
+
+#### 问题：39/40 中唯一失败由 Runtime 在 native batch 中途制造
+
+本轮读取用户已运行的
+`evals/week4/agent_runs/stability_20260830_102307`，不由 coder 重跑。campaign
+事实为：Actor 39/40、security 40/40；F03 定向 4/5、B01 2/2、三次完整 11-task
+33/33。唯一失败是 `02_F03_2_20260830_102401`：F03 在 11 turns、33 tool calls、
+31 diagnostic progress、0 patch 下以 `no_progress` 结束；Provider/native protocol、
+sandbox 和 verification toolchain 均正常。
+
+失败 turn 声明三个 native calls：
+
+```text
+read AGENTS.md                         cached
+read src/experimental/broken_parser_case.py  fresh
+read src/plugins/loader.py             fresh
+```
+
+真实 durable messages 只有第一个 ToolResult。代码核对确认
+`cached_no_progress_count` 在 `for call in tool_calls` 内逐 call 增长，到阈值立即 return；
+Repeated Action 也在同一循环内直接 return。因此轨迹可由现有控制流完整解释：Runtime
+在 ToolCall 粒度做了本应属于 Model Turn 的 stall decision。
+
+该事实只证明 lost execution opportunity。丢失的是两个 fresh read，不是 patch，不能
+声称继续执行必然成功或 F03 应稳定 5/5。
+
+#### 方法：检测 per-call，决策 per-turn
+
+[DD-W4-D7-15](../docs/design_decisions/DD-W4-D7-15.md) 保留现有 mechanical guard，
+但把停滞结算移到完整安全 batch 后：
+
+- cached/repeated exploration 每个 call 返回 correlated cache/duplicate ToolResult；
+- 一个 assistant turn 无论有几个 cache hit，streak 最多 `+1`；
+- 同 batch 任一 uncached observation 使 turn 不是 pure mechanical stall；
+- successful patch 仍通过现有 observer 推进 workspace/source progress；
+- fresh diagnostic 不重置 ProgressTracker source clock；
+- 连续两个完整 stalled turns 仍会 `NO_PROGRESS/REPEATED_ACTION`；
+- repeated `apply_patch`/`submit_result`、mixed submit、tool budget 和 Runtime halt 保持
+  fail-fast，后续调用明确写 safety/budget rejection。
+
+没有修改 40%/70%/85% ProgressPolicy、CompletionGate、Finalization Budget、Terminal
+Settlement、Sandbox、native protocol、Initial Context、retrieval、planner、repair 或
+checkpoint。
+
+#### 新问题：同名 no-progress 无法表达 failure ownership
+
+`StopReason.NO_PROGRESS` 同时表示 cached stall、empty batch、empty model turn 和
+completion guidance ignored；仅看 `failure_category` 无法判断 Runtime 是否丢弃了同
+batch 的安全调用。
+
+#### 新方法：结构化 origin 与 premature-stop gate
+
+AgentLoopResult 新增 `failure_origin`，至少区分 `cached_batch_stall`、
+`empty_tool_batch`、`empty_model_turn`、`completion_guidance_ignored`，并记录 repeated
+stall。`declared/processed/rejected/unprocessed-safe` 计数贯通 Runtime、Eval task
+result、summary、manifest 和 stability aggregation。
+
+Stability 不要求 `mechanical_no_progress_failure_count == 0`，因为两个完整机械停滞
+turn 是合法 guard；它直接要求：
+
+```text
+batch_premature_stop_count == 0
+progress_guard_unprocessed_safe_tool_call_count == 0
+```
+
+同时保留 source no-progress、repeated action 和既有 Provider/environment/protocol/
+completion/security 控制，F03 floor 仍为 `>= 4/5`。
+
+Failure Case 记录于
+[FC-W4-D7-07](../docs/failure_cases/FC-W4-D7-07.md)。
+
+#### 离线证据边界
+
+新增 deterministic tests 真实模拟 multi-tool native ModelTurn，覆盖精确 F03 顺序、
+单 turn 多 cache、两个完整 stalled turns、cached/repeated + fresh/patch、等价 tests、
+tool budget、Runtime halt、mixed submit、failure origins、source progress 和 Eval/
+stability 传播。最终离线结果：
+
+```text
+batch-aware focused: 10 passed
+tests/agent: 158 passed
+tests/evaluation: 41 passed
+full pytest: 1409 passed, 9 skipped
+touched-path Ruff: All checks passed
+touched-source Mypy --follow-imports=skip: 8 files, no issues
+git diff --check: passed
+bash -n + stability --dry-run: passed; 10 commands, explicit max-steps 20,
+                                    no campaign output created
+```
+
+9 个 skip 是受限终端无法访问 Docker/Colima 的既有 integration skip；本轮没有修改
+sandbox，也没有申请真实 Docker 或 Provider 执行。
+
+```text
+Post-change stability campaign: NOT_RUN_BY_CODER / pending user validation
+11-task / benchmark / ablation / real LLM: NOT_RUN_BY_CODER
+Commit: UNCOMMITTED
+```
+
+仍然诚实保留：turn-level stall 是 heuristic；ProgressPolicy 只测 source-state progress，
+不理解 semantic completion；LLM reasoning 仍有方差；F03 仍可能因真实推理失败；不宣称
+deterministic 100%；environment inspection cache 与 stdlib portability classification
+延期为 P2。

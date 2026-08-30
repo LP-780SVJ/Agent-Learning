@@ -1,0 +1,46 @@
+[
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests/task_verification/test_f03.py",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 390.01641562208533,
+    "stdout": ".                                                                        [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true,
+    "workspace_version": 2,
+    "workspace_fingerprint_before": "70be8af00972f74d222837695bb951bce5b29da80ff7c2ec3dca44191295a643",
+    "workspace_fingerprint_after": "70be8af00972f74d222837695bb951bce5b29da80ff7c2ec3dca44191295a643",
+    "workspace_mutations": []
+  },
+  {
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "tests",
+      "-q"
+    ],
+    "passed": true,
+    "category": "passed",
+    "environment_failure_category": null,
+    "exit_code": 0,
+    "duration_ms": 393.02070811390877,
+    "stdout": "........                                                                 [100%]\n",
+    "stderr": "",
+    "error": null,
+    "completion_required": true,
+    "workspace_version": 2,
+    "workspace_fingerprint_before": "70be8af00972f74d222837695bb951bce5b29da80ff7c2ec3dca44191295a643",
+    "workspace_fingerprint_after": "70be8af00972f74d222837695bb951bce5b29da80ff7c2ec3dca44191295a643",
+    "workspace_mutations": []
+  }
+]
