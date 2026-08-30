@@ -1,4 +1,13 @@
-from codeteam.llm.base import ModelClient, ModelResponse
+from codeteam.llm.base import (
+    LegacyModelClient,
+    ModelClient,
+    ModelFinishState,
+    ModelRequest,
+    ModelResponse,
+    ModelResponseMode,
+    ModelTurn,
+    ModelUsage,
+)
 from codeteam.llm.mock import MockModelClient
 from codeteam.llm.openai_compatible import (
     OpenAICompatibleClient,
@@ -19,11 +28,17 @@ from codeteam.llm.registry import (
 
 __all__ = [
     "DEFAULT_SAFETY_HEADROOM_RATIO",
+    "LegacyModelClient",
     "MockModelClient",
     "ModelClient",
+    "ModelFinishState",
     "ModelMetadata",
+    "ModelRequest",
     "ModelResponse",
+    "ModelResponseMode",
     "ModelSelection",
+    "ModelTurn",
+    "ModelUsage",
     "OpenAICompatibleClient",
     "ProviderConfig",
     "ProviderCredentialError",

@@ -1,10 +1,11 @@
 # 放 MockModelClient，用于测试时模拟模型输出。
 
-from typing import List
-from codeteam.schemas.final_output import AgentFinalOutput
+
+from codeteam.llm.base import ModelFinishState, ModelRequest, ModelTurn
+
 
 class MockModelClient:
-    def __init__(self, outputs: List[str]):
+    def __init__(self, outputs: list[str]):
         self.outputs = outputs
         self.index = 0
 
@@ -15,3 +16,10 @@ class MockModelClient:
             return output
         else:
             raise IndexError("No more mock outputs available.")
+
+    def turn(self, request: ModelRequest) -> ModelTurn:
+        return ModelTurn(
+            text=self.complete(list(request.messages)),
+            finish_state=ModelFinishState.STOP,
+            model="mock-model",
+        )

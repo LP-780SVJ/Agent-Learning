@@ -12,25 +12,29 @@ Durable（本文件模型）：
     锁、subprocess.Popen、DockerRunner ——
     Resume 时从 Durable 配方重建，而不是反序列化旧对象。
 """
+
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
 
+from codeteam.agent.runtime_models import CompletionMode
 from codeteam.context.compaction import ContextSummary
 from codeteam.events import AgentEventType
 from codeteam.failures.models import AgentFailure
 from codeteam.planning.models import Plan
+from codeteam.schemas.messages import Message
 from codeteam.task.models import TaskSpec
 from codeteam.task.state import TaskStatus
 
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4, 5})
 """Loader 允许加载的 schema 代数。旧版本 ≠ 损坏（未来走 Migration）。"""
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 5
 
 _SENSITIVE_METADATA_KEY_MARKERS = frozenset(
     {
@@ -53,9 +57,17 @@ def _is_sensitive_metadata_key(key: object) -> bool:
     if not isinstance(key, str):
         return False
     normalized = key.lower().replace("-", "_").replace(" ", "_")
-    return any(
-        marker in normalized for marker in _SENSITIVE_METADATA_KEY_MARKERS
-    ) or normalized in {"auth", "key"} or normalized.endswith("_key")
+    if normalized in {
+        "max_output_tokens",
+        "safety_headroom_tokens",
+        "model_context_window",
+    }:
+        return False
+    return (
+        any(marker in normalized for marker in _SENSITIVE_METADATA_KEY_MARKERS)
+        or normalized in {"auth", "key"}
+        or normalized.endswith("_key")
+    )
 
 
 def _redact_metadata(value: Any) -> Any:
@@ -72,6 +84,14 @@ def _redact_metadata(value: Any) -> Any:
         return tuple(_redact_metadata(item) for item in value)
     if isinstance(value, set):
         return {_redact_metadata(item) for item in value}
+    if isinstance(value, str):
+        value = re.sub(
+            r"(?i)(api[_-]?key|authorization|bearer|password|secret|token)"
+            r"\s*[:=]\s*[^\s,;]+",
+            r"\1=<redacted>",
+            value,
+        )
+        return re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "<redacted>", value)
     return value
 
 
@@ -82,16 +102,18 @@ class SessionStatus(str, Enum):
     SessionStatus=PAUSED + TaskStatus=VERIFYING 表示
     「任务执行到验证阶段时整个会话被暂停」。
     """
+
     CREATED = "created"
     RUNNING = "running"
     PAUSED = "paused"
     RECOVERY_REQUIRED = "recovery_required"  # stale RUNNING / drift 的中转态
-    COMPLETED = "completed"                  # Terminal
-    FAILED = "failed"                        # Terminal
+    COMPLETED = "completed"  # Terminal
+    FAILED = "failed"  # Terminal
 
 
 class OperationStatus(str, Enum):
     """in-flight 操作的三段边界（day4.md §十四）。"""
+
     PREPARED = "prepared"
     STARTED = "started"
     COMPLETED = "completed"
@@ -111,6 +133,7 @@ class SessionManifest(BaseModel):
     state_version：第几次快照更新（每次 save +1）。
     last_event_seq：与 events.jsonl 对齐的审计游标。
     """
+
     schema_version: int = CURRENT_SCHEMA_VERSION
     session_id: str
     state_version: int = 1
@@ -133,6 +156,7 @@ class RepositoryRef(BaseModel):
     但它们是不同的 Runtime 工作区。
     探测函数（需要跑 git）放 service，不放纯数据模型。
     """
+
     repo_id: str
     git_common_dir: str
     base_sha: str
@@ -145,6 +169,7 @@ class WorktreeRef(BaseModel):
     last_known_head_sha：最近一次 save 时的 HEAD（随快照更新）。
     两者不等 = 外部有人动过 worktree → RECOVERY_REQUIRED。
     """
+
     task_id: str
     branch_name: str
     path: str
@@ -161,6 +186,7 @@ class ActiveOperation(BaseModel):
     与 orchestrator._execute_with_recovery 的 operation 参数同名。
     status 必须 STOP 前落盘 STARTED，Resume 据此决定 reconcile。
     """
+
     operation_id: str
     kind: str
     status: OperationStatus
@@ -175,12 +201,51 @@ class SessionUsage(BaseModel):
     预算被绕过 / 停止条件失效。是 ephemeral UsageTracker 的
     durable 投影，不是序列化 UsageTracker 本身。
     """
+
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
     tool_calls: int = 0
     repair_attempts: int = 0
+    protocol_repair_attempts: int = 0
     retry_count: int = 0
+
+
+class AgentRuntimeState(BaseModel):
+    """Durable continuation boundary for the provider-neutral agent loop."""
+
+    step_count: int = 0
+    tool_call_count: int = 0
+    repair_attempts: int = 0
+    protocol_repair_attempts: int = 0
+    protocol_repair_streak: int = 0
+    workspace_version: int = 0
+    recent_messages: tuple[Message, ...] = ()
+    retrieved_files: tuple[str, ...] = ()
+    last_verification: dict[str, Any] | None = None
+    verification_history: tuple[dict[str, Any], ...] = ()
+    workspace_fingerprint: str | None = None
+    git_diff_checked_version: int | None = None
+    workspace_hygiene_clean: bool = True
+    compaction_mode: str = "structured"
+    context_budget: int = 4096
+    max_output_tokens: int = 4096
+    model_context_window: int = 32768
+    safety_headroom_tokens: int = 1024
+    native_tools: bool = True
+    reasoning_enabled: bool = False
+    max_steps: int = 20
+    max_tool_calls: int = 40
+    max_repairs: int = 3
+    max_protocol_repairs: int = 2
+    verification_commands: tuple[tuple[str, ...], ...] = ()
+    task_verification_commands: tuple[tuple[str, ...], ...] = ()
+    progress_metrics: dict[str, Any] = Field(default_factory=dict)
+    completion_mode: CompletionMode | None = None
+    effective_max_steps: int = 20
+    finalization_reserve_steps: int = 4
+    finalization_reserve_entered: bool = False
+    finalization_reserve_entry_step: int | None = None
 
 
 class SessionEvent(BaseModel):
@@ -189,6 +254,7 @@ class SessionEvent(BaseModel):
     seq 从 1 严格递增（发现缺失/重复/乱序）；
     state_version 把 event 与当时的 snapshot 对齐。
     """
+
     event_id: str
     session_id: str
     seq: int = Field(ge=1)
@@ -210,6 +276,7 @@ class ContextMetadata(BaseModel):
     expected_summary_version 与 session.json 对齐——错位 = CONTEXT_STALE
     → rebuild（派生状态，不 fail Session，day4 §九十四）。
     """
+
     context_version: int = 1
     summary: ContextSummary | None = None
     expected_summary_version: int | None = None
@@ -223,6 +290,7 @@ class Session(BaseModel):
 
     只存 checkpoint 的 id 引用，绝不复制 workspace 文件。
     """
+
     manifest: SessionManifest
     status: SessionStatus = SessionStatus.CREATED
     task: TaskSpec
@@ -237,6 +305,7 @@ class Session(BaseModel):
     current_checkpoint_id: str | None = None
     active_operation: ActiveOperation | None = None
     last_failure: AgentFailure | None = None
+    runtime_state: AgentRuntimeState = Field(default_factory=AgentRuntimeState)
 
     @field_validator("provider_id", "model_id")
     @classmethod
@@ -264,9 +333,17 @@ class Session(BaseModel):
         data["metadata"] = _redact_metadata(data.get("metadata", {}))
         return data
 
+    @field_serializer("runtime_state")
+    def _sanitize_runtime_state(
+        self,
+        value: AgentRuntimeState,
+    ) -> dict[str, Any]:
+        return _redact_metadata(value.model_dump(mode="json"))
+
 
 class ReconciliationVerdict(str, Enum):
     """对账裁决。全序：INVALID > RECOVERY_REQUIRED > RESUMABLE。"""
+
     RESUMABLE = "resumable"
     RECOVERY_REQUIRED = "recovery_required"
     INVALID = "invalid"

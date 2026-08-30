@@ -1,0 +1,12 @@
+diff --git a/tests/task_verification/test_b01.py b/tests/task_verification/test_b01.py
+new file mode 100644
+--- /dev/null
++++ b/tests/task_verification/test_b01.py
+@@ -0,0 +1,7 @@
++from src.auth.api import AuthController
++
++
++def test_expired_refresh_token_uses_auth_contract() -> None:
++    response = AuthController().refresh({"refresh_token": "expired"})
++    assert response["status"] == 401
++    assert "expired" in response["error"].lower()

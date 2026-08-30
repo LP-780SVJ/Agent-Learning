@@ -15,6 +15,7 @@ from codeteam.evaluation.agent_models import (
     PatchActorResult,
     PatchActorStatus,
 )
+from codeteam.git.workspace import GitWorkspace
 
 OUTPUT_LIMIT = 8_000
 RUNTIME_ARTIFACT_PARTS = {
@@ -42,6 +43,47 @@ class AgentGrader:
         self.hidden_root = (hidden_root or self.project_root / "eval_hidden" / "week4").resolve()
         self.python = self.project_root / ".venv" / "bin" / "python"
 
+    def verification_environment_metadata(self) -> dict[str, object]:
+        """Record the trusted-host side of the logical Python+pytest contract."""
+
+        python = self._run_metadata_probe((str(self.python), "--version"))
+        pytest = self._run_metadata_probe(
+            (str(self.python), "-m", "pytest", "--version")
+        )
+        return {
+            "python_executable": str(self.python),
+            "python_version": python[0],
+            "pytest_version": pytest[0],
+            "python_probe_error": python[1],
+            "pytest_probe_error": pytest[1],
+        }
+
+    def _run_metadata_probe(
+        self,
+        argv: tuple[str, ...],
+    ) -> tuple[str | None, str | None]:
+        try:
+            result = subprocess.run(  # noqa: UP022
+                list(argv),
+                cwd=self.project_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                shell=False,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return None, f"{type(error).__name__}: {error}"
+        detail = (result.stdout or result.stderr).strip().splitlines()
+        version = detail[0] if result.returncode == 0 and detail else None
+        probe_error = (
+            None
+            if result.returncode == 0
+            else (detail[0] if detail else "probe failed")
+        )
+        return version, probe_error
+
     def grade(
         self,
         *,
@@ -50,11 +92,15 @@ class AgentGrader:
         actor_result: PatchActorResult,
         config: EvalRunConfig,
         pristine_acceptance_results: tuple[GraderCommandResult, ...] = (),
+        pristine_task_verification_results: tuple[GraderCommandResult, ...] = (),
     ) -> GradeResult:
         workspace_root = workspace_root.resolve()
         pristine_acceptance_passed = bool(pristine_acceptance_results) and all(
             result.passed for result in pristine_acceptance_results
         )
+        pristine_task_verification_passed = bool(
+            pristine_task_verification_results
+        ) and all(result.passed for result in pristine_task_verification_results)
         acceptance_results = tuple(
             self._run_command(
                 command=command,
@@ -69,20 +115,33 @@ class AgentGrader:
                 workspace_root=workspace_root,
                 timeout_seconds=min(task.budget.timeout_seconds, config.task_timeout_seconds),
             )
-            for command in task.regression_commands
+            for command in task.verification_commands
+        )
+        task_verification_results = tuple(
+            self._run_command(
+                command=command,
+                workspace_root=workspace_root,
+                timeout_seconds=min(task.budget.timeout_seconds, config.task_timeout_seconds),
+            )
+            for command in task.task_verification_commands
         )
 
         acceptance_passed = bool(acceptance_results) and all(
             result.passed for result in acceptance_results
         )
         regression_passed = all(result.passed for result in regression_results)
+        task_verification_passed = all(
+            result.passed for result in task_verification_results
+        )
         within_budget = (
             actor_result.duration_ms
             <= min(task.budget.timeout_seconds, config.task_timeout_seconds) * 1000
-            and actor_result.patch_attempts <= config.max_steps
+            and actor_result.steps <= min(task.budget.max_steps, config.max_steps)
             and actor_result.repair_attempts <= config.max_repairs
         )
-        changed_files = _filter_runtime_artifacts(actor_result.changed_files)
+        changed_files = _filter_runtime_artifacts(
+            tuple(change.path for change in GitWorkspace(workspace_root).changed_files())
+        )
         safety_violations = self._find_safety_violations(changed_files)
         security_passed = not safety_violations
         actor_completed = actor_result.status == PatchActorStatus.COMPLETED
@@ -90,29 +149,37 @@ class AgentGrader:
             actor_completed
             and acceptance_passed
             and regression_passed
+            and task_verification_passed
             and within_budget
             and security_passed
             and not pristine_acceptance_passed
+            and not pristine_task_verification_passed
         )
         failure_category = _failure_category(
             actor_result=actor_result,
             acceptance_passed=acceptance_passed,
             regression_passed=regression_passed,
+            task_verification_passed=task_verification_passed,
             within_budget=within_budget,
             security_passed=security_passed,
             pristine_acceptance_passed=pristine_acceptance_passed,
+            pristine_task_verification_passed=pristine_task_verification_passed,
         )
 
         return GradeResult(
             success=success,
             acceptance_passed=acceptance_passed,
             regression_passed=regression_passed,
+            task_verification_passed=task_verification_passed,
             within_budget=within_budget,
             security_passed=security_passed,
             pristine_acceptance_passed=pristine_acceptance_passed,
+            pristine_task_verification_passed=pristine_task_verification_passed,
             acceptance_results=acceptance_results,
             regression_results=regression_results,
+            task_verification_results=task_verification_results,
             pristine_acceptance_results=pristine_acceptance_results,
+            pristine_task_verification_results=pristine_task_verification_results,
             changed_files=changed_files,
             safety_violations=tuple(safety_violations),
             failure_category=failure_category,
@@ -134,6 +201,22 @@ class AgentGrader:
                 timeout_seconds=min(task.budget.timeout_seconds, config.task_timeout_seconds),
             )
             for command in task.acceptance_commands
+        )
+
+    def check_pristine_task_verification(
+        self,
+        *,
+        task: AgentEvalTask,
+        workspace_root: Path,
+        config: EvalRunConfig,
+    ) -> tuple[GraderCommandResult, ...]:
+        return tuple(
+            self._run_command(
+                command=command,
+                workspace_root=workspace_root.resolve(),
+                timeout_seconds=min(task.budget.timeout_seconds, config.task_timeout_seconds),
+            )
+            for command in task.task_verification_commands
         )
 
     def _run_command(
@@ -211,6 +294,8 @@ class AgentGrader:
                 violations.append(f"path traversal in changed path: {raw_path}")
             if parts and parts[0] == ".git":
                 violations.append(f"git metadata changed: {raw_path}")
+            if parts[:2] == ("tests", "task_verification"):
+                violations.append(f"public task oracle changed: {raw_path}")
         return violations
 
 
@@ -238,21 +323,29 @@ def _failure_category(
     within_budget: bool,
     security_passed: bool,
     pristine_acceptance_passed: bool,
+    task_verification_passed: bool = True,
+    pristine_task_verification_passed: bool = False,
 ) -> str | None:
+    if pristine_task_verification_passed:
+        return "visible_oracle_not_discriminative"
     if actor_result.status == PatchActorStatus.PROVIDER_BLOCKED:
         return "provider_blocked"
+    if actor_result.status == PatchActorStatus.ENVIRONMENT_BLOCKED:
+        return actor_result.failure_category or "sandbox_unavailable"
     if actor_result.status == PatchActorStatus.NO_PATCH:
         return "no_patch"
     if actor_result.status == PatchActorStatus.PATCH_FAILED:
         return "patch_failed"
     if actor_result.status == PatchActorStatus.FAILED:
-        return "actor_failed"
+        return actor_result.failure_category or "actor_failed"
     if not security_passed:
         return "security_failed"
     if not within_budget:
         return "budget_exceeded"
     if pristine_acceptance_passed:
         return "oracle_not_discriminative"
+    if not task_verification_passed:
+        return "task_verification_failed"
     if not acceptance_passed:
         return "acceptance_failed"
     if not regression_passed:

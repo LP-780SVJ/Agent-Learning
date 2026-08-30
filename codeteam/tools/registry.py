@@ -16,7 +16,20 @@ class ToolRegistry:
             raise ValueError(f"Unknown tool: {name}")
         return self._tools[name]
 
+    def describe(self) -> list[dict[str, object]]:
+        """Return provider-neutral JSON schemas for model prompting."""
+        return [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "arguments": tool.args_schema.model_json_schema(),
+            }
+            for tool in self._tools.values()
+        ]
+
     def execute(self, call: ToolCall) -> ToolResult:
+        if call.call_id is None:
+            raise ValueError("Runtime call_id must be assigned before tool execution.")
         try:
             tool = self.get(call.name)
             args = tool.args_schema.model_validate(call.arguments)
@@ -24,13 +37,15 @@ class ToolRegistry:
 
             return ToolResult(
                 call_id=call.call_id,
+                provider_call_id=call.provider_call_id,
                 name=call.name,
                 content=str(output),
                 success=True,
             )
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - tool failures are observations
             return ToolResult(
                 call_id=call.call_id,
+                provider_call_id=call.provider_call_id,
                 name=call.name,
                 content="",
                 success=False,

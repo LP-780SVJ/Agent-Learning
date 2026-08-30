@@ -1,0 +1,20 @@
+diff --git a/tests/task_verification/test_b05.py b/tests/task_verification/test_b05.py
+new file mode 100644
+--- /dev/null
++++ b/tests/task_verification/test_b05.py
+@@ -0,0 +1,15 @@
++from src.billing import invoices
++
++
++class TimeoutSession:
++    def execute(self, query: str, params: dict | None = None) -> None:
++        raise TimeoutError("write timed out")
++
++    def rollback(self) -> None:
++        pass
++
++
++def test_retry_timeout_is_a_recoverable_result(monkeypatch) -> None:
++    monkeypatch.setattr(invoices, "create_session", TimeoutSession)
++
++    assert invoices.InvoiceRepository().mark_retry_requested("inv-1") is False

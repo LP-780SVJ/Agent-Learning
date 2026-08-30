@@ -8,7 +8,7 @@ import subprocess
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -51,7 +51,7 @@ _GIT_TIMEOUT_SECONDS = 10.0
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass(frozen=True)
@@ -355,6 +355,16 @@ class SessionReconciler:
         ReconciliationVerdict.RECOVERY_REQUIRED: 1,
         ReconciliationVerdict.INVALID: 2,
     }
+    _SAFE_REPLAY_OPERATIONS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "model",
+            "tool:list_files",
+            "tool:read_file",
+            "tool:search_code",
+            "tool:git_status",
+            "tool:git_diff",
+        }
+    )
 
     def __init__(
         self,
@@ -411,16 +421,26 @@ class SessionReconciler:
 
         session = self._reconcile_stale_running(session, issues)
 
+        active_operation = session.active_operation
         if (
-            session.active_operation is not None
-            and session.active_operation.status is OperationStatus.STARTED
+            active_operation is not None
+            and active_operation.status is OperationStatus.STARTED
         ):
-            issues.append(
-                (
-                    f"inflight_operation: {session.active_operation.kind}",
-                    ReconciliationVerdict.RECOVERY_REQUIRED,
+            if active_operation.kind in self._SAFE_REPLAY_OPERATIONS:
+                session = session.model_copy(
+                    update={
+                        "active_operation": active_operation.model_copy(
+                            update={"status": OperationStatus.COMPLETED}
+                        )
+                    }
                 )
-            )
+            else:
+                issues.append(
+                    (
+                        f"inflight_operation: {active_operation.kind}",
+                        ReconciliationVerdict.RECOVERY_REQUIRED,
+                    )
+                )
 
         return self._report(session, issues)
 

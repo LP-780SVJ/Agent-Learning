@@ -1,6 +1,7 @@
 import unittest
 
 from codeteam.agent_loop import run_agent_loop
+from codeteam.limits import AgentLoopLimits
 from codeteam.llm.mock import MockModelClient
 from codeteam.schemas.final_output import CompletionStatus
 from codeteam.state import StopReason
@@ -31,6 +32,7 @@ class AgentLoopStopConditionTests(unittest.TestCase):
             MockModelClient(["[]"]),
             ToolRegistry(),
             [],
+            limits=AgentLoopLimits(max_protocol_repairs=0),
         )
 
         self.assertEqual(result.stop_reason, StopReason.INVALID_FINAL_OUTPUT)
@@ -57,6 +59,7 @@ class AgentLoopStopConditionTests(unittest.TestCase):
             ),
             ToolRegistry(),
             [],
+            limits=AgentLoopLimits(max_protocol_repairs=0),
             actual_tests_passed=False,
         )
 

@@ -1,0 +1,29 @@
+diff --git a/tests/task_verification/test_b02.py b/tests/task_verification/test_b02.py
+new file mode 100644
+--- /dev/null
++++ b/tests/task_verification/test_b02.py
+@@ -0,0 +1,24 @@
++from src.orders.service import OrderService
++
++
++class Inventory:
++    def __init__(self) -> None:
++        self.calls: list[str] = []
++
++    def release_for_order(self, order_id: str) -> int:
++        self.calls.append(order_id)
++        return 2
++
++
++class Bus:
++    def __init__(self) -> None:
++        self.events: list[object] = []
++
++    def publish(self, event: object) -> None:
++        self.events.append(event)
++
++
++def test_cancel_releases_reserved_inventory() -> None:
++    inventory, bus = Inventory(), Bus()
++    result = OrderService(event_bus=bus, inventory=inventory).cancel_order("o-1", "user")
++    assert (inventory.calls, result["released_reservations"], len(bus.events)) == (["o-1"], 2, 1)

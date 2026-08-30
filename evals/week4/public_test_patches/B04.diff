@@ -1,0 +1,26 @@
+diff --git a/tests/task_verification/test_b04.py b/tests/task_verification/test_b04.py
+new file mode 100644
+--- /dev/null
++++ b/tests/task_verification/test_b04.py
+@@ -0,0 +1,21 @@
++from src.billing.webhooks import BillingWebhookController
++
++
++class RejectingVerifier:
++    def verify(self, payload: bytes, signature: str) -> bool:
++        return False
++
++
++class Repository:
++    def __init__(self) -> None:
++        self.called = False
++
++    def mark_retry_requested(self, invoice_id: str) -> None:
++        self.called = True
++
++
++def test_invalid_signature_does_not_touch_repository() -> None:
++    repository = Repository()
++    response = BillingWebhookController(verifier=RejectingVerifier(), repository=repository).receive(b"{}", "bad")
++    assert response["status"] == 401
++    assert repository.called is False

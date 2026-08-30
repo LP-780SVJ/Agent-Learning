@@ -1,0 +1,31 @@
+diff --git a/tests/task_verification/test_r02.py b/tests/task_verification/test_r02.py
+new file mode 100644
+--- /dev/null
++++ b/tests/task_verification/test_r02.py
+@@ -0,0 +1,26 @@
++from src.billing.payment_gateway import PaymentGateway
++from src.billing.retries import InvoiceRetryPolicy, RetryExecutor
++
++
++class PolicyProvider:
++    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy:
++        return InvoiceRetryPolicy(0, 1, 1)
++
++
++class Executor:
++    def __init__(self) -> None:
++        self.invoice: dict | None = None
++
++    def execute(self, invoice: dict) -> dict:
++        self.invoice = invoice
++        return {"provider_id": "fake", **invoice}
++
++
++def test_gateway_accepts_retry_contract_dependencies() -> None:
++    executor: RetryExecutor = Executor()
++    gateway = PaymentGateway(policy_provider=PolicyProvider(), executor=executor)
++
++    result = gateway.charge("customer-1", 500)
++
++    assert result["provider_id"] == "fake"
++    assert result["customer_id"] == "customer-1"

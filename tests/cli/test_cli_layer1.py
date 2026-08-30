@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from argparse import Namespace
 from pathlib import Path
 
 import typer
@@ -26,6 +27,35 @@ def test_help_lists_product_commands() -> None:
     assert "rollback" in result.stdout
 
 
+def test_agent_eval_argv_passes_explicit_step_cap_and_reserve(monkeypatch) -> None:
+    captured: dict[str, Namespace] = {}
+
+    def fake_agent_eval(args: Namespace) -> None:
+        captured["args"] = args
+        raise typer.Exit(0)
+
+    monkeypatch.setattr(
+        "codeteam.cli.agent_eval_command.run_agent_eval",
+        fake_agent_eval,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "agent-eval",
+            "--max-steps",
+            "20",
+            "--finalization-reserve-steps",
+            "4",
+        ],
+    )
+
+    assert result.exit_code == 0
+    args = captured["args"]
+    assert args.max_steps == 20
+    assert args.finalization_reserve_steps == 4
+
+
 def test_run_argv_builds_run_request(monkeypatch) -> None:
     captured: dict[str, RunRequest] = {}
 
@@ -35,11 +65,30 @@ def test_run_argv_builds_run_request(monkeypatch) -> None:
 
     monkeypatch.setattr("codeteam.cli.run_command.run_agent_task", fake_run)
 
-    result = runner.invoke(app, ["run", "fix login", "--repo", "."])
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "fix login",
+            "--repo",
+            ".",
+            "--worktree-root",
+            "/tmp/codeteam-tests",
+        ],
+    )
 
     assert result.exit_code == 0
     assert captured["request"].task == "fix login"
     assert captured["request"].repo == Path(".")
+    assert captured["request"].worktree_root == Path("/tmp/codeteam-tests")
+
+
+def test_run_rejects_unpaired_provider_without_traceback() -> None:
+    result = runner.invoke(app, ["run", "fix login", "--provider", "mock"])
+
+    assert result.exit_code == 2
+    assert "provider_id 和 model_id" in result.stderr
+    assert "Traceback" not in result.output
 
 
 def test_resume_argv_builds_resume_request(monkeypatch) -> None:

@@ -1,0 +1,23 @@
+diff --git a/tests/task_verification/test_r01.py b/tests/task_verification/test_r01.py
+new file mode 100644
+--- /dev/null
++++ b/tests/task_verification/test_r01.py
+@@ -0,0 +1,18 @@
++import ast
++from pathlib import Path
++
++
++def test_refresh_uses_extracted_decode_helper() -> None:
++    tree = ast.parse(Path("src/auth/service.py").read_text(encoding="utf-8"))
++    functions = {
++        node.name: node
++        for node in ast.walk(tree)
++        if isinstance(node, ast.FunctionDef)
++    }
++    assert "_decode_refresh" in functions
++    calls = {
++        node.func.attr
++        for node in ast.walk(functions["refresh_session"])
++        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
++    }
++    assert "_decode_refresh" in calls

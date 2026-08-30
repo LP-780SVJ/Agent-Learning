@@ -170,7 +170,7 @@ def test_resume_completed_session_rejects_without_rerun(tmp_path: Path) -> None:
     assert "Session:" not in result.stdout
 
 
-def test_resume_model_override_fails_closed_until_registry_is_wired(
+def test_resume_model_override_rebuilds_provider_and_pauses_when_model_requests_input(
     tmp_path: Path,
 ) -> None:
     repo = _repo(tmp_path)
@@ -190,8 +190,9 @@ def test_resume_model_override_fails_closed_until_registry_is_wired(
         ],
     )
 
-    assert result.exit_code == 2
-    assert "Model override is not wired" in result.stderr
+    assert result.exit_code == 130
+    assert "Runtime: rebuilt" in result.stdout
+    assert "Status: paused" in result.stdout
 
 
 def test_rollback_rejects_checkpoint_not_owned_by_session(

@@ -21,3 +21,16 @@ def test_invoice_retry_policy_uses_toml_values(tmp_path, monkeypatch) -> None:
     assert policy.max_attempts == 7
     assert policy.backoff_multiplier == 4
     assert Path("configs/retry_policy.toml").exists()
+
+
+def test_invoice_retry_policy_uses_documented_defaults_when_file_is_missing(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    policy = load_invoice_retry_policy()
+
+    assert policy.initial_delay_seconds == 30
+    assert policy.max_attempts == 5
+    assert policy.backoff_multiplier == 2

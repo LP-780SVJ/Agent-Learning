@@ -1,0 +1,24 @@
+{
+  "runs": 1,
+  "tasks_per_run": 11,
+  "total_task_results": 11,
+  "success_count": 11,
+  "provider_blocked_count": 0,
+  "environment_blocked_count": 0,
+  "protocol_repair_attempt_count": 0,
+  "protocol_failed_count": 0,
+  "grader_correct_but_actor_failed_count": 0,
+  "grader_correct_actor_max_steps_count": 0,
+  "budget_boundary_completion_count": 0,
+  "finalization_reserve_entry_count": 1,
+  "completion_mode_counts": {
+    "model_submitted": 11
+  },
+  "effective_max_steps_counts": {
+    "20": 11
+  },
+  "effective_budget_source_counts": {
+    "task_and_run_equal": 6,
+    "run_cap": 5
+  }
+}

@@ -1,0 +1,572 @@
+[
+  {
+    "role": "system",
+    "content": "{\"role\": \"coding_agent\", \"protocol\": {\"rule\": \"Use provider-native tools when they are available. Only when native tools are unavailable, return exactly one raw JSON object containing non-empty tool_calls or a final output.\", \"tool_call_schema\": {\"tool_calls\": [{\"name\": \"read_file\", \"arguments\": {\"path\": \"src/example.py\"}}]}, \"tool_call_note\": \"Do not generate call_id; the Runtime assigns it after validation.\", \"preferred_patch_example\": {\"tool_calls\": [{\"name\": \"apply_patch\", \"arguments\": {\"replacements\": [{\"path\": \"src/example.py\", \"old_text\": \"OLD_VALUE\", \"new_text\": \"NEW_VALUE\", \"expected_replacements\": 1}]}}]}, \"final_output_schema\": {\"status\": \"completed | failed | needs_user_input\", \"summary\": \"short factual summary\", \"tests_passed\": true, \"error\": null, \"user_input_request\": null}, \"completion_tool\": {\"name\": \"submit_result\", \"arguments\": {\"summary\": \"short factual summary\", \"notes\": null}, \"rule\": \"Call submit_result alone; only the Runtime may accept completion.\"}}, \"tools\": [{\"name\": \"list_files\", \"description\": \"List files inside the workspace.\", \"arguments\": {\"properties\": {\"path\": {\"default\": \".\", \"title\": \"Path\", \"type\": \"string\"}, \"recursive\": {\"default\": true, \"title\": \"Recursive\", \"type\": \"boolean\"}}, \"title\": \"ListFilesArgs\", \"type\": \"object\"}}, {\"name\": \"read_file\", \"description\": \"Read a UTF-8 text file inside the workspace. A complete current initial-context copy may be returned as a compact reference.\", \"arguments\": {\"properties\": {\"path\": {\"title\": \"Path\", \"type\": \"string\"}, \"start_line\": {\"anyOf\": [{\"type\": \"integer\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Start Line\"}, \"end_line\": {\"anyOf\": [{\"type\": \"integer\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"End Line\"}}, \"required\": [\"path\"], \"title\": \"ReadFileArgs\", \"type\": \"object\"}}, {\"name\": \"search_code\", \"description\": \"Search text inside UTF-8 files in the workspace.\", \"arguments\": {\"properties\": {\"query\": {\"minLength\": 1, \"title\": \"Query\", \"type\": \"string\"}, \"path\": {\"default\": \".\", \"title\": \"Path\", \"type\": \"string\"}, \"max_results\": {\"default\": 50, \"minimum\": 1, \"title\": \"Max Results\", \"type\": \"integer\"}}, \"required\": [\"query\"], \"title\": \"SearchCodeArgs\", \"type\": \"object\"}}, {\"name\": \"inspect_environment\", \"description\": \"Check one Python module or bare executable in the actual verification Docker sandbox using a Runtime-owned fixed probe. The model cannot supply code or command arguments.\", \"arguments\": {\"properties\": {\"python_module\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Python Module\"}, \"executable\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Executable\"}}, \"title\": \"EnvironmentInspectionArgs\", \"type\": \"object\"}}, {\"name\": \"apply_patch\", \"description\": \"Apply a unified diff or complete structured file edits safely.\", \"arguments\": {\"$defs\": {\"FileEdit\": {\"description\": \"A complete replacement or deletion used by the provider-neutral protocol.\", \"properties\": {\"path\": {\"minLength\": 1, \"title\": \"Path\", \"type\": \"string\"}, \"content\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Content\"}, \"delete\": {\"default\": false, \"title\": \"Delete\", \"type\": \"boolean\"}}, \"required\": [\"path\"], \"title\": \"FileEdit\", \"type\": \"object\"}, \"TextReplacement\": {\"description\": \"A small exact text replacement converted to a local Git patch.\", \"properties\": {\"path\": {\"minLength\": 1, \"title\": \"Path\", \"type\": \"string\"}, \"old_text\": {\"minLength\": 1, \"title\": \"Old Text\", \"type\": \"string\"}, \"new_text\": {\"title\": \"New Text\", \"type\": \"string\"}, \"expected_replacements\": {\"default\": 1, \"minimum\": 1, \"title\": \"Expected Replacements\", \"type\": \"integer\"}}, \"required\": [\"path\", \"old_text\", \"new_text\"], \"title\": \"TextReplacement\", \"type\": \"object\"}}, \"properties\": {\"patch\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Patch\"}, \"edits\": {\"anyOf\": [{\"items\": {\"$ref\": \"#/$defs/FileEdit\"}, \"type\": \"array\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Edits\"}, \"replacements\": {\"anyOf\": [{\"items\": {\"$ref\": \"#/$defs/TextReplacement\"}, \"type\": \"array\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Replacements\"}}, \"title\": \"ApplyPatchArgs\", \"type\": \"object\"}}, {\"name\": \"run_tests\", \"description\": \"Run an argv-based visible verification command in Docker.\", \"arguments\": {\"properties\": {\"argv\": {\"items\": {\"type\": \"string\"}, \"minItems\": 1, \"title\": \"Argv\", \"type\": \"array\"}, \"cwd\": {\"default\": \".\", \"title\": \"Cwd\", \"type\": \"string\"}, \"timeout_seconds\": {\"default\": 120.0, \"exclusiveMinimum\": 0, \"maximum\": 900, \"title\": \"Timeout Seconds\", \"type\": \"number\"}}, \"required\": [\"argv\"], \"title\": \"RunTestsArgs\", \"type\": \"object\"}}, {\"name\": \"git_status\", \"description\": \"Inspect final changed files from Git.\", \"arguments\": {\"properties\": {}, \"title\": \"EmptyArgs\", \"type\": \"object\"}}, {\"name\": \"git_diff\", \"description\": \"Inspect the current source diff, including untracked text files.\", \"arguments\": {\"properties\": {}, \"title\": \"EmptyArgs\", \"type\": \"object\"}}, {\"name\": \"submit_result\", \"description\": \"Request Runtime-authorized completion after all current-version verification and diff-review requirements are satisfied. Call alone.\", \"arguments\": {\"properties\": {\"summary\": {\"minLength\": 1, \"title\": \"Summary\", \"type\": \"string\"}, \"notes\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Notes\"}}, \"required\": [\"summary\"], \"title\": \"SubmitResultArgs\", \"type\": \"object\"}}], \"budgets\": {\"max_steps\": 20, \"effective_max_steps\": 20, \"finalization_reserve_steps\": 4, \"max_tool_calls\": 60, \"max_repairs\": 3, \"max_protocol_repairs\": 2, \"context_tokens\": 8192, \"max_output_tokens\": 4096, \"model_context_window\": 32768, \"safety_headroom_tokens\": 1024}, \"completion\": [\"Make a real Git diff.\", \"Run every task verification command successfully.\", \"Inspect the final diff before returning completed.\", \"After the Runtime reports completion-ready, call submit_result as the sole tool call. Readiness does not auto-terminate the run.\", \"Never claim hidden acceptance results.\", \"The initial context is a current snapshot. Do not reread the same file unless it was truncated or the workspace changed.\"], \"execution_boundary\": \"run_tests argv paths and cwd are relative to the workspace; use '.' for the workspace root and paths such as tests/auth. The Runtime maps them to Docker /workspace, so do not put /workspace or host-only .venv paths in tool arguments. Use python -m pytest. Commands are argv arrays; shell strings, pipes, and redirection are unavailable.\", \"verification_command_priority\": \"Task-specific verification commands supplied by the Runtime are authoritative for completion. Repository-discovered commands are general guidance and are not substitutes unless the Runtime lists them as visible verification commands.\"}",
+    "tool_calls": null,
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "user",
+    "content": "{\"task\": \"Refactor PaymentGateway retry handling behind a RetryExecutor Protocol. PaymentGateway must accept an injected executor and retry policy provider, use the selected InvoiceRetryPolicy for attempts, and preserve verify_signature and charge public behavior.\", \"workspace\": \"/Users/sqlee/.codeteam/worktrees/evals/baseline-07af8005/tasks/R02\", \"planning_enabled\": true, \"task_verification_commands\": [[\"python\", \"-m\", \"pytest\", \"tests/task_verification/test_r02.py\", \"-q\"]], \"regression_commands\": [[\"python\", \"-m\", \"pytest\", \"tests/billing\", \"-q\"]], \"initial_context\": {\"repo_map\": \"# Repository map (query)\\n# Query: Refactor PaymentGateway retry handling behind a RetryExecutor Protocol. PaymentGateway must accept an injected executor and retry policy provider, use the selected InvoiceRetryPolicy for attempts, and preserve verify_signature and charge public behavior.\\n\\nsrc/billing/payment_gateway.py:\\n│ class PaymentGateway\\n│ (self, payload: bytes, signature: str) -> bool\\n│ (self, customer_id: str, cents: int) -> dict\\n│ (self, client: ProviderClient | None) -> None\\n\\ntests/billing/test_invoice_retry.py:\\n│ policy\\n│ () -> None\\n\\nvendor/third_party_payment.py:\\n│ (self, customer_id: str, cents: int) -> dict\\n│ class ProviderClient\\n│ (self, payload: bytes, signature: str) -> bool\\n\\ntests/task_verification/test_r02.py:\\n│ executor\\n│ class PolicyProvider\\n│ (self, invoice: dict) -> InvoiceRetryPolicy\\n│ class Executor\\n│ (self) -> None\\n│ (self, invoice: dict) -> dict\\n│ () -> None\\n\\nsrc/billing/retries.py:\\n│ class InvoiceRetryPolicy\\n│ () -> InvoiceRetryPolicy\\n\", \"files\": [{\"path\": \"src/billing/payment_gateway.py\", \"compression_level\": \"full_file\", \"token_count\": 131, \"content\": \"\\\"\\\"\\\"Payment provider abstraction.\\\"\\\"\\\"\\n\\nfrom vendor.third_party_payment import ProviderClient\\n\\n\\nclass PaymentGateway:\\n    \\\"\\\"\\\"Wraps the vendored provider client.\\\"\\\"\\\"\\n\\n    def __init__(self, client: ProviderClient | None = None) -> None:\\n        self.client = client or ProviderClient()\\n\\n    def verify_signature(self, payload: bytes, signature: str) -> bool:\\n        return self.client.verify(payload, signature)\\n\\n    def charge(self, customer_id: str, cents: int) -> dict:\\n        return self.client.charge(customer_id, cents)\\n\\n\"}, {\"path\": \"tests/billing/test_invoice_retry.py\", \"compression_level\": \"full_file\", \"token_count\": 53, \"content\": \"\\\"\\\"\\\"Invoice retry tests.\\\"\\\"\\\"\\n\\nfrom src.billing.retries import load_invoice_retry_policy\\n\\n\\ndef test_invoice_retry_policy_loads() -> None:\\n    policy = load_invoice_retry_policy()\\n    assert policy.max_attempts >= 1\\n\\n\"}, {\"path\": \"vendor/third_party_payment.py\", \"compression_level\": \"full_file\", \"token_count\": 82, \"content\": \"\\\"\\\"\\\"Vendored payment provider. Do not edit directly.\\\"\\\"\\\"\\n\\n\\nclass ProviderClient:\\n    def verify(self, payload: bytes, signature: str) -> bool:\\n        return signature == \\\"valid\\\"\\n\\n    def charge(self, customer_id: str, cents: int) -> dict:\\n        return {\\\"provider_id\\\": \\\"charge-123\\\", \\\"customer_id\\\": customer_id, \\\"cents\\\": cents}\\n\\n\"}, {\"path\": \"tests/task_verification/test_r02.py\", \"compression_level\": \"full_file\", \"token_count\": 200, \"content\": \"from src.billing.payment_gateway import PaymentGateway\\nfrom src.billing.retries import InvoiceRetryPolicy, RetryExecutor\\n\\n\\nclass PolicyProvider:\\n    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy:\\n        return InvoiceRetryPolicy(0, 1, 1)\\n\\n\\nclass Executor:\\n    def __init__(self) -> None:\\n        self.invoice: dict | None = None\\n\\n    def execute(self, invoice: dict) -> dict:\\n        self.invoice = invoice\\n        return {\\\"provider_id\\\": \\\"fake\\\", **invoice}\\n\\n\\ndef test_gateway_accepts_retry_contract_dependencies() -> None:\\n    executor: RetryExecutor = Executor()\\n    gateway = PaymentGateway(policy_provider=PolicyProvider(), executor=executor)\\n\\n    result = gateway.charge(\\\"customer-1\\\", 500)\\n\\n    assert result[\\\"provider_id\\\"] == \\\"fake\\\"\\n    assert result[\\\"customer_id\\\"] == \\\"customer-1\\\"\\n\"}, {\"path\": \"src/billing/retries.py\", \"compression_level\": \"full_file\", \"token_count\": 133, \"content\": \"\\\"\\\"\\\"Invoice retry policy.\\\"\\\"\\\"\\n\\nfrom dataclasses import dataclass\\n\\nfrom src.common.settings import load_retry_policy\\n\\n\\n@dataclass(frozen=True)\\nclass InvoiceRetryPolicy:\\n    initial_delay_seconds: int\\n    max_attempts: int\\n    backoff_multiplier: int\\n\\n\\ndef load_invoice_retry_policy() -> InvoiceRetryPolicy:\\n    raw = load_retry_policy()\\n    return InvoiceRetryPolicy(\\n        initial_delay_seconds=raw[\\\"initial_delay_seconds\\\"],\\n        max_attempts=raw[\\\"max_attempts\\\"],\\n        backoff_multiplier=raw.get(\\\"backoff_multiplier\\\", 2),\\n    )\\n\\n\"}], \"instructions\": [\"src/billing/payment_gateway.py: AGENTS.md\", \"tests/billing/test_invoice_retry.py: AGENTS.md\", \"vendor/third_party_payment.py: AGENTS.md\", \"tests/task_verification/test_r02.py: AGENTS.md\", \"src/billing/retries.py: AGENTS.md\"], \"visible_test_commands\": [{\"category\": \"test\", \"command\": \"uv run pytest tests/ -q\", \"source\": \"AGENTS.md:7\", \"description\": \"从 AGENTS.md 显式标签提取\"}, {\"category\": \"lint\", \"command\": \"uv run ruff check src tests\", \"source\": \"AGENTS.md:8\", \"description\": \"从 AGENTS.md 显式标签提取\"}, {\"category\": \"typecheck\", \"command\": \"uv run mypy src\", \"source\": \"AGENTS.md:9\", \"description\": \"从 AGENTS.md 显式标签提取\"}], \"diagnostics\": [\"src/experimental/broken_parser_case.py: 解析失败\"]}}",
+    "tool_calls": null,
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "assistant",
+    "content": "I'll start by exploring the workspace to understand the current state and requirements.",
+    "tool_calls": [
+      {
+        "call_id": "step-1-call-1",
+        "provider_call_id": "call_00_SXsZ3PMCaqlBNmmTlRXw0210",
+        "name": "list_files",
+        "arguments": {
+          "path": ".",
+          "recursive": true
+        }
+      },
+      {
+        "call_id": "step-1-call-2",
+        "provider_call_id": "call_01_s85fo8fUK98dCitKE2aF8007",
+        "name": "read_file",
+        "arguments": {
+          "path": "AGENTS.md"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": ".git\nAGENTS.md\nREADME.md\nconfigs/feature_flags.yaml\nconfigs/logging.yaml\nconfigs/retry_policy.toml\ndocs/auth.md\ndocs/billing.md\ndocs/generated-code-policy.md\ndocs/inventory.md\ndocs/orders.md\npyproject.toml\nsrc/__init__.py\nsrc/auth/AGENTS.md\nsrc/auth/__init__.py\nsrc/auth/api.py\nsrc/auth/exceptions.py\nsrc/auth/repository.py\nsrc/auth/service.py\nsrc/auth/tokens.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/payment_gateway.py\nsrc/billing/retries.py\nsrc/billing/webhooks.py\nsrc/common/__init__.py\nsrc/common/database.py\nsrc/common/events.py\nsrc/common/logging.py\nsrc/common/settings.py\nsrc/common/time.py\nsrc/experimental/__init__.py\nsrc/experimental/broken_parser_case.py\nsrc/generated/__init__.py\nsrc/generated/billing_schema.py\nsrc/generated/openapi_client.py\nsrc/inventory/__init__.py\nsrc/inventory/allocator.py\nsrc/inventory/reservations.py\nsrc/inventory/service.py\nsrc/main.py\nsrc/notifications/__init__.py\nsrc/notifications/dispatcher.py\nsrc/notifications/email.py\nsrc/notifications/templates.py\nsrc/orders/AGENTS.md\nsrc/orders/__init__.py\nsrc/orders/api.py\nsrc/orders/events.py\nsrc/orders/exporter.py\nsrc/orders/service.py\nsrc/orders/worker.py\nsrc/plugins/__init__.py\nsrc/plugins/fraud_rules.py\nsrc/plugins/loader.py\ntests/__init__.py\ntests/auth/test_refresh_flow.py\ntests/auth/test_token_repository.py\ntests/billing/test_invoice_retry.py\ntests/billing/test_webhook_signature.py\ntests/inventory/test_reservations.py\ntests/orders/test_order_cancel.py\ntests/orders/test_order_export.py\ntests/task_verification/test_r02.py\nvendor/third_party_payment.py",
+    "tool_calls": null,
+    "tool_call_id": "step-1-call-1",
+    "provider_call_id": "call_00_SXsZ3PMCaqlBNmmTlRXw0210"
+  },
+  {
+    "role": "tool",
+    "content": "# AGENTS.md\n\nProject instructions for the medium CodeTeam fixture.\n\n## Commands\n\n- Run tests: `uv run pytest tests/ -q`\n- Lint: `uv run ruff check src tests`\n- Type check: `uv run mypy src`\n\n## Architecture\n\n- API modules may validate request shape, but business rules belong in service modules.\n- SQL and persistence helpers belong in repository modules or `src/common/database.py`.\n- Shared event names and event envelopes belong in `src/common/events.py`.\n- Inventory reservation state must be updated through `src/inventory/`.\n- Payment provider details must stay behind `src/billing/payment_gateway.py`.\n\n## Restrictions\n\n- Do not modify `src/generated/`; it is generated from schemas.\n- Do not edit `vendor/` code directly.\n- Database migrations require explicit approval.\n- New domain events must be documented in `docs/`.\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-1-call-2",
+    "provider_call_id": "call_01_s85fo8fUK98dCitKE2aF8007"
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "call_id": "step-2-call-1",
+        "provider_call_id": "call_00_GEEMSEFi4dOpP8X3mWMR0342",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/billing/retries.py"
+        }
+      },
+      {
+        "call_id": "step-2-call-2",
+        "provider_call_id": "call_01_LrgnJ7gdO7tIL2mmeFvV2550",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/billing/payment_gateway.py"
+        }
+      },
+      {
+        "call_id": "step-2-call-3",
+        "provider_call_id": "call_02_kjhKjU4Ljb8lSdykYcuq4467",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/common/settings.py"
+        }
+      },
+      {
+        "call_id": "step-2-call-4",
+        "provider_call_id": "call_03_fhAtcPUitkoZ2CMM2UYc0183",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/billing/invoices.py"
+        }
+      },
+      {
+        "call_id": "step-2-call-5",
+        "provider_call_id": "call_04_T4V9Bl6NpOglvCCwIN8M5984",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/billing/webhooks.py"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"initial_context_reference\":true,\"initial_context_cache_hit\":true,\"path\":\"src/billing/retries.py\",\"content_hash\":\"8070f3c1b373cdde1c7297dabbfc610ba15de7224e2cdb9ba330f14cc56fe5cb\",\"workspace_version\":0,\"content_location\":\"current_model_request.initial_context\"}",
+    "tool_calls": null,
+    "tool_call_id": "step-2-call-1",
+    "provider_call_id": "call_00_GEEMSEFi4dOpP8X3mWMR0342"
+  },
+  {
+    "role": "tool",
+    "content": "{\"initial_context_reference\":true,\"initial_context_cache_hit\":true,\"path\":\"src/billing/payment_gateway.py\",\"content_hash\":\"03bceaab460ac514920de08dfb1893e131e825fc0e3269d9a35af7d86cc83bdb\",\"workspace_version\":0,\"content_location\":\"current_model_request.initial_context\"}",
+    "tool_calls": null,
+    "tool_call_id": "step-2-call-2",
+    "provider_call_id": "call_01_LrgnJ7gdO7tIL2mmeFvV2550"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Configuration loading helpers.\"\"\"\n\nfrom pathlib import Path\n\n\ndef config_path(name: str) -> Path:\n    return Path(\"configs\") / name\n\n\ndef load_retry_policy() -> dict:\n    return {\"initial_delay_seconds\": 30, \"max_attempts\": 5}\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-2-call-3",
+    "provider_call_id": "call_02_kjhKjU4Ljb8lSdykYcuq4467"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Invoice persistence.\"\"\"\n\nfrom src.common.database import create_session\nfrom src.common.time import utc_now\n\n\nclass InvoiceRepository:\n    \"\"\"Stores invoice state.\"\"\"\n\n    def mark_retry_requested(self, invoice_id: str) -> None:\n        session = create_session()\n        session.execute(\n            \"update invoices set retry_requested_at=:now where invoice_id=:invoice_id\",\n            {\"invoice_id\": invoice_id, \"now\": utc_now().isoformat()},\n        )\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-2-call-4",
+    "provider_call_id": "call_03_fhAtcPUitkoZ2CMM2UYc0183"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Billing webhook handling.\"\"\"\n\nfrom src.billing.invoices import InvoiceRepository\nfrom src.billing.payment_gateway import PaymentGateway\nfrom src.common.events import EventBus, EventEnvelope, PAYMENT_WEBHOOK_ACCEPTED\n\n\nclass PaymentWebhookVerifier:\n    \"\"\"Validates payment webhook signatures.\"\"\"\n\n    def __init__(self, gateway: PaymentGateway | None = None) -> None:\n        self.gateway = gateway or PaymentGateway()\n\n    def verify(self, payload: bytes, signature: str) -> bool:\n        return self.gateway.verify_signature(payload, signature)\n\n\nclass BillingWebhookController:\n    \"\"\"Controller for provider callbacks.\"\"\"\n\n    def __init__(\n        self,\n        verifier: PaymentWebhookVerifier | None = None,\n        repository: InvoiceRepository | None = None,\n        event_bus: EventBus | None = None,\n    ) -> None:\n        self.verifier = verifier or PaymentWebhookVerifier()\n        self.repository = repository or InvoiceRepository()\n        self.event_bus = event_bus or EventBus()\n\n    def receive(self, payload: bytes, signature: str) -> dict:\n        if not self.verifier.verify(payload, signature):\n            return {\"status\": 401, \"error\": \"invalid provider signature\"}\n        self.repository.mark_retry_requested(\"invoice-123\")\n        self.event_bus.publish(EventEnvelope(PAYMENT_WEBHOOK_ACCEPTED, {\"invoice_id\": \"invoice-123\"}))\n        return {\"status\": 202}\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-2-call-5",
+    "provider_call_id": "call_04_T4V9Bl6NpOglvCCwIN8M5984"
+  },
+  {
+    "role": "assistant",
+    "content": "Now let me look at the test verification file and the retries.py content more carefully (it was cached). Let me read the actual retries.py and test file.",
+    "tool_calls": [
+      {
+        "call_id": "step-3-call-1",
+        "provider_call_id": "call_00_74bBZTcJoi8ajmQIcy5d7053",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/billing/retries.py"
+        }
+      },
+      {
+        "call_id": "step-3-call-2",
+        "provider_call_id": "call_01_rSaw1ofp4ufDzIpwIp5b5044",
+        "name": "read_file",
+        "arguments": {
+          "path": "tests/task_verification/test_r02.py"
+        }
+      },
+      {
+        "call_id": "step-3-call-3",
+        "provider_call_id": "call_02_zLNo8Ajh1eVbw5dBsuSC6407",
+        "name": "read_file",
+        "arguments": {
+          "path": "tests/billing/test_webhook_signature.py"
+        }
+      },
+      {
+        "call_id": "step-3-call-4",
+        "provider_call_id": "call_03_kILrLrH1KnIRsSezehbu4091",
+        "name": "read_file",
+        "arguments": {
+          "path": "tests/billing/test_invoice_retry.py"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"initial_context_reference\":true,\"initial_context_cache_hit\":true,\"path\":\"src/billing/retries.py\",\"content_hash\":\"8070f3c1b373cdde1c7297dabbfc610ba15de7224e2cdb9ba330f14cc56fe5cb\",\"workspace_version\":0,\"content_location\":\"current_model_request.initial_context\"}",
+    "tool_calls": null,
+    "tool_call_id": "step-3-call-1",
+    "provider_call_id": "call_00_74bBZTcJoi8ajmQIcy5d7053"
+  },
+  {
+    "role": "tool",
+    "content": "{\"initial_context_reference\":true,\"initial_context_cache_hit\":true,\"path\":\"tests/task_verification/test_r02.py\",\"content_hash\":\"820ce94c528aedc74a88338509d4c464a992c4449f0f2b1c42ea49be42ce8f65\",\"workspace_version\":0,\"content_location\":\"current_model_request.initial_context\"}",
+    "tool_calls": null,
+    "tool_call_id": "step-3-call-2",
+    "provider_call_id": "call_01_rSaw1ofp4ufDzIpwIp5b5044"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Webhook signature tests.\"\"\"\n\nfrom src.billing.webhooks import PaymentWebhookVerifier\n\n\ndef test_valid_signature_is_accepted() -> None:\n    assert PaymentWebhookVerifier().verify(b\"{}\", \"valid\")\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-3-call-3",
+    "provider_call_id": "call_02_zLNo8Ajh1eVbw5dBsuSC6407"
+  },
+  {
+    "role": "tool",
+    "content": "{\"initial_context_reference\":true,\"initial_context_cache_hit\":true,\"path\":\"tests/billing/test_invoice_retry.py\",\"content_hash\":\"c6577f82c63eac98320d40305324eafe5ab4ce1f6c21410d132f939c01e65633\",\"workspace_version\":0,\"content_location\":\"current_model_request.initial_context\"}",
+    "tool_calls": null,
+    "tool_call_id": "step-3-call-4",
+    "provider_call_id": "call_03_kILrLrH1KnIRsSezehbu4091"
+  },
+  {
+    "role": "assistant",
+    "content": "The files are cached. I have the full content from the initial context. Let me understand the requirements clearly.\n\nThe task requires:\n1. Refactor `PaymentGateway` retry handling behind a `RetryExecutor` Protocol.\n2. `PaymentGateway` must accept an injected executor and retry policy provider.\n3. Use the selected `InvoiceRetryPolicy` for attempts.\n4. Preserve `verify_signature` and `charge` public behavior.\n\nThe test file `test_r02.py` imports:\n- `from src.billing.retries import InvoiceRetryPolicy, RetryExecutor`\n\nSo `RetryExecutor` must be a Protocol defined in `retries.py`.\n\nThe test:\n```python\nclass PolicyProvider:\n    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy:\n        return InvoiceRetryPolicy(0, 1, 1)\n\nclass Executor:\n    def execute(self, invoice: dict) -> dict:\n        self.invoice = invoice\n        return {\"provider_id\": \"fake\", **invoice}\n\ndef test_gateway_accepts_retry_contract_dependencies():\n    executor: RetryExecutor = Executor()\n    gateway = PaymentGateway(policy_provider=PolicyProvider(), executor=executor)\n    result = gateway.charge(\"customer-1\", 500)\n    assert result[\"provider_id\"] == \"fake\"\n    assert result[\"customer_id\"] == \"customer-1\"\n```\n\nSo `PaymentGateway.__init__` must accept `policy_provider` and `executor` keyword args. The `charge` method must build an invoice dict (with `customer_id` and `cents`), get the policy from the provider, and use the executor to execute with retries based on the policy.\n\nLet me understand the full picture. The `charge` method currently calls `self.client.charge(customer_id, cents)`. Now it needs to:\n1. Build an invoice dict like `{\"customer_id\": customer_id, \"cents\": cents}`.\n2. Get policy via `policy_provider.get_policy(invoice)`.\n3. Use executor to execute with retries based on policy's `max_attempts`.\n\nThe executor's `execute(invoice)` returns `{\"provider_id\": \"fake\", **invoice}` which includes `customer_id` and `cents`.\n\nLet me design the `RetryExecutor` Protocol and the retry logic.\n\nThe `RetryExecutor` Protocol should have an `execute(self, invoice: dict) -> dict` method.\n\nNow, how does the retry loop work? The `PaymentGateway.charge` should:\n- Build invoice\n- Get policy\n- Loop `max_attempts` times, calling `executor.execute(invoice)`, with backoff delays between attempts.\n\nBut wait, the executor in the test just returns immediately. The policy has `max_attempts=1`, `initial_delay_seconds=0`, `backoff_multiplier=1`.\n\nLet me think about what \"use the selected InvoiceRetryPolicy for attempts\" means. The policy has `max_attempts`, `initial_delay_seconds`, `backoff_multiplier`.\n\nI need to design a reasonable retry loop. Let me check if there's any existing retry logic or hints in docs.",
+    "tool_calls": [
+      {
+        "call_id": "step-4-call-1",
+        "provider_call_id": "call_00_ze3sILaCwZPdqy1XXKa38225",
+        "name": "read_file",
+        "arguments": {
+          "path": "docs/billing.md"
+        }
+      },
+      {
+        "call_id": "step-4-call-2",
+        "provider_call_id": "call_01_ao633uO6ojyX7V1uJbVf9230",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/billing/__init__.py"
+        }
+      },
+      {
+        "call_id": "step-4-call-3",
+        "provider_call_id": "call_02_lHINNG2hxOFmLf7levlS7433",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/common/time.py"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "# Billing Notes\n\nBilling webhooks validate provider signatures before invoice state changes. Retry timing is configured outside Python code.\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-4-call-1",
+    "provider_call_id": "call_00_ze3sILaCwZPdqy1XXKa38225"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Billing module.\"\"\"\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-4-call-2",
+    "provider_call_id": "call_01_ao633uO6ojyX7V1uJbVf9230"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Time helpers.\"\"\"\n\nfrom datetime import datetime, timezone\n\n\ndef utc_now() -> datetime:\n    return datetime.now(timezone.utc)\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-4-call-3",
+    "provider_call_id": "call_02_lHINNG2hxOFmLf7levlS7433"
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "call_id": "step-5-call-1",
+        "provider_call_id": "call_00_rtUhoewAgbBLINmEJeON0668",
+        "name": "read_file",
+        "arguments": {
+          "path": "configs/retry_policy.toml"
+        }
+      },
+      {
+        "call_id": "step-5-call-2",
+        "provider_call_id": "call_01_7KCgF5qZZQf6KSx5kM3N6896",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/common/events.py"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "[invoice_retry]\ninitial_delay_seconds = 30\nmax_attempts = 5\nbackoff_multiplier = 2\n\n[webhook_retry]\ninitial_delay_seconds = 10\nmax_attempts = 3\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-5-call-1",
+    "provider_call_id": "call_00_rtUhoewAgbBLINmEJeON0668"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Domain event primitives.\"\"\"\n\nfrom dataclasses import dataclass\nfrom typing import Callable\n\n\nORDER_CANCELLED = \"order.cancelled\"\nPAYMENT_WEBHOOK_ACCEPTED = \"billing.webhook.accepted\"\nINVOICE_RETRY_REQUESTED = \"billing.invoice.retry_requested\"\n\n\n@dataclass(frozen=True)\nclass EventEnvelope:\n    \"\"\"Event wrapper shared by producers and consumers.\"\"\"\n\n    name: str\n    payload: dict\n\n\nclass EventBus:\n    \"\"\"In-memory event bus for the fixture.\"\"\"\n\n    def __init__(self) -> None:\n        self._handlers: dict[str, list[Callable[[EventEnvelope], None]]] = {}\n\n    def subscribe(self, name: str, handler: Callable[[EventEnvelope], None]) -> None:\n        self._handlers.setdefault(name, []).append(handler)\n\n    def publish(self, event: EventEnvelope) -> None:\n        for handler in self._handlers.get(event.name, []):\n            handler(event)\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-5-call-2",
+    "provider_call_id": "call_01_7KCgF5qZZQf6KSx5kM3N6896"
+  },
+  {
+    "role": "assistant",
+    "content": "Now I have a clear picture. Let me look at the exact content of the cached files to be precise. Let me read the actual files with a different approach since they're cached - I'll check the git diff to see current state, but first let me get the exact content of retries.py and payment_gateway.py and test_r02.py.\n\nThe initial context summary says these files were read. Let me reconstruct from the repo_map and the structured context. Actually, I need the exact content. Let me try reading with explicit line ranges to force a fresh read.",
+    "tool_calls": [
+      {
+        "call_id": "step-6-call-1",
+        "provider_call_id": "call_00_ykGh5bjUDgqUSPd67IiR4910",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/billing/retries.py",
+          "start_line": 1,
+          "end_line": 100
+        }
+      },
+      {
+        "call_id": "step-6-call-2",
+        "provider_call_id": "call_01_GSDdqunZUbJURhIRnyG33941",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/billing/payment_gateway.py",
+          "start_line": 1,
+          "end_line": 100
+        }
+      },
+      {
+        "call_id": "step-6-call-3",
+        "provider_call_id": "call_02_CnAxynC3nEFl9UrP0bxg3028",
+        "name": "read_file",
+        "arguments": {
+          "path": "tests/task_verification/test_r02.py",
+          "start_line": 1,
+          "end_line": 100
+        }
+      },
+      {
+        "call_id": "step-6-call-4",
+        "provider_call_id": "call_03_8TpvIqsqL35KUQypMYV42536",
+        "name": "read_file",
+        "arguments": {
+          "path": "tests/billing/test_invoice_retry.py",
+          "start_line": 1,
+          "end_line": 100
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Invoice retry policy.\"\"\"\n\nfrom dataclasses import dataclass\n\nfrom src.common.settings import load_retry_policy\n\n\n@dataclass(frozen=True)\nclass InvoiceRetryPolicy:\n    initial_delay_seconds: int\n    max_attempts: int\n    backoff_multiplier: int\n\n\ndef load_invoice_retry_policy() -> InvoiceRetryPolicy:\n    raw = load_retry_policy()\n    return InvoiceRetryPolicy(\n        initial_delay_seconds=raw[\"initial_delay_seconds\"],\n        max_attempts=raw[\"max_attempts\"],\n        backoff_multiplier=raw.get(\"backoff_multiplier\", 2),\n    )\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-6-call-1",
+    "provider_call_id": "call_00_ykGh5bjUDgqUSPd67IiR4910"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Payment provider abstraction.\"\"\"\n\nfrom vendor.third_party_payment import ProviderClient\n\n\nclass PaymentGateway:\n    \"\"\"Wraps the vendored provider client.\"\"\"\n\n    def __init__(self, client: ProviderClient | None = None) -> None:\n        self.client = client or ProviderClient()\n\n    def verify_signature(self, payload: bytes, signature: str) -> bool:\n        return self.client.verify(payload, signature)\n\n    def charge(self, customer_id: str, cents: int) -> dict:\n        return self.client.charge(customer_id, cents)\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-6-call-2",
+    "provider_call_id": "call_01_GSDdqunZUbJURhIRnyG33941"
+  },
+  {
+    "role": "tool",
+    "content": "from src.billing.payment_gateway import PaymentGateway\nfrom src.billing.retries import InvoiceRetryPolicy, RetryExecutor\n\n\nclass PolicyProvider:\n    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy:\n        return InvoiceRetryPolicy(0, 1, 1)\n\n\nclass Executor:\n    def __init__(self) -> None:\n        self.invoice: dict | None = None\n\n    def execute(self, invoice: dict) -> dict:\n        self.invoice = invoice\n        return {\"provider_id\": \"fake\", **invoice}\n\n\ndef test_gateway_accepts_retry_contract_dependencies() -> None:\n    executor: RetryExecutor = Executor()\n    gateway = PaymentGateway(policy_provider=PolicyProvider(), executor=executor)\n\n    result = gateway.charge(\"customer-1\", 500)\n\n    assert result[\"provider_id\"] == \"fake\"\n    assert result[\"customer_id\"] == \"customer-1\"\n",
+    "tool_calls": null,
+    "tool_call_id": "step-6-call-3",
+    "provider_call_id": "call_02_CnAxynC3nEFl9UrP0bxg3028"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Invoice retry tests.\"\"\"\n\nfrom src.billing.retries import load_invoice_retry_policy\n\n\ndef test_invoice_retry_policy_loads() -> None:\n    policy = load_invoice_retry_policy()\n    assert policy.max_attempts >= 1\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-6-call-4",
+    "provider_call_id": "call_03_8TpvIqsqL35KUQypMYV42536"
+  },
+  {
+    "role": "assistant",
+    "content": "Now I have the full picture. Let me check the vendor file and the existing test for webhook signature to understand `verify_signature` behavior.",
+    "tool_calls": [
+      {
+        "call_id": "step-7-call-1",
+        "provider_call_id": "call_00_bUTTwfXHMLMEjHq2KfaQ4094",
+        "name": "read_file",
+        "arguments": {
+          "path": "vendor/third_party_payment.py"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Vendored payment provider. Do not edit directly.\"\"\"\n\n\nclass ProviderClient:\n    def verify(self, payload: bytes, signature: str) -> bool:\n        return signature == \"valid\"\n\n    def charge(self, customer_id: str, cents: int) -> dict:\n        return {\"provider_id\": \"charge-123\", \"customer_id\": customer_id, \"cents\": cents}\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-7-call-1",
+    "provider_call_id": "call_00_bUTTwfXHMLMEjHq2KfaQ4094"
+  },
+  {
+    "role": "assistant",
+    "content": "Now I understand the full picture. Let me design the refactor.\n\n**Requirements:**\n1. Define a `RetryExecutor` Protocol in `retries.py` with an `execute(invoice: dict) -> dict` method.\n2. `PaymentGateway.__init__` must accept `policy_provider` and `executor` (injected), plus keep `client` for backward compat.\n3. `charge` must build an invoice dict, get the policy via `policy_provider.get_policy(invoice)`, and use the executor with retries based on the policy's `max_attempts`.\n4. Preserve `verify_signature` and `charge` public behavior (default behavior should still work via `ProviderClient`).\n\nLet me design:\n\n**retries.py** - add `RetryExecutor` Protocol:\n```python\nfrom typing import Protocol\n\nclass RetryExecutor(Protocol):\n    def execute(self, invoice: dict) -> dict: ...\n```\n\n**payment_gateway.py**:\n- `__init__(self, client=None, policy_provider=None, executor=None)`\n- Default executor wraps `ProviderClient` (via `client`).\n- `charge` builds invoice, gets policy, retries.\n\nLet me think about the default executor. The default behavior: `charge` calls `self.client.charge(customer_id, cents)` returning `{\"provider_id\": \"charge-123\", \"customer_id\": ..., \"cents\": ...}`.\n\nThe executor's `execute(invoice)` takes an invoice dict and returns a dict. So the default executor should call `client.charge(invoice[\"customer_id\"], invoice[\"cents\"])`.\n\nThe invoice dict should be `{\"customer_id\": customer_id, \"cents\": cents}`.\n\nFor the retry loop: policy has `max_attempts`, `initial_delay_seconds`, `backoff_multiplier`. The test uses `InvoiceRetryPolicy(0, 1, 1)` → max_attempts=1, so single attempt, no delay.\n\nI need to implement a retry loop that:\n- Attempts `max_attempts` times.\n- On failure (exception), waits `initial_delay_seconds * backoff_multiplier^attempt` and retries.\n- Returns the result on success.\n\nBut what counts as failure? The executor's `execute` returns a dict. In the test, it always succeeds. For the default client, `charge` returns a dict. There's no explicit failure signal in the current code.\n\nLet me keep it simple and robust: retry on exceptions. The loop:\n\n```python\ndef charge(self, customer_id, cents):\n    invoice = {\"customer_id\": customer_id, \"cents\": cents}\n    policy = self.policy_provider.get_policy(invoice)\n    delay = policy.initial_delay_seconds\n    last_error = None\n    for attempt in range(policy.max_attempts):\n        try:\n            return self.executor.execute(invoice)\n        except Exception as exc:\n            last_error = exc\n            if attempt < policy.max_attempts - 1:\n                time.sleep(delay)\n                delay *= policy.backoff_multiplier\n    raise last_error\n```\n\nWait, but `time.sleep` with delay=0 is fine. But I should be careful about the default policy provider. The default `policy_provider` should use `load_invoice_retry_policy()`.\n\nLet me design the default policy provider. There's `load_invoice_retry_policy()` in retries.py. I can create a default provider that returns that policy.\n\nActually, let me think about what the default `policy_provider` should be. The task says \"accept an injected executor and retry policy provider\". So both are injectable. Defaults should preserve existing behavior.\n\nLet me create a default policy provider class or use a simple lambda. Actually, I'll make the default policy provider a small class in retries.py or payment_gateway.py.\n\nLet me think about the cleanest design:\n\nIn `retries.py`:\n```python\nfrom typing import Protocol\n\nclass RetryExecutor(Protocol):\n    def execute(self, invoice: dict) -> dict: ...\n\nclass InvoiceRetryPolicyProvider(Protocol):\n    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy: ...\n```\n\nActually, the test only imports `InvoiceRetryPolicy` and `RetryExecutor` from retries. The `PolicyProvider` in the test is defined inline with `get_policy`. So I don't strictly need a `PolicyProvider` Protocol, but it's good practice. However, to keep it minimal and avoid over-engineering, I'll define the `RetryExecutor` Protocol (required by test import) and maybe a `RetryPolicyProvider` Protocol too.\n\nLet me keep it focused. The test requires `RetryExecutor` to be importable from `src.billing.retries`.\n\nNow for the default executor in PaymentGateway: it should wrap the `ProviderClient`. Let me define a default executor class.\n\nActually, I can make the default executor a small internal class:\n\n```python\nclass _ProviderExecutor:\n    def __init__(self, client):\n        self.client = client\n    def execute(self, invoice):\n        return self.client.charge(invoice[\"customer_id\"], invoice[\"cents\"])\n```\n\nAnd default policy provider:\n\n```python\nclass _DefaultPolicyProvider:\n    def get_policy(self, invoice):\n        return load_invoice_retry_policy()\n```\n\nNow, the `charge` method needs to preserve public behavior. The default `charge` returns `{\"provider_id\": \"charge-123\", \"customer_id\": ..., \"cents\": ...}`. With the executor approach, the default executor returns `client.charge(...)` which is the same.\n\nLet me also consider: should `charge` still accept `client`? The current signature is `__init__(self, client=None)`. The webhooks.py uses `PaymentGateway()` with no args. So I need to keep `client` param working.\n\nLet me write the final code.\n\nFor the retry loop, I need `time.sleep`. Import `time`.\n\nLet me also think about whether the retry should happen on exceptions only, or also on some \"failed\" result. The current `ProviderClient.charge` never raises. The test executor never raises. So exception-based retry is the natural interpretation. But there might be hidden tests checking retry behavior. Let me think about what \"use the selected InvoiceRetryPolicy for attempts\" means.\n\nThe policy has `max_attempts`. The retry loop should attempt up to `max_attempts` times. On exception, retry with backoff. This is the standard interpretation.\n\nLet me write it cleanly.\n\nNow let me also consider: should I define the `RetryExecutor` Protocol with `execute` returning `dict`? The test's `Executor.execute` returns `dict`. Yes.\n\nLet me write the code now.\n\nFor retries.py, add:\n```python\nfrom typing import Protocol\n\nclass RetryExecutor(Protocol):\n    def execute(self, invoice: dict) -> dict: ...\n```\n\nFor payment_gateway.py:\n```python\n\"\"\"Payment provider abstraction.\"\"\"\n\nimport time\n\nfrom vendor.third_party_payment import ProviderClient\n\nfrom src.billing.retries import InvoiceRetryPolicy, RetryExecutor, load_invoice_retry_policy\n\n\nclass _ProviderExecutor:\n    def __init__(self, client: ProviderClient) -> None:\n        self.client = client\n\n    def execute(self, invoice: dict) -> dict:\n        return self.client.charge(invoice[\"customer_id\"], invoice[\"cents\"])\n\n\nclass _DefaultPolicyProvider:\n    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy:\n        return load_invoice_retry_policy()\n\n\nclass PaymentGateway:\n    \"\"\"Wraps the vendored provider client.\"\"\"\n\n    def __init__(\n        self,\n        client: ProviderClient | None = None,\n        policy_provider: object | None = None,\n        executor: RetryExecutor | None = None,\n    ) -> None:\n        self.client = client or ProviderClient()\n        self.policy_provider = policy_provider or _DefaultPolicyProvider()\n        self.executor = executor or _ProviderExecutor(self.client)\n\n    def verify_signature(self, payload: bytes, signature: str) -> bool:\n        return self.client.verify(payload, signature)\n\n    def charge(self, customer_id: str, cents: int) -> dict:\n        invoice = {\"customer_id\": customer_id, \"cents\": cents}\n        policy = self.policy_provider.get_policy(invoice)\n        delay = policy.initial_delay_seconds\n        last_error: Exception | None = None\n        for attempt in range(policy.max_attempts):\n            try:\n                return self.executor.execute(invoice)\n            except Exception as exc:\n                last_error = exc\n                if attempt < policy.max_attempts - 1:\n                    time.sleep(delay)\n                    delay *= policy.backoff_multiplier\n        assert last_error is not None\n        raise last_error\n```\n\nWait, there's a subtlety. The `policy_provider` type. The test passes `PolicyProvider()` which has `get_policy`. I should type it properly. Let me define a Protocol for the policy provider too, or just use a loose type.\n\nActually, let me define a `RetryPolicyProvider` Protocol in retries.py for cleanliness. But the test doesn't import it, so it's optional. I'll define it for type safety.\n\nActually, to keep minimal and avoid mypy issues, let me define both Protocols in retries.py.\n\nLet me think about mypy. The `policy_provider` param typed as `object` would fail mypy when calling `.get_policy`. So I need a proper type. Let me define:\n\n```python\nclass RetryPolicyProvider(Protocol):\n    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy: ...\n```\n\nThen `policy_provider: RetryPolicyProvider | None = None`.\n\nNow, `_DefaultPolicyProvider.get_policy` returns `InvoiceRetryPolicy` from `load_invoice_retry_policy()`. Good.\n\nLet me also double check: `load_invoice_retry_policy` returns `InvoiceRetryPolicy` with `initial_delay_seconds=30, max_attempts=5, backoff_multiplier=2` (from settings.py `load_retry_policy` returns `{\"initial_delay_seconds\": 30, \"max_attempts\": 5}` and `.get(\"backoff_multiplier\", 2)` = 2).\n\nNow, the default `charge` with the default executor: `_ProviderExecutor.execute` calls `client.charge(\"customer-1\", 500)` → returns dict. Single attempt succeeds immediately (no exception). Good, preserves behavior.\n\nBut wait - there's a concern about the retry loop with `max_attempts=5` and `initial_delay_seconds=30`. If the default client never raises, no delay happens. Fine.\n\nNow let me verify the test passes:\n- `executor: RetryExecutor = Executor()` - Executor has `execute(invoice) -> dict`. ✓\n- `gateway = PaymentGateway(policy_provider=PolicyProvider(), executor=executor)` - accepts both. ✓\n- `gateway.charge(\"customer-1\", 500)`:\n  - invoice = `{\"customer_id\": \"customer-1\", \"cents\": 500}`\n  - policy = `InvoiceRetryPolicy(0, 1, 1)` → max_attempts=1\n  - loop attempt 0: `executor.execute(invoice)` returns `{\"provider_id\": \"fake\", \"customer_id\": \"customer-1\", \"cents\": 500}`\n  - returns it. ✓\n- `result[\"provider_id\"] == \"fake\"` ✓\n- `result[\"customer_id\"] == \"customer-1\"` ✓\n\nNow let me also check the webhook test still passes: `PaymentWebhookVerifier().verify(b\"{}\", \"valid\")` → `PaymentGateway().verify_signature(b\"{}\", \"valid\")` → `client.verify(b\"{}\", \"valid\")` → `\"valid\" == \"valid\"` → True. ✓\n\nNow let me write the patch.\n\nLet me also consider whether I should keep `client` attribute. The webhooks.py doesn't use `client` directly, only `verify_signature`. But keeping `self.client` is fine and preserves behavior.\n\nLet me write the final code.\n\nActually, one more consideration: the `RetryExecutor` Protocol's `execute` method. Should it be `execute(self, invoice: dict) -> dict`? The test's Executor has `execute(self, invoice: dict) -> dict`. Yes.\n\nLet me also think about whether there might be hidden tests that check the retry actually retries on failure. My implementation handles that with exception-based retry and backoff. Good.\n\nLet me write the patch now.I now have a complete understanding. Let me implement the refactor.",
+    "tool_calls": [
+      {
+        "call_id": "step-8-call-1",
+        "provider_call_id": "call_00_Up09nY9OIg8bIE1NeKX48928",
+        "name": "apply_patch",
+        "arguments": {
+          "edits": [
+            {
+              "path": "src/billing/retries.py",
+              "content": "\"\"\"Invoice retry policy.\"\"\"\n\nfrom dataclasses import dataclass\nfrom typing import Protocol\n\nfrom src.common.settings import load_retry_policy\n\n\n@dataclass(frozen=True)\nclass InvoiceRetryPolicy:\n    initial_delay_seconds: int\n    max_attempts: int\n    backoff_multiplier: int\n\n\nclass RetryExecutor(Protocol):\n    \"\"\"Executes a single charge attempt for an invoice.\"\"\"\n\n    def execute(self, invoice: dict) -> dict: ...\n\n\nclass RetryPolicyProvider(Protocol):\n    \"\"\"Selects the retry policy for a given invoice.\"\"\"\n\n    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy: ...\n\n\ndef load_invoice_retry_policy() -> InvoiceRetryPolicy:\n    raw = load_retry_policy()\n    return InvoiceRetryPolicy(\n        initial_delay_seconds=raw[\"initial_delay_seconds\"],\n        max_attempts=raw[\"max_attempts\"],\n        backoff_multiplier=raw.get(\"backoff_multiplier\", 2),\n    )\n"
+            },
+            {
+              "path": "src/billing/payment_gateway.py",
+              "content": "\"\"\"Payment provider abstraction.\"\"\"\n\nimport time\n\nfrom vendor.third_party_payment import ProviderClient\n\nfrom src.billing.retries import (\n    InvoiceRetryPolicy,\n    RetryExecutor,\n    RetryPolicyProvider,\n    load_invoice_retry_policy,\n)\n\n\nclass _ProviderExecutor:\n    \"\"\"Default executor that delegates to the vendored provider client.\"\"\"\n\n    def __init__(self, client: ProviderClient) -> None:\n        self.client = client\n\n    def execute(self, invoice: dict) -> dict:\n        return self.client.charge(invoice[\"customer_id\"], invoice[\"cents\"])\n\n\nclass _DefaultPolicyProvider:\n    \"\"\"Default policy provider backed by the configured retry policy.\"\"\"\n\n    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy:\n        return load_invoice_retry_policy()\n\n\nclass PaymentGateway:\n    \"\"\"Wraps the vendored provider client.\"\"\"\n\n    def __init__(\n        self,\n        client: ProviderClient | None = None,\n        policy_provider: RetryPolicyProvider | None = None,\n        executor: RetryExecutor | None = None,\n    ) -> None:\n        self.client = client or ProviderClient()\n        self.policy_provider = policy_provider or _DefaultPolicyProvider()\n        self.executor = executor or _ProviderExecutor(self.client)\n\n    def verify_signature(self, payload: bytes, signature: str) -> bool:\n        return self.client.verify(payload, signature)\n\n    def charge(self, customer_id: str, cents: int) -> dict:\n        invoice = {\"customer_id\": customer_id, \"cents\": cents}\n        policy = self.policy_provider.get_policy(invoice)\n\n        delay = policy.initial_delay_seconds\n        last_error: Exception | None = None\n        for attempt in range(policy.max_attempts):\n            try:\n                return self.executor.execute(invoice)\n            except Exception as exc:  # noqa: BLE001 - retry any provider failure\n                last_error = exc\n                if attempt < policy.max_attempts - 1:\n                    time.sleep(delay)\n                    delay *= policy.backoff_multiplier\n\n        assert last_error is not None\n        raise last_error\n"
+            }
+          ]
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"applied\": true, \"changed_files\": [\"src/billing/payment_gateway.py\", \"src/billing/retries.py\"]}",
+    "tool_calls": null,
+    "tool_call_id": "step-8-call-1",
+    "provider_call_id": "call_00_Up09nY9OIg8bIE1NeKX48928"
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "call_id": "step-9-call-1",
+        "provider_call_id": "call_00_Nb54vkhFLqNEcFSn4qb14157",
+        "name": "run_tests",
+        "arguments": {
+          "argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/task_verification/test_r02.py",
+            "-q"
+          ]
+        }
+      },
+      {
+        "call_id": "step-9-call-2",
+        "provider_call_id": "call_01_em83g4co8FNdJOgwICtS4061",
+        "name": "run_tests",
+        "arguments": {
+          "argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/billing",
+            "-q"
+          ]
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"argv\":[\"python\",\"-m\",\"pytest\",\"tests/task_verification/test_r02.py\",\"-q\"],\"passed\":true,\"category\":\"passed\",\"environment_failure_category\":null,\"exit_code\":0,\"duration_ms\":447.5885001011193,\"stdout\":\".                                                                        [100%]\\n\",\"stderr\":\"\",\"error\":null,\"completion_required\":true,\"workspace_version\":1,\"workspace_fingerprint_before\":\"a2cd50457745a4fe95824d63472ec437535ee42a55c6b765e771a5a997f9a456\",\"workspace_fingerprint_after\":\"a2cd50457745a4fe95824d63472ec437535ee42a55c6b765e771a5a997f9a456\",\"workspace_mutations\":[]}",
+    "tool_calls": null,
+    "tool_call_id": "step-9-call-1",
+    "provider_call_id": "call_00_Nb54vkhFLqNEcFSn4qb14157"
+  },
+  {
+    "role": "tool",
+    "content": "{\"argv\":[\"python\",\"-m\",\"pytest\",\"tests/billing\",\"-q\"],\"passed\":true,\"category\":\"passed\",\"environment_failure_category\":null,\"exit_code\":0,\"duration_ms\":402.57991710677743,\"stdout\":\"..                                                                       [100%]\\n\",\"stderr\":\"\",\"error\":null,\"completion_required\":true,\"workspace_version\":1,\"workspace_fingerprint_before\":\"a2cd50457745a4fe95824d63472ec437535ee42a55c6b765e771a5a997f9a456\",\"workspace_fingerprint_after\":\"a2cd50457745a4fe95824d63472ec437535ee42a55c6b765e771a5a997f9a456\",\"workspace_mutations\":[]}",
+    "tool_calls": null,
+    "tool_call_id": "step-9-call-2",
+    "provider_call_id": "call_01_em83g4co8FNdJOgwICtS4061"
+  },
+  {
+    "role": "assistant",
+    "content": "Both pass. Let me run the lint and typecheck commands to ensure no regressions.",
+    "tool_calls": [
+      {
+        "call_id": "step-10-call-1",
+        "provider_call_id": "call_00_sXmjLa8fHwKJIN0AX3wl0328",
+        "name": "run_tests",
+        "arguments": {
+          "argv": [
+            "uv",
+            "run",
+            "ruff",
+            "check",
+            "src",
+            "tests"
+          ]
+        }
+      },
+      {
+        "call_id": "step-10-call-2",
+        "provider_call_id": "call_01_anxTdVqlUMYgYqzgPA4B7965",
+        "name": "run_tests",
+        "arguments": {
+          "argv": [
+            "uv",
+            "run",
+            "mypy",
+            "src"
+          ]
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "Command is not in the task's visible verification commands. Use one of these workspace-relative argv arrays: [[\"python\", \"-m\", \"pytest\", \"tests/task_verification/test_r02.py\", \"-q\"], [\"python\", \"-m\", \"pytest\", \"tests/billing\", \"-q\"]]",
+    "tool_calls": null,
+    "tool_call_id": "step-10-call-1",
+    "provider_call_id": "call_00_sXmjLa8fHwKJIN0AX3wl0328"
+  },
+  {
+    "role": "tool",
+    "content": "Command is not in the task's visible verification commands. Use one of these workspace-relative argv arrays: [[\"python\", \"-m\", \"pytest\", \"tests/task_verification/test_r02.py\", \"-q\"], [\"python\", \"-m\", \"pytest\", \"tests/billing\", \"-q\"]]",
+    "tool_calls": null,
+    "tool_call_id": "step-10-call-2",
+    "provider_call_id": "call_01_anxTdVqlUMYgYqzgPA4B7965"
+  },
+  {
+    "role": "assistant",
+    "content": "The lint/typecheck commands aren't available in this sandbox. Let me review the final diff.",
+    "tool_calls": [
+      {
+        "call_id": "step-11-call-1",
+        "provider_call_id": "call_00_soiftZ39Tj2yDWyWJPvQ3060",
+        "name": "git_diff",
+        "arguments": {}
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "diff --git a/src/billing/payment_gateway.py b/src/billing/payment_gateway.py\nindex 340d338..62b628c 100644\n--- a/src/billing/payment_gateway.py\n+++ b/src/billing/payment_gateway.py\n@@ -1,17 +1,64 @@\n \"\"\"Payment provider abstraction.\"\"\"\n \n+import time\n+\n from vendor.third_party_payment import ProviderClient\n \n+from src.billing.retries import (\n+    InvoiceRetryPolicy,\n+    RetryExecutor,\n+    RetryPolicyProvider,\n+    load_invoice_retry_policy,\n+)\n+\n+\n+class _ProviderExecutor:\n+    \"\"\"Default executor that delegates to the vendored provider client.\"\"\"\n+\n+    def __init__(self, client: ProviderClient) -> None:\n+        self.client = client\n+\n+    def execute(self, invoice: dict) -> dict:\n+        return self.client.charge(invoice[\"customer_id\"], invoice[\"cents\"])\n+\n+\n+class _DefaultPolicyProvider:\n+    \"\"\"Default policy provider backed by the configured retry policy.\"\"\"\n+\n+    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy:\n+        return load_invoice_retry_policy()\n+\n \n class PaymentGateway:\n     \"\"\"Wraps the vendored provider client.\"\"\"\n \n-    def __init__(self, client: ProviderClient | None = None) -> None:\n+    def __init__(\n+        self,\n+        client: ProviderClient | None = None,\n+        policy_provider: RetryPolicyProvider | None = None,\n+        executor: RetryExecutor | None = None,\n+    ) -> None:\n         self.client = client or ProviderClient()\n+        self.policy_provider = policy_provider or _DefaultPolicyProvider()\n+        self.executor = executor or _ProviderExecutor(self.client)\n \n     def verify_signature(self, payload: bytes, signature: str) -> bool:\n         return self.client.verify(payload, signature)\n \n     def charge(self, customer_id: str, cents: int) -> dict:\n-        return self.client.charge(customer_id, cents)\n+        invoice = {\"customer_id\": customer_id, \"cents\": cents}\n+        policy = self.policy_provider.get_policy(invoice)\n+\n+        delay = policy.initial_delay_seconds\n+        last_error: Exception | None = None\n+        for attempt in range(policy.max_attempts):\n+            try:\n+                return self.executor.execute(invoice)\n+            except Exception as exc:  # noqa: BLE001 - retry any provider failure\n+                last_error = exc\n+                if attempt < policy.max_attempts - 1:\n+                    time.sleep(delay)\n+                    delay *= policy.backoff_multiplier\n \n+        assert last_error is not None\n+        raise last_error\ndiff --git a/src/billing/retries.py b/src/billing/retries.py\nindex 4cbef19..c512ace 100644\n--- a/src/billing/retries.py\n+++ b/src/billing/retries.py\n@@ -1,6 +1,7 @@\n \"\"\"Invoice retry policy.\"\"\"\n \n from dataclasses import dataclass\n+from typing import Protocol\n \n from src.common.settings import load_retry_policy\n \n@@ -12,6 +13,18 @@ class InvoiceRetryPolicy:\n     backoff_multiplier: int\n \n \n+class RetryExecutor(Protocol):\n+    \"\"\"Executes a single charge attempt for an invoice.\"\"\"\n+\n+    def execute(self, invoice: dict) -> dict: ...\n+\n+\n+class RetryPolicyProvider(Protocol):\n+    \"\"\"Selects the retry policy for a given invoice.\"\"\"\n+\n+    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy: ...\n+\n+\n def load_invoice_retry_policy() -> InvoiceRetryPolicy:\n     raw = load_retry_policy()\n     return InvoiceRetryPolicy(\n@@ -19,4 +32,3 @@ def load_invoice_retry_policy() -> InvoiceRetryPolicy:\n         max_attempts=raw[\"max_attempts\"],\n         backoff_multiplier=raw.get(\"backoff_multiplier\", 2),\n     )\n-\n\n\n{\"completion_ready\": true, \"workspace_version\": 1, \"next_action\": \"Call submit_result alone.\"}",
+    "tool_calls": null,
+    "tool_call_id": "step-11-call-1",
+    "provider_call_id": "call_00_soiftZ39Tj2yDWyWJPvQ3060"
+  },
+  {
+    "role": "assistant",
+    "content": "The diff is clean and complete. Both the task verification test and regression tests pass. The refactor:\n\n1. Added `RetryExecutor` and `RetryPolicyProvider` Protocols in `retries.py`.\n2. `PaymentGateway.__init__` now accepts injected `policy_provider` and `executor` (with sensible defaults preserving existing behavior).\n3. `charge` builds an invoice, selects the policy via the provider, and retries through the executor using `max_attempts` with exponential backoff.\n4. `verify_signature` and `charge` public behavior preserved (defaults delegate to `ProviderClient`).",
+    "tool_calls": [
+      {
+        "call_id": "step-12-call-1",
+        "provider_call_id": "call_00_UnUSMaWzPuBU9fdFc2fK2192",
+        "name": "submit_result",
+        "arguments": {
+          "summary": "Refactored PaymentGateway retry handling behind a RetryExecutor Protocol.\n\nChanges:\n- src/billing/retries.py: added RetryExecutor and RetryPolicyProvider Protocols.\n- src/billing/payment_gateway.py: PaymentGateway now accepts injected policy_provider and executor (with defaults preserving existing ProviderClient behavior); charge() builds an invoice, selects the InvoiceRetryPolicy via the provider, and retries through the executor using max_attempts with exponential backoff.\n\nVerification:\n- tests/task_verification/test_r02.py passed.\n- tests/billing regression passed."
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"accepted\": true, \"ready\": true, \"workspace_version\": 1, \"missing_requirements\": []}",
+    "tool_calls": null,
+    "tool_call_id": "step-12-call-1",
+    "provider_call_id": "call_00_UnUSMaWzPuBU9fdFc2fK2192"
+  }
+]

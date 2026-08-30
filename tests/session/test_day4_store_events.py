@@ -1,12 +1,15 @@
 """Week4 Day4 JsonSessionStore, atomic write, and event log tests."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
+from codeteam.agent.runtime_models import ModelOutputEvidence
 from codeteam.events import AgentEventType
 from codeteam.session import store as store_module
 from codeteam.session.errors import (
@@ -28,6 +31,25 @@ def test_store_create_then_load_round_trips(git_repo, tmp_path: Path) -> None:
     store.create(session)
 
     assert store.load(session.manifest.session_id) == session
+
+
+def test_store_appends_private_model_output_evidence(git_repo, tmp_path: Path) -> None:
+    store = JsonSessionStore(tmp_path / "sessions")
+    session = store.create(make_session(git_repo))
+    evidence = ModelOutputEvidence(
+        step=1,
+        raw_content="provider raw output",
+        parse_error="not valid JSON",
+        model="test-model",
+        input_tokens=3,
+        output_tokens=4,
+    )
+
+    store.append_model_output(session.manifest.session_id, evidence)
+
+    path = store.session_dir(session.manifest.session_id) / "model_outputs.jsonl"
+    assert ModelOutputEvidence.model_validate_json(path.read_text()) == evidence
+    assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_store_create_existing_session_rejects_overwrite(
@@ -84,6 +106,26 @@ def test_store_load_unsupported_schema_version_raises(tmp_path: Path) -> None:
 
     with pytest.raises(SessionSchemaUnsupportedError):
         store.load("ses_old")
+
+
+def test_store_migrates_schema_v1_with_runtime_defaults(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    store = JsonSessionStore(tmp_path / "sessions")
+    session = store.create(make_session(git_repo))
+    snapshot = store.session_dir(session.manifest.session_id) / "session.json"
+    payload = json.loads(snapshot.read_text(encoding="utf-8"))
+    payload["manifest"]["schema_version"] = 1
+    payload.pop("runtime_state", None)
+    snapshot.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = store.load(session.manifest.session_id)
+
+    assert migrated.manifest.schema_version == 5
+    assert migrated.runtime_state.step_count == 0
+    assert migrated.runtime_state.recent_messages == ()
+    assert migrated.runtime_state.progress_metrics == {}
 
 
 @pytest.mark.parametrize(
@@ -227,6 +269,6 @@ def _event(session_id: str, seq: int) -> SessionEvent:
         seq=seq,
         state_version=max(seq, 1),
         type=AgentEventType.SESSION_CREATED,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         payload={},
     )

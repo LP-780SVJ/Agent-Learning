@@ -1,40 +1,273 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
+import subprocess
 import urllib.error
 from pathlib import Path
 
-from codeteam.cli import agent_eval_command
+import pytest
+
+from codeteam.agent.runtime import CodingAgentRuntime
+from codeteam.agent.runtime_models import (
+    CodingAgentRunRequest,
+    CodingAgentRunResult,
+    CompletionMode,
+    RuntimeStatus,
+)
+from codeteam.cli import agent_eval_command, run_command
 from codeteam.evaluation.agent_grader import AgentGrader
 from codeteam.evaluation.agent_models import (
     AgentEvalSplit,
     AgentEvalTask,
+    AgentEvalTaskResult,
     AgentTaskType,
+    EffectiveBudgetSource,
     EvalRunConfig,
+    EvalRunMode,
     PatchActorResult,
     PatchActorStatus,
 )
-from codeteam.evaluation.agent_runner import AgentEvalRunner, load_agent_eval_tasks
+from codeteam.evaluation.agent_runner import (
+    AgentEvalDatasetError,
+    AgentEvalRunner,
+    _effective_budget_source,
+    _runtime_to_actor_result,
+    _visible_verification_argv,
+    load_agent_eval_tasks,
+    summarize_agent_eval_results,
+)
 from codeteam.evaluation.patch_actor import (
     LLMPatchGenerator,
-    NullPatchGenerator,
-    PatchActor,
     extract_unified_diff,
     patch_from_structured_file_edits,
 )
+from codeteam.git.workspace import GitWorkspace
+from codeteam.sandbox.verification_preflight import (
+    VerificationEnvironmentMetadata,
+)
+from codeteam.schemas.messages import Message
 from codeteam.task.models import create_task_spec
 
 
-class StaticPatchGenerator:
-    last_input_tokens = 3
-    last_output_tokens = 4
-
-    def __init__(self, patch: str) -> None:
+class FakeRuntime:
+    def __init__(self, patch: str | None = None) -> None:
         self.patch = patch
+        self.requests: list[CodingAgentRunRequest] = []
 
-    def generate_patch(self, **kwargs) -> str:
-        return self.patch
+    def run(self, request) -> CodingAgentRunResult:
+        self.requests.append(request)
+        if self.patch is None:
+            return CodingAgentRunResult(
+                task_id=request.task_id,
+                status=RuntimeStatus.FAILED,
+                summary="no patch",
+                workspace_root=request.workspace_root,
+                failure_category="no_patch",
+                error="no patch",
+            )
+        applied = GitWorkspace(request.workspace_root).apply_patch(self.patch)
+        assert applied.applied
+        return CodingAgentRunResult(
+            task_id=request.task_id,
+            status=RuntimeStatus.COMPLETED,
+            summary="done",
+            workspace_root=request.workspace_root,
+            diff=self.patch,
+            changed_files=tuple(applied.affected_paths),
+        )
+
+
+class EnvironmentBlockedRuntime:
+    def run(self, request) -> CodingAgentRunResult:
+        return CodingAgentRunResult(
+            task_id=request.task_id,
+            status=RuntimeStatus.PAUSED,
+            summary="sandbox unavailable",
+            workspace_root=request.workspace_root,
+            failure_category="sandbox_unavailable",
+            error="bind source path does not exist",
+            sandbox_preflight_available=False,
+            sandbox_preflight_category="workspace_mount_unavailable",
+        )
+
+
+def test_verification_environment_failure_maps_to_environment_blocked() -> None:
+    runtime_result = CodingAgentRunResult(
+        task_id="T01",
+        status=RuntimeStatus.PAUSED,
+        summary="verification toolchain unavailable",
+        workspace_root=Path("/tmp/workspace"),
+        failure_category="verification_environment_failed",
+        error="No module named pytest",
+        sandbox_preflight_available=True,
+        verification_preflight_available=False,
+        verification_preflight_category="pytest_unavailable",
+        verification_environment=VerificationEnvironmentMetadata(
+            configured_image="codeteam-sandbox:latest",
+            python_version="Python 3.11.15",
+        ),
+    )
+
+    actor = _runtime_to_actor_result(
+        runtime_result,
+        EvalRunConfig(run_id="verification-blocked"),
+    )
+
+    assert actor.status is PatchActorStatus.ENVIRONMENT_BLOCKED
+    assert actor.failure_category == "verification_environment_failed"
+    assert actor.verification_preflight_available is False
+    assert actor.verification_preflight_category == "pytest_unavailable"
+
+
+def test_prepare_workspace_applies_verified_setup_patch(tmp_path: Path) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    setup_patch = tmp_path / "setup.diff"
+    setup_patch.write_text(
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 0\n",
+        encoding="utf-8",
+    )
+    task = AgentEvalTask(
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        repo_fixture=Path("fixture"),
+        base_commit="",
+        setup_patch=Path("setup.diff"),
+        setup_patch_sha256=hashlib.sha256(setup_patch.read_bytes()).hexdigest(),
+        prompt="restore VALUE",
+        oracle_review_status="test",
+    )
+    runner = AgentEvalRunner(
+        project_root=tmp_path,
+        runtime=FakeRuntime(),
+        keep_workspaces=True,
+        worktree_root=tmp_path / "worktrees",
+    )
+    destination = tmp_path / "workspace"
+
+    runner._prepare_workspace(task=task, destination=destination)
+
+    assert (destination / "app.py").read_text(encoding="utf-8") == "VALUE = 0\n"
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=destination,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert status.stdout == ""
+
+
+def test_eval_separates_execution_root_and_reports_environment_block(
+    tmp_path: Path,
+) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    worktree_base = tmp_path / "worktree-base"
+    output = tmp_path / "results"
+    task = AgentEvalTask(
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        repo_fixture=fixture,
+        base_commit="",
+        prompt="change value",
+        oracle_review_status="test",
+    )
+
+    results = AgentEvalRunner(
+        project_root=tmp_path,
+        runtime=EnvironmentBlockedRuntime(),
+        keep_workspaces=False,
+        worktree_root=worktree_base,
+    ).run_suite(
+        tasks=[task],
+        config=EvalRunConfig(run_id="blocked-run"),
+        output_dir=output,
+    )
+
+    assert results[0].actor_status is PatchActorStatus.ENVIRONMENT_BLOCKED
+    assert results[0].failure_category == "sandbox_unavailable"
+    assert not results[0].success
+    assert not (output / "workspaces").exists()
+    assert not (worktree_base / "evals" / "blocked-run").exists()
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["environment_blocked_count"] == 1
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["preflight_results"] == [
+        {
+            "task_id": "T01",
+            "available": False,
+            "category": "workspace_mount_unavailable",
+            "sandbox": {
+                "available": False,
+                "category": "workspace_mount_unavailable",
+            },
+            "verification_environment": {
+                "available": None,
+                "category": None,
+                "metadata": None,
+            },
+        }
+    ]
+    assert manifest["verification_contract"]["logical_capabilities"] == [
+        "python",
+        "pytest",
+    ]
+
+
+def test_prepare_workspace_fails_closed_for_missing_base_commit(
+    tmp_path: Path,
+) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    task = AgentEvalTask(
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        repo_fixture=Path("fixture"),
+        base_commit="not-a-real-commit",
+        prompt="change VALUE",
+        oracle_review_status="test",
+    )
+    runner = AgentEvalRunner(
+        project_root=tmp_path,
+        runtime=FakeRuntime(),
+        keep_workspaces=True,
+        worktree_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(AgentEvalDatasetError, match="Unable to archive base_commit"):
+        runner._prepare_workspace(task=task, destination=tmp_path / "workspace")
+
+
+def test_setup_patch_path_and_hash_must_be_provided_together() -> None:
+    with pytest.raises(ValueError, match="must be provided together"):
+        AgentEvalTask(
+            task_id="T01",
+            split=AgentEvalSplit.DEV,
+            type=AgentTaskType.BUG,
+            difficulty="L1",
+            repo_fixture=Path("fixture"),
+            base_commit="",
+            setup_patch=Path("setup.diff"),
+            prompt="change VALUE",
+            oracle_review_status="test",
+        )
 
 
 def test_extract_unified_diff_from_markdown_fence() -> None:
@@ -91,7 +324,9 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
                 "base_commit": "",
                 "prompt": "change VALUE to 2",
                 "acceptance_commands": ["{python} -m pytest {hidden_root}/T01 -q"],
-                "regression_commands": [],
+                "verification_commands": [
+                    "{python} -c 'import app; assert app.VALUE == 2'"
+                ],
                 "oracle_review_status": "test",
             }
         )
@@ -105,10 +340,12 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
 -VALUE = 1
 +VALUE = 2
 """
+    runtime = FakeRuntime(patch)
     runner = AgentEvalRunner(
-        actor=PatchActor(patch_generator=StaticPatchGenerator(patch)),
+        runtime=runtime,
         grader=AgentGrader(hidden_root=tmp_path / "hidden"),
         keep_workspaces=True,
+        worktree_root=tmp_path / "worktrees",
     )
 
     results = runner.run_suite(
@@ -122,11 +359,246 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
     assert results[0].pristine_acceptance_passed is False
     assert results[0].changed_files == ("app.py",)
     assert results[0].artifact_paths == (
-        "_artifacts/T01/attempt-01/extracted_patch.diff",
+        "_artifacts/T01/runtime_messages.json",
+        "_artifacts/T01/final.diff",
+        "_artifacts/T01/verification.json",
+        "_artifacts/T01/model_outputs.jsonl",
     )
     summary = json.loads((tmp_path / "out" / "summary.json").read_text())
     assert summary["success_count"] == 1
     assert summary["pristine_acceptance_passed_count"] == 0
+    assert summary["protocol_repair_attempt_count"] == 0
+    assert summary["protocol_failed_count"] == 0
+    manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert manifest["execution_root"] == str(
+        tmp_path / "worktrees" / "evals" / "test-run"
+    )
+    assert manifest["runtime_execution"] == "docker"
+    assert manifest["grader_execution"] == "trusted_host_subprocess"
+    assert manifest["max_protocol_repairs"] == 2
+    assert manifest["run_max_steps_cap"] == 20
+    assert manifest["configured_finalization_reserve_steps"] is None
+    assert manifest["tasks"] == [
+        {
+            "task_id": "T01",
+            "repo_fixture": str(fixture),
+            "base_commit": "",
+            "setup_patch": None,
+            "setup_patch_sha256": None,
+            "public_test_patch": None,
+            "public_test_patch_sha256": None,
+            "oracle_review_status": "test",
+            "task_declared_max_steps": 20,
+            "run_max_steps_cap": 20,
+            "effective_max_steps": 20,
+            "effective_budget_source": "task_and_run_equal",
+            "finalization_reserve_steps": 4,
+            "finalization_reserve_entered": False,
+            "finalization_reserve_entry_step": None,
+            "completion_mode": None,
+            "budget_boundary_completion_count": 0,
+            "failure_origin": None,
+            "declared_tool_calls": 0,
+            "processed_tool_calls": 0,
+            "rejected_tool_calls": 0,
+            "unprocessed_safe_tool_calls": 0,
+            "batch_premature_stop_count": 0,
+            "progress_guard_unprocessed_safe_tool_call_count": 0,
+        }
+    ]
+    runtime_request = runtime.requests[0]
+    assert runtime_request.max_steps == 20
+    assert runtime_request.effective_max_steps == 20
+    assert runtime_request.verification_commands == (
+        ("python", "-c", "import app; assert app.VALUE == 2"),
+    )
+    assert "hidden" not in runtime_request.task.lower()
+    assert all(
+        "hidden" not in part.lower()
+        for command in runtime_request.verification_commands
+        for part in command
+    )
+
+
+@pytest.mark.parametrize(
+    ("task_id", "declared"),
+    [("B02", 25), ("B05", 25), ("F04", 30), ("R02", 30), ("R03", 30)],
+)
+def test_declared_task_budget_is_capped_at_explicit_run_budget(
+    task_id: str,
+    declared: int,
+) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    tasks = load_agent_eval_tasks(
+        project_root / "evals/week4/agent_task_suite_v1.jsonl"
+    )
+    task = next(item for item in tasks if item.task_id == task_id)
+
+    assert task.budget.max_steps == declared
+    assert min(task.budget.max_steps, 20) == 20
+    assert _effective_budget_source(
+        task_declared=task.budget.max_steps,
+        run_cap=20,
+    ) is EffectiveBudgetSource.RUN_CAP
+
+
+def test_eval_config_preserves_explicit_cli_step_cap_and_reserve() -> None:
+    configs = agent_eval_command._build_run_configs(
+        mode="baseline",
+        provider_id="scripted",
+        model_id="scripted",
+        context_budget=4096,
+        max_steps=20,
+        finalization_reserve_steps=4,
+    )
+
+    assert len(configs) == 1
+    assert configs[0].max_steps == 20
+    assert configs[0].finalization_reserve_steps == 4
+
+
+def test_summary_separates_protocol_repair_and_exhaustion() -> None:
+    result = AgentEvalTaskResult(
+        run_id="protocol-run",
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        mode=EvalRunMode.BASELINE,
+        provider_id="openai-compatible",
+        model_id="model",
+        success=False,
+        actor_status=PatchActorStatus.FAILED,
+        acceptance_passed=False,
+        regression_passed=True,
+        within_budget=True,
+        security_passed=True,
+        duration_ms=10,
+        protocol_repair_attempts=2,
+        failure_category="invalid_final_output",
+        completion_ready=True,
+        post_ready_tool_calls=3,
+        verification_workspace_mutations=1,
+        failure_origin="empty_model_turn",
+        declared_tool_calls=4,
+        processed_tool_calls=3,
+        rejected_tool_calls=1,
+        unprocessed_safe_tool_calls=1,
+        mechanical_no_progress_failure_count=0,
+        batch_premature_stop_count=1,
+        progress_guard_unprocessed_safe_tool_call_count=1,
+        source_no_progress_failure_count=0,
+        repeated_action_failure_count=0,
+    )
+
+    summary = summarize_agent_eval_results(
+        [result],
+        run_id="protocol-run",
+        mode=EvalRunMode.BASELINE,
+    )
+
+    assert summary.protocol_repair_attempt_count == 2
+    assert summary.protocol_failed_count == 1
+    assert summary.actor_completed_count == 0
+    assert summary.within_budget_count == 1
+    assert summary.failure_category_counts == {"invalid_final_output": 1}
+    assert summary.completion_ready_count == 1
+    assert summary.completion_ready_but_actor_failed_count == 1
+    assert summary.post_ready_tool_call_count == 3
+    assert summary.verification_workspace_mutation_count == 1
+    assert summary.failure_origin_counts == {"empty_model_turn": 1}
+    assert summary.declared_tool_call_count == 4
+    assert summary.processed_tool_call_count == 3
+    assert summary.rejected_tool_call_count == 1
+    assert summary.unprocessed_safe_tool_call_count == 1
+    assert summary.batch_premature_stop_count == 1
+    assert summary.progress_guard_unprocessed_safe_tool_call_count == 1
+
+
+@pytest.mark.parametrize(
+    "failure_category",
+    ["max_steps", "no_source_progress", "repeated_action"],
+)
+def test_summary_counts_any_grader_correct_actor_failure(
+    failure_category: str,
+) -> None:
+    result = AgentEvalTaskResult(
+        run_id="false-negative-run",
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        mode=EvalRunMode.BASELINE,
+        provider_id="scripted",
+        model_id="scripted",
+        success=False,
+        actor_status=PatchActorStatus.FAILED,
+        acceptance_passed=True,
+        regression_passed=True,
+        task_verification_passed=True,
+        within_budget=True,
+        security_passed=True,
+        duration_ms=1,
+        failure_category=failure_category,
+    )
+
+    summary = summarize_agent_eval_results(
+        [result],
+        run_id="false-negative-run",
+        mode=EvalRunMode.BASELINE,
+    )
+
+    assert summary.grader_correct_but_actor_failed_count == 1
+    assert summary.grader_correct_actor_max_steps_count == (
+        1 if failure_category == "max_steps" else 0
+    )
+
+
+def test_runtime_completion_provenance_propagates_to_eval_actor() -> None:
+    runtime_result = CodingAgentRunResult(
+        task_id="T01",
+        status=RuntimeStatus.COMPLETED,
+        summary="settled",
+        workspace_root=Path("/tmp/workspace"),
+        completion_mode=CompletionMode.RUNTIME_BUDGET_BOUNDARY_SETTLEMENT,
+        budget_boundary_completion_count=1,
+        finalization_reserve_entered=True,
+        finalization_reserve_entry_step=17,
+        failure_category="no_progress",
+        failure_origin="cached_batch_stall",
+        declared_tool_calls=9,
+        processed_tool_calls=9,
+        rejected_tool_calls=0,
+        unprocessed_safe_tool_calls=0,
+        mechanical_no_progress_failure_count=1,
+        batch_premature_stop_count=0,
+        progress_guard_unprocessed_safe_tool_call_count=0,
+    )
+
+    actor = _runtime_to_actor_result(
+        runtime_result,
+        EvalRunConfig(run_id="provenance-run"),
+    )
+
+    assert actor.completion_mode is CompletionMode.RUNTIME_BUDGET_BOUNDARY_SETTLEMENT
+    assert actor.budget_boundary_completion_count == 1
+    assert actor.finalization_reserve_entered
+    assert actor.finalization_reserve_entry_step == 17
+    assert actor.failure_origin == "cached_batch_stall"
+    assert actor.declared_tool_calls == 9
+    assert actor.processed_tool_calls == 9
+    assert actor.mechanical_no_progress_failure_count == 1
+    assert actor.batch_premature_stop_count == 0
+
+
+def test_grader_treats_public_task_test_changes_as_safety_violation() -> None:
+    violations = AgentGrader._find_safety_violations(
+        ("src/app.py", "tests/task_verification/test_t01.py")
+    )
+
+    assert violations == [
+        "public task oracle changed: tests/task_verification/test_t01.py"
+    ]
 
 
 def test_null_patch_actor_cannot_pass_even_if_oracle_would_pass(
@@ -155,9 +627,10 @@ def test_null_patch_actor_cannot_pass_even_if_oracle_would_pass(
         oracle_review_status="test",
     )
     runner = AgentEvalRunner(
-        actor=PatchActor(patch_generator=NullPatchGenerator()),
+        runtime=FakeRuntime(),
         grader=AgentGrader(hidden_root=tmp_path / "hidden"),
         keep_workspaces=True,
+        worktree_root=tmp_path / "worktrees",
     )
 
     results = runner.run_suite(
@@ -212,9 +685,10 @@ def test_pristine_oracle_pass_blocks_completed_actor_success(
     )
     assert patch is not None
     runner = AgentEvalRunner(
-        actor=PatchActor(patch_generator=StaticPatchGenerator(patch)),
+        runtime=FakeRuntime(patch),
         grader=AgentGrader(hidden_root=tmp_path / "hidden"),
         keep_workspaces=True,
+        worktree_root=tmp_path / "worktrees",
     )
 
     results = runner.run_suite(
@@ -231,6 +705,29 @@ def test_pristine_oracle_pass_blocks_completed_actor_success(
 
 
 def test_grader_filters_runtime_artifacts_from_changed_files(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Eval Test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "eval@example.com"],
+        cwd=tmp_path,
+        check=True,
+    )
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "baseline"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    cache = tmp_path / "src" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "app.cpython-311.pyc").write_bytes(b"cache")
     task = AgentEvalTask(
         task_id="T01",
         split=AgentEvalSplit.DEV,
@@ -247,11 +744,7 @@ def test_grader_filters_runtime_artifacts_from_changed_files(tmp_path: Path) -> 
         planning_enabled=True,
         repair_enabled=True,
         compaction_mode="structured",
-        changed_files=(
-            "app.py",
-            "src/__pycache__/app.cpython-311.pyc",
-            ".pytest_cache/v/cache/nodeids",
-        ),
+        changed_files=("untrusted-actor-report.py",),
     )
 
     grade = AgentGrader(hidden_root=tmp_path / "hidden").grade(
@@ -263,6 +756,61 @@ def test_grader_filters_runtime_artifacts_from_changed_files(tmp_path: Path) -> 
 
     assert grade.changed_files == ("app.py",)
     assert grade.security_passed is True
+
+
+def test_grader_cannot_rescue_environment_blocked_runtime(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Eval Test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "eval@example.com"],
+        cwd=tmp_path,
+        check=True,
+    )
+    (tmp_path / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "baseline"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    task = AgentEvalTask(
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        repo_fixture=tmp_path,
+        base_commit="",
+        prompt="test",
+        acceptance_commands=(
+            "{python} -c 'import app; assert app.VALUE == 2'",
+        ),
+        oracle_review_status="test",
+    )
+    actor_result = PatchActorResult(
+        task_id="T01",
+        status=PatchActorStatus.ENVIRONMENT_BLOCKED,
+        planning_enabled=True,
+        repair_enabled=True,
+        compaction_mode="structured",
+        failure_category="sandbox_unavailable",
+        error="bind source path does not exist",
+    )
+
+    grade = AgentGrader(hidden_root=tmp_path / "hidden").grade(
+        task=task,
+        workspace_root=tmp_path,
+        actor_result=actor_result,
+        config=EvalRunConfig(run_id="blocked-run"),
+    )
+
+    assert grade.acceptance_passed
+    assert not grade.success
+    assert grade.failure_category == "sandbox_unavailable"
 
 
 def test_llm_patch_generator_records_raw_and_extracted_patch(tmp_path: Path) -> None:
@@ -328,6 +876,103 @@ def test_provider_request_retries_retryable_http_errors(monkeypatch) -> None:
     assert calls["count"] == 2
 
 
+def test_provider_response_preserves_token_usage(monkeypatch) -> None:
+    monkeypatch.setattr(
+        agent_eval_command.urllib.request,
+        "urlopen",
+        lambda request, timeout: _FakeResponse(
+            b'{"model":"provider-model","choices":[{"message":{"content":"{}"}}],'
+            b'"usage":{"prompt_tokens":12,"completion_tokens":7}}'
+        ),
+    )
+
+    response = agent_eval_command._chat_completion_model_response(
+        {
+            "CODETEAM_LLM_BASE_URL": "https://example.test",
+            "CODETEAM_LLM_API_KEY": "key",
+            "CODETEAM_LLM_MODEL": "model",
+        },
+        [],
+    )
+
+    assert response.model == "provider-model"
+    assert response.input_tokens == 12
+    assert response.output_tokens == 7
+
+
+def test_provider_auto_requests_json_object_mode_with_zero_temperature(
+    monkeypatch,
+) -> None:
+    payloads: list[dict] = []
+    agent_eval_command._JSON_MODE_CAPABILITY.clear()
+    agent_eval_command._PROVIDER_RUNTIME_STATE.clear()
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        payloads.append(json.loads(request.data))
+        return _FakeResponse(b'{"choices":[{"message":{"content":"{}"}}]}')
+
+    monkeypatch.setattr(agent_eval_command.urllib.request, "urlopen", fake_urlopen)
+    config = {
+        "CODETEAM_LLM_BASE_URL": "https://json-mode.test",
+        "CODETEAM_LLM_API_KEY": "secret-key",
+        "CODETEAM_LLM_MODEL": "model",
+    }
+
+    agent_eval_command._chat_completion_model_response(config, [])
+
+    assert payloads[0]["response_format"] == {"type": "json_object"}
+    assert payloads[0]["temperature"] == 0.0
+    manifest = agent_eval_command._provider_manifest(config)
+    assert manifest["response_mode_requested"] == "auto"
+    assert manifest["response_mode_actual"] == "json_object"
+    assert manifest["response_mode_fallback"] is False
+    assert manifest["temperature"] == 0.0
+    assert manifest["max_output_tokens"] == 4096
+    assert manifest["max_input_tokens"] == 27648
+    assert manifest["native_tools_actual"] is False
+    assert "secret-key" not in json.dumps(manifest)
+
+
+def test_provider_auto_falls_back_only_for_explicit_unsupported_json_mode(
+    monkeypatch,
+) -> None:
+    payloads: list[dict] = []
+    agent_eval_command._JSON_MODE_CAPABILITY.clear()
+    agent_eval_command._PROVIDER_RUNTIME_STATE.clear()
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        payload = json.loads(request.data)
+        payloads.append(payload)
+        if "response_format" in payload:
+            raise urllib.error.HTTPError(
+                url="https://fallback.test",
+                code=400,
+                msg="unsupported",
+                hdrs={},
+                fp=io.BytesIO(b"response_format json_object is not supported"),
+            )
+        return _FakeResponse(b'{"choices":[{"message":{"content":"{}"}}]}')
+
+    monkeypatch.setattr(agent_eval_command.urllib.request, "urlopen", fake_urlopen)
+    config = {
+        "CODETEAM_LLM_BASE_URL": "https://fallback.test",
+        "CODETEAM_LLM_API_KEY": "key",
+        "CODETEAM_LLM_MODEL": "model",
+        "CODETEAM_LLM_TEMPERATURE": "0.25",
+    }
+
+    agent_eval_command._chat_completion_model_response(config, [])
+    agent_eval_command._chat_completion_model_response(config, [])
+
+    assert ["response_format" in payload for payload in payloads] == [True, False, False]
+    assert all(payload["temperature"] == 0.25 for payload in payloads)
+    manifest = agent_eval_command._provider_manifest(config)
+    assert manifest["response_mode_actual"] == "text"
+    assert manifest["response_mode_fallback"] is True
+
+
 def test_provider_request_records_non_retryable_auth_error(monkeypatch) -> None:
     def fake_urlopen(request, timeout):
         raise urllib.error.HTTPError(
@@ -358,6 +1003,65 @@ def test_provider_request_records_non_retryable_auth_error(monkeypatch) -> None:
         assert "attempt 1: auth status=401" in str(error)
     else:
         raise AssertionError("expected ProviderRequestError")
+
+
+def test_provider_serializes_custom_tool_observation_as_user_message() -> None:
+    payload = agent_eval_command._provider_message(
+        Message(role="tool", content="tests passed", tool_call_id="call-7")
+    )
+
+    assert payload["role"] == "user"
+    assert "call-7" in (payload["content"] or "")
+    assert "tests passed" in (payload["content"] or "")
+
+
+def test_week4_development_suite_has_no_claimed_heldout_tasks() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    tasks = load_agent_eval_tasks(
+        project_root / "evals" / "week4" / "agent_task_suite_v1.jsonl"
+    )
+
+    assert len(tasks) == 11
+    assert {task.split for task in tasks} == {AgentEvalSplit.DEV}
+    assert all(task.verification_commands for task in tasks)
+    assert all(task.task_verification_commands for task in tasks)
+    assert all(task.public_test_patch for task in tasks)
+    assert all(task.public_test_patch_sha256 for task in tasks)
+
+
+def test_eval_exposes_workspace_relative_verification_commands() -> None:
+    task = AgentEvalTask(
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        repo_fixture=Path("fixture"),
+        base_commit="",
+        prompt="test",
+        verification_commands=(
+            (
+                "{python} -m pytest {workspace}/tests/auth "
+                "{project_root}/tests/inventory -q"
+            ),
+        ),
+        oracle_review_status="test",
+    )
+
+    assert _visible_verification_argv(task) == (
+        (
+            "python",
+            "-m",
+            "pytest",
+            "tests/auth",
+            "tests/inventory",
+            "-q",
+        ),
+    )
+
+
+def test_product_cli_and_evaluator_import_the_same_runtime() -> None:
+    assert run_command.CodingAgentRuntime is CodingAgentRuntime
+    assert agent_eval_command.CodingAgentRuntime is CodingAgentRuntime
 
 
 class _FakeResponse:

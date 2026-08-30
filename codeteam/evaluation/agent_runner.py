@@ -1,27 +1,41 @@
 """Task-level agent evaluation runner."""
+
 from __future__ import annotations
 
+import hashlib
 import json
+import shlex
 import shutil
 import subprocess
 import time
 import uuid
+from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import ValidationError
 
+from codeteam.agent.runtime_models import (
+    CodingAgentRunRequest,
+    CodingAgentRunResult,
+    CompactionMode,
+    RuntimeStatus,
+)
+from codeteam.agent.verification import normalize_verification_argv
 from codeteam.evaluation.agent_grader import AgentGrader
 from codeteam.evaluation.agent_models import (
     AgentEvalRunSummary,
     AgentEvalSplit,
     AgentEvalTask,
     AgentEvalTaskResult,
+    EffectiveBudgetSource,
     EvalRunConfig,
-    GradeResult,
     PatchActorResult,
     PatchActorStatus,
 )
-from codeteam.evaluation.patch_actor import PatchActor
+from codeteam.git.worktree import WorktreeManager
+from codeteam.git.worktree_paths import eval_worktree_root, resolve_worktree_root
 
 IGNORED_NAMES = {
     ".git",
@@ -32,6 +46,10 @@ IGNORED_NAMES = {
     "__pycache__",
     "eval_hidden",
 }
+
+
+class CodingRuntime(Protocol):
+    def run(self, request: CodingAgentRunRequest) -> CodingAgentRunResult: ...
 
 
 class AgentEvalDatasetError(ValueError):
@@ -45,14 +63,18 @@ class AgentEvalRunner:
         self,
         *,
         project_root: Path | None = None,
-        actor: PatchActor,
+        runtime: CodingRuntime,
         grader: AgentGrader | None = None,
         keep_workspaces: bool = False,
+        worktree_root: Path | None = None,
+        provider_metadata: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         self.project_root = (project_root or _default_project_root()).resolve()
-        self.actor = actor
+        self.runtime = runtime
         self.grader = grader or AgentGrader(project_root=self.project_root)
         self.keep_workspaces = keep_workspaces
+        self.worktree_root = resolve_worktree_root(worktree_root)
+        self.provider_metadata = provider_metadata
 
     def run_suite(
         self,
@@ -62,12 +84,21 @@ class AgentEvalRunner:
         output_dir: Path,
     ) -> list[AgentEvalTaskResult]:
         output_dir.mkdir(parents=True, exist_ok=True)
-        workspace_root = output_dir / "workspaces" / config.run_id
+        workspace_root = eval_worktree_root(
+            config.run_id,
+            worktree_root=self.worktree_root,
+        )
         workspace_root.mkdir(parents=True, exist_ok=True)
 
         results: list[AgentEvalTaskResult] = []
         for task in tasks:
-            task_workspace = workspace_root / _safe_name(task.task_id)
+            effective_max_steps = min(task.budget.max_steps, config.max_steps)
+            effective_budget_source = _effective_budget_source(
+                task_declared=task.budget.max_steps,
+                run_cap=config.max_steps,
+            )
+            task_repo = workspace_root / "_repos" / _safe_name(task.task_id)
+            task_workspace = workspace_root / "tasks" / _safe_name(task.task_id)
             pristine_workspace = workspace_root / "_pristine" / _safe_name(task.task_id)
             self._prepare_workspace(task=task, destination=pristine_workspace)
             pristine_acceptance_results = self.grader.check_pristine_acceptance(
@@ -75,51 +106,77 @@ class AgentEvalRunner:
                 workspace_root=pristine_workspace,
                 config=config,
             )
+            pristine_task_verification_results = (
+                self.grader.check_pristine_task_verification(
+                    task=task,
+                    workspace_root=pristine_workspace,
+                    config=config,
+                )
+            )
             if not self.keep_workspaces:
                 shutil.rmtree(pristine_workspace, ignore_errors=True)
 
-            self._prepare_workspace(task=task, destination=task_workspace)
+            self._prepare_workspace(task=task, destination=task_repo)
+            worktree = WorktreeManager(
+                task_repo,
+                worktree_root=task_workspace.parent,
+            ).create(_safe_name(task.task_id), base_ref="HEAD")
             started = time.monotonic()
-            actor_result = self.actor.run(
-                task=task,
-                workspace_root=task_workspace,
-                config=config,
+            runtime_result = self.runtime.run(
+                CodingAgentRunRequest(
+                    task_id=task.task_id,
+                    task=task.prompt,
+                    workspace_root=worktree.path,
+                    provider_id=config.provider_id,
+                    model_id=config.model_id,
+                    context_budget=config.context_budget,
+                    max_output_tokens=config.max_output_tokens,
+                    model_context_window=config.model_context_window,
+                    safety_headroom_tokens=config.safety_headroom_tokens,
+                    native_tools=config.native_tools,
+                    reasoning_enabled=config.reasoning_enabled,
+                    max_steps=effective_max_steps,
+                    effective_max_steps=effective_max_steps,
+                    finalization_reserve_steps=config.finalization_reserve_steps,
+                    max_tool_calls=max(
+                        1, effective_max_steps * 3
+                    ),
+                    max_repairs=min(task.budget.max_repairs, config.max_repairs),
+                    max_protocol_repairs=config.max_protocol_repairs,
+                    compaction_mode=CompactionMode(config.compaction_mode),
+                    planning_enabled=config.planning_enabled,
+                    verification_commands=_verification_argv(
+                        task.verification_commands
+                    ),
+                    task_verification_commands=_verification_argv(
+                        task.task_verification_commands
+                    ),
+                    checkpoint_state_root=(
+                        task_repo.parent / "checkpoints" / _safe_name(task.task_id)
+                    ),
+                )
+            )
+            actor_result = _runtime_to_actor_result(runtime_result, config)
+            actor_result = actor_result.model_copy(
+                update={
+                    "task_declared_max_steps": task.budget.max_steps,
+                    "run_max_steps_cap": config.max_steps,
+                    "effective_max_steps": effective_max_steps,
+                    "effective_budget_source": effective_budget_source,
+                    "artifact_paths": _save_runtime_artifacts(
+                        output_dir=output_dir,
+                        result=runtime_result,
+                    )
+                }
             )
             grade = self.grader.grade(
                 task=task,
-                workspace_root=task_workspace,
+                workspace_root=worktree.path,
                 actor_result=actor_result,
                 config=config,
                 pristine_acceptance_results=pristine_acceptance_results,
+                pristine_task_verification_results=(pristine_task_verification_results),
             )
-            repair_attempts = 0
-            while (
-                config.repair_enabled
-                and not grade.success
-                and grade.failure_category != "oracle_not_discriminative"
-                and actor_result.status in {
-                    PatchActorStatus.COMPLETED,
-                    PatchActorStatus.PATCH_FAILED,
-                }
-                and repair_attempts < min(task.budget.max_repairs, config.max_repairs)
-            ):
-                repair_attempts += 1
-                repair_result = self.actor.run(
-                    task=task,
-                    workspace_root=task_workspace,
-                    config=config,
-                    failure_summary=_summarize_grade_failure(grade),
-                    previous_patch_attempts=actor_result.patch_attempts,
-                    previous_repair_attempts=repair_attempts,
-                )
-                actor_result = _merge_actor_results(actor_result, repair_result)
-                grade = self.grader.grade(
-                    task=task,
-                    workspace_root=task_workspace,
-                    actor_result=actor_result,
-                    config=config,
-                    pristine_acceptance_results=pristine_acceptance_results,
-                )
             duration_ms = int((time.monotonic() - started) * 1000)
             results.append(
                 AgentEvalTaskResult(
@@ -135,23 +192,129 @@ class AgentEvalRunner:
                     actor_status=actor_result.status,
                     acceptance_passed=grade.acceptance_passed,
                     regression_passed=grade.regression_passed,
+                    task_verification_passed=grade.task_verification_passed,
                     within_budget=grade.within_budget,
                     security_passed=grade.security_passed,
                     pristine_acceptance_passed=grade.pristine_acceptance_passed,
+                    pristine_task_verification_passed=(
+                        grade.pristine_task_verification_passed
+                    ),
                     acceptance_results=grade.acceptance_results,
                     regression_results=grade.regression_results,
+                    task_verification_results=grade.task_verification_results,
                     pristine_acceptance_results=grade.pristine_acceptance_results,
+                    pristine_task_verification_results=(
+                        grade.pristine_task_verification_results
+                    ),
                     duration_ms=duration_ms,
+                    steps=actor_result.steps,
+                    model_duration_ms=actor_result.model_duration_ms,
+                    tool_duration_ms=actor_result.tool_duration_ms,
+                    repair_duration_ms=actor_result.repair_duration_ms,
                     changed_files=grade.changed_files,
                     patch_attempts=actor_result.patch_attempts,
                     repair_attempts=actor_result.repair_attempts,
+                    protocol_repair_attempts=(actor_result.protocol_repair_attempts),
                     tool_calls=actor_result.tool_calls,
                     input_tokens=actor_result.input_tokens,
                     output_tokens=actor_result.output_tokens,
                     cost_usd=actor_result.cost_usd,
                     artifact_paths=actor_result.artifact_paths,
                     failure_category=grade.failure_category,
+                    failure_origin=actor_result.failure_origin,
+                    declared_tool_calls=actor_result.declared_tool_calls,
+                    processed_tool_calls=actor_result.processed_tool_calls,
+                    rejected_tool_calls=actor_result.rejected_tool_calls,
+                    unprocessed_safe_tool_calls=(
+                        actor_result.unprocessed_safe_tool_calls
+                    ),
+                    mechanical_no_progress_failure_count=(
+                        actor_result.mechanical_no_progress_failure_count
+                    ),
+                    batch_premature_stop_count=(
+                        actor_result.batch_premature_stop_count
+                    ),
+                    progress_guard_unprocessed_safe_tool_call_count=(
+                        actor_result.progress_guard_unprocessed_safe_tool_call_count
+                    ),
+                    source_no_progress_failure_count=(
+                        actor_result.source_no_progress_failure_count
+                    ),
+                    repeated_action_failure_count=(
+                        actor_result.repeated_action_failure_count
+                    ),
                     error=grade.error,
+                    sandbox_preflight_available=(
+                        actor_result.sandbox_preflight_available
+                    ),
+                    sandbox_preflight_category=(
+                        actor_result.sandbox_preflight_category
+                    ),
+                    verification_preflight_available=(
+                        actor_result.verification_preflight_available
+                    ),
+                    verification_preflight_category=(
+                        actor_result.verification_preflight_category
+                    ),
+                    verification_environment=actor_result.verification_environment,
+                    completion_ready=actor_result.completion_ready,
+                    post_ready_tool_calls=actor_result.post_ready_tool_calls,
+                    completion_mode=actor_result.completion_mode,
+                    task_declared_max_steps=actor_result.task_declared_max_steps,
+                    run_max_steps_cap=actor_result.run_max_steps_cap,
+                    effective_max_steps=actor_result.effective_max_steps,
+                    effective_budget_source=actor_result.effective_budget_source,
+                    finalization_reserve_steps=(
+                        actor_result.finalization_reserve_steps
+                    ),
+                    finalization_reserve_entered=(
+                        actor_result.finalization_reserve_entered
+                    ),
+                    finalization_reserve_entry_step=(
+                        actor_result.finalization_reserve_entry_step
+                    ),
+                    budget_boundary_completion_count=(
+                        actor_result.budget_boundary_completion_count
+                    ),
+                    post_ready_reopen_patch_count=(
+                        actor_result.post_ready_reopen_patch_count
+                    ),
+                    post_ready_skipped_optional_tool_count=(
+                        actor_result.post_ready_skipped_optional_tool_count
+                    ),
+                    post_ready_nonfinalization_tool_count=(
+                        actor_result.post_ready_nonfinalization_tool_count
+                    ),
+                    verification_workspace_mutations=(
+                        actor_result.verification_workspace_mutations
+                    ),
+                    first_patch_step=actor_result.first_patch_step,
+                    pre_edit_step_count=actor_result.pre_edit_step_count,
+                    pre_edit_tool_call_count=actor_result.pre_edit_tool_call_count,
+                    progress_advisory_count=actor_result.progress_advisory_count,
+                    progress_advisory_level_counts=(
+                        actor_result.progress_advisory_level_counts
+                    ),
+                    no_source_progress_pause_count=(
+                        actor_result.no_source_progress_pause_count
+                    ),
+                    max_no_source_progress_streak=(
+                        actor_result.max_no_source_progress_streak
+                    ),
+                    environment_inspection_count=(
+                        actor_result.environment_inspection_count
+                    ),
+                    initial_context_cache_hit_count=(
+                        actor_result.initial_context_cache_hit_count
+                    ),
+                    initial_context_reference_hit_count=(
+                        actor_result.initial_context_reference_hit_count
+                    ),
+                    source_progress_count=actor_result.source_progress_count,
+                    diagnostic_progress_count=actor_result.diagnostic_progress_count,
+                    first_environment_inspection_step=(
+                        actor_result.first_environment_inspection_step
+                    ),
                 )
             )
 
@@ -177,9 +340,148 @@ class AgentEvalRunner:
                     "repair_enabled": config.repair_enabled,
                     "compaction_mode": config.compaction_mode,
                     "context_budget": config.context_budget,
+                    "max_protocol_repairs": config.max_protocol_repairs,
+                    "run_max_steps_cap": config.max_steps,
+                    "configured_finalization_reserve_steps": (
+                        config.finalization_reserve_steps
+                    ),
                     "task_count": len(tasks),
+                    "tasks": [
+                        {
+                            "task_id": task.task_id,
+                            "repo_fixture": str(task.repo_fixture),
+                            "base_commit": task.base_commit,
+                            "setup_patch": (
+                                str(task.setup_patch)
+                                if task.setup_patch is not None
+                                else None
+                            ),
+                            "setup_patch_sha256": task.setup_patch_sha256,
+                            "public_test_patch": (
+                                str(task.public_test_patch)
+                                if task.public_test_patch is not None
+                                else None
+                            ),
+                            "public_test_patch_sha256": (task.public_test_patch_sha256),
+                            "oracle_review_status": task.oracle_review_status,
+                            "task_declared_max_steps": task.budget.max_steps,
+                            "run_max_steps_cap": config.max_steps,
+                            "effective_max_steps": min(
+                                task.budget.max_steps, config.max_steps
+                            ),
+                            "effective_budget_source": _effective_budget_source(
+                                task_declared=task.budget.max_steps,
+                                run_cap=config.max_steps,
+                            ).value,
+                            "finalization_reserve_steps": next(
+                                result.finalization_reserve_steps
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "finalization_reserve_entered": next(
+                                result.finalization_reserve_entered
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "finalization_reserve_entry_step": next(
+                                result.finalization_reserve_entry_step
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "completion_mode": next(
+                                (
+                                    result.completion_mode.value
+                                    if result.completion_mode is not None
+                                    else None
+                                )
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "budget_boundary_completion_count": next(
+                                result.budget_boundary_completion_count
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "failure_origin": next(
+                                result.failure_origin
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "declared_tool_calls": next(
+                                result.declared_tool_calls
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "processed_tool_calls": next(
+                                result.processed_tool_calls
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "rejected_tool_calls": next(
+                                result.rejected_tool_calls
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "unprocessed_safe_tool_calls": next(
+                                result.unprocessed_safe_tool_calls
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "batch_premature_stop_count": next(
+                                result.batch_premature_stop_count
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "progress_guard_unprocessed_safe_tool_call_count": next(
+                                result.progress_guard_unprocessed_safe_tool_call_count
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                        }
+                        for task in tasks
+                    ],
                     "keep_workspaces": self.keep_workspaces,
+                    "execution_root": str(workspace_root),
+                    "runtime_execution": "docker",
+                    "grader_execution": "trusted_host_subprocess",
+                    "preflight_results": [
+                        {
+                            "task_id": result.task_id,
+                            "available": result.sandbox_preflight_available,
+                            "category": result.sandbox_preflight_category,
+                            "sandbox": {
+                                "available": result.sandbox_preflight_available,
+                                "category": result.sandbox_preflight_category,
+                            },
+                            "verification_environment": {
+                                "available": result.verification_preflight_available,
+                                "category": result.verification_preflight_category,
+                                "metadata": (
+                                    result.verification_environment.model_dump(
+                                        mode="json"
+                                    )
+                                    if result.verification_environment is not None
+                                    else None
+                                ),
+                            },
+                        }
+                        for result in results
+                    ],
+                    "verification_contract": {
+                        "logical_capabilities": ["python", "pytest"],
+                        "runtime_execution": "docker",
+                        "runtime_python": "python",
+                        "grader_execution": "trusted_host_subprocess",
+                        "grader_environment": (
+                            self.grader.verification_environment_metadata()
+                        ),
+                    },
                     "pristine_oracle_check": True,
+                    "provider_runtime": (
+                        self.provider_metadata()
+                        if self.provider_metadata is not None
+                        else None
+                    ),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -208,12 +510,111 @@ class AgentEvalRunner:
             destination=destination,
         )
         if not archived:
+            if task.base_commit:
+                raise AgentEvalDatasetError(
+                    f"Unable to archive base_commit {task.base_commit!r} "
+                    f"for fixture {task.repo_fixture}."
+                )
             shutil.copytree(
                 source,
                 destination,
                 ignore=shutil.ignore_patterns(*IGNORED_NAMES),
             )
         _init_git_repo(destination)
+        if task.setup_patch is not None:
+            self._apply_setup_patch(task=task, destination=destination)
+        if task.public_test_patch is not None:
+            self._apply_public_test_patch(task=task, destination=destination)
+
+    def _apply_setup_patch(
+        self,
+        *,
+        task: AgentEvalTask,
+        destination: Path,
+    ) -> None:
+        patch_path = task.setup_patch
+        if patch_path is None:
+            return
+        resolved = (
+            patch_path.resolve()
+            if patch_path.is_absolute()
+            else (self.project_root / patch_path).resolve()
+        )
+        try:
+            resolved.relative_to(self.project_root)
+        except ValueError as error:
+            raise AgentEvalDatasetError(
+                f"Setup patch must be inside the project: {patch_path}"
+            ) from error
+        if not resolved.is_file():
+            raise AgentEvalDatasetError(f"Setup patch does not exist: {patch_path}")
+
+        patch_bytes = resolved.read_bytes()
+        actual_sha256 = hashlib.sha256(patch_bytes).hexdigest()
+        if task.setup_patch_sha256 != actual_sha256:
+            raise AgentEvalDatasetError(
+                f"Setup patch hash mismatch for {task.task_id}: "
+                f"expected {task.setup_patch_sha256!r}, got {actual_sha256!r}"
+            )
+
+        apply_result = subprocess.run(  # noqa: UP022
+            ["git", "apply", "--check", "-"],
+            cwd=destination,
+            input=patch_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            timeout=30,
+            check=False,
+        )
+        if apply_result.returncode != 0:
+            stderr = apply_result.stderr.decode("utf-8", errors="replace")
+            raise AgentEvalDatasetError(
+                f"Setup patch check failed for {task.task_id}: {stderr}"
+            )
+        apply_result = subprocess.run(  # noqa: UP022
+            ["git", "apply", "-"],
+            cwd=destination,
+            input=patch_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            timeout=30,
+            check=False,
+        )
+        if apply_result.returncode != 0:
+            stderr = apply_result.stderr.decode("utf-8", errors="replace")
+            raise AgentEvalDatasetError(
+                f"Setup patch apply failed for {task.task_id}: {stderr}"
+            )
+        _commit_workspace_state(destination, message=f"seed {task.task_id}")
+
+    def _apply_public_test_patch(
+        self,
+        *,
+        task: AgentEvalTask,
+        destination: Path,
+    ) -> None:
+        patch_path = task.public_test_patch
+        if patch_path is None:
+            return
+        resolved = _resolve_pinned_patch(
+            project_root=self.project_root,
+            patch_path=patch_path,
+            expected_sha256=task.public_test_patch_sha256,
+            task_id=task.task_id,
+            label="Public test",
+        )
+        _apply_patch_bytes(
+            destination=destination,
+            patch_bytes=resolved.read_bytes(),
+            task_id=task.task_id,
+            label="Public test",
+        )
+        _commit_workspace_state(
+            destination,
+            message=f"public verification {task.task_id}",
+        )
 
     def _archive_fixture(
         self,
@@ -271,7 +672,9 @@ class AgentEvalRunner:
 def load_agent_eval_tasks(path: Path) -> list[AgentEvalTask]:
     tasks: list[AgentEvalTask] = []
     errors: list[str] = []
-    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_no, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
         stripped = line.strip()
         if not stripped:
             continue
@@ -321,6 +724,22 @@ def summarize_agent_eval_results(
     run_id: str,
     mode,
 ) -> AgentEvalRunSummary:
+    failure_category_counts: dict[str, int] = {}
+    for result in results:
+        if result.failure_category is not None:
+            failure_category_counts[result.failure_category] = (
+                failure_category_counts.get(result.failure_category, 0) + 1
+            )
+    grader_correct_actor_failed = [
+        result
+        for result in results
+        if result.actor_status is not PatchActorStatus.COMPLETED
+        and result.acceptance_passed
+        and result.regression_passed
+        and result.task_verification_passed
+        and result.security_passed
+        and result.within_budget
+    ]
     return AgentEvalRunSummary(
         run_id=run_id,
         mode=mode,
@@ -330,12 +749,167 @@ def summarize_agent_eval_results(
             result.actor_status == PatchActorStatus.PROVIDER_BLOCKED
             for result in results
         ),
+        environment_blocked_count=sum(
+            result.actor_status == PatchActorStatus.ENVIRONMENT_BLOCKED
+            for result in results
+        ),
+        protocol_repair_attempt_count=sum(
+            result.protocol_repair_attempts for result in results
+        ),
+        protocol_failed_count=sum(
+            result.failure_category == "invalid_final_output" for result in results
+        ),
         acceptance_passed_count=sum(result.acceptance_passed for result in results),
         regression_passed_count=sum(result.regression_passed for result in results),
+        task_verification_passed_count=sum(
+            result.task_verification_passed for result in results
+        ),
         security_passed_count=sum(result.security_passed for result in results),
         pristine_acceptance_passed_count=sum(
             result.pristine_acceptance_passed for result in results
         ),
+        pristine_task_verification_passed_count=sum(
+            result.pristine_task_verification_passed for result in results
+        ),
+        actor_completed_count=sum(
+            result.actor_status is PatchActorStatus.COMPLETED for result in results
+        ),
+        within_budget_count=sum(result.within_budget for result in results),
+        failure_category_counts=failure_category_counts,
+        failure_origin_counts=dict(
+            Counter(
+                result.failure_origin
+                for result in results
+                if result.failure_origin is not None
+            )
+        ),
+        declared_tool_call_count=sum(
+            result.declared_tool_calls for result in results
+        ),
+        processed_tool_call_count=sum(
+            result.processed_tool_calls for result in results
+        ),
+        rejected_tool_call_count=sum(
+            result.rejected_tool_calls for result in results
+        ),
+        unprocessed_safe_tool_call_count=sum(
+            result.unprocessed_safe_tool_calls for result in results
+        ),
+        mechanical_no_progress_failure_count=sum(
+            result.mechanical_no_progress_failure_count for result in results
+        ),
+        batch_premature_stop_count=sum(
+            result.batch_premature_stop_count for result in results
+        ),
+        progress_guard_unprocessed_safe_tool_call_count=sum(
+            result.progress_guard_unprocessed_safe_tool_call_count
+            for result in results
+        ),
+        source_no_progress_failure_count=sum(
+            result.source_no_progress_failure_count for result in results
+        ),
+        repeated_action_failure_count=sum(
+            result.repeated_action_failure_count for result in results
+        ),
+        completion_ready_count=sum(result.completion_ready for result in results),
+        completion_ready_but_actor_failed_count=sum(
+            result.completion_ready
+            and result.actor_status is not PatchActorStatus.COMPLETED
+            for result in results
+        ),
+        post_ready_tool_call_count=sum(
+            result.post_ready_tool_calls for result in results
+        ),
+        completion_mode_counts=dict(
+            Counter(
+                result.completion_mode.value
+                for result in results
+                if result.completion_mode is not None
+            )
+        ),
+        grader_correct_but_actor_failed_count=len(grader_correct_actor_failed),
+        grader_correct_actor_max_steps_count=sum(
+            result.failure_category == "max_steps"
+            for result in grader_correct_actor_failed
+        ),
+        budget_boundary_completion_count=sum(
+            result.budget_boundary_completion_count for result in results
+        ),
+        finalization_reserve_entry_count=sum(
+            result.finalization_reserve_entered for result in results
+        ),
+        finalization_reserve_success_count=sum(
+            result.finalization_reserve_entered
+            and result.actor_status is PatchActorStatus.COMPLETED
+            for result in results
+        ),
+        post_ready_reopen_patch_count=sum(
+            result.post_ready_reopen_patch_count for result in results
+        ),
+        post_ready_skipped_optional_tool_count=sum(
+            result.post_ready_skipped_optional_tool_count for result in results
+        ),
+        post_ready_nonfinalization_tool_count=sum(
+            result.post_ready_nonfinalization_tool_count for result in results
+        ),
+        effective_max_steps_counts={
+            str(value): count
+            for value, count in Counter(
+                result.effective_max_steps for result in results
+            ).items()
+        },
+        effective_budget_source_counts=dict(
+            Counter(result.effective_budget_source.value for result in results)
+        ),
+        verification_workspace_mutation_count=sum(
+            result.verification_workspace_mutations for result in results
+        ),
+        first_patch_step_count=sum(
+            result.first_patch_step is not None for result in results
+        ),
+        first_patch_step_by_task={
+            result.task_id: result.first_patch_step for result in results
+        },
+        pre_edit_step_count=sum(result.pre_edit_step_count for result in results),
+        pre_edit_tool_call_count=sum(
+            result.pre_edit_tool_call_count for result in results
+        ),
+        progress_advisory_count=sum(
+            result.progress_advisory_count for result in results
+        ),
+        progress_advisory_level_counts={
+            level: sum(
+                result.progress_advisory_level_counts.get(level, 0)
+                for result in results
+            )
+            for level in ("1", "2")
+        },
+        no_source_progress_pause_count=sum(
+            result.no_source_progress_pause_count for result in results
+        ),
+        max_no_source_progress_streak=max(
+            (result.max_no_source_progress_streak for result in results), default=0
+        ),
+        environment_inspection_count=sum(
+            result.environment_inspection_count for result in results
+        ),
+        initial_context_cache_hit_count=sum(
+            result.initial_context_cache_hit_count for result in results
+        ),
+        initial_context_reference_hit_count=sum(
+            result.initial_context_reference_hit_count for result in results
+        ),
+        source_progress_count=sum(result.source_progress_count for result in results),
+        diagnostic_progress_count=sum(
+            result.diagnostic_progress_count for result in results
+        ),
+        first_environment_inspection_step_count=sum(
+            result.first_environment_inspection_step is not None for result in results
+        ),
+        first_environment_inspection_step_by_task={
+            result.task_id: result.first_environment_inspection_step
+            for result in results
+        },
     )
 
 
@@ -343,47 +917,234 @@ def make_run_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
-def _summarize_grade_failure(grade: GradeResult) -> str:
-    lines: list[str] = []
-    if grade.failure_category:
-        lines.append(f"failure_category: {grade.failure_category}")
-    if grade.error:
-        lines.append("actor_error:")
-        lines.append(grade.error[-2000:])
-    for result in (*grade.acceptance_results, *grade.regression_results):
-        if result.passed:
-            continue
-        lines.append(f"command: {result.command}")
-        lines.append(f"exit_code: {result.exit_code}")
-        if result.stdout:
-            lines.append("stdout:")
-            lines.append(result.stdout[-2000:])
-        if result.stderr:
-            lines.append("stderr:")
-            lines.append(result.stderr[-2000:])
-    return "\n".join(lines) or "grader failed without command output"
+def _effective_budget_source(
+    *, task_declared: int, run_cap: int
+) -> EffectiveBudgetSource:
+    if task_declared == run_cap:
+        return EffectiveBudgetSource.TASK_AND_RUN_EQUAL
+    if run_cap < task_declared:
+        return EffectiveBudgetSource.RUN_CAP
+    return EffectiveBudgetSource.TASK_DECLARED
 
 
-def _merge_actor_results(
-    previous: PatchActorResult,
-    current: PatchActorResult,
+def _verification_argv(
+    source_commands: tuple[str, ...],
+) -> tuple[tuple[str, ...], ...]:
+    commands: list[tuple[str, ...]] = []
+    for command in source_commands:
+        formatted = command.format(
+            python="python",
+            workspace=".",
+            project_root=".",
+            hidden_root="<hidden-not-visible>",
+        )
+        commands.append(normalize_verification_argv(tuple(shlex.split(formatted))))
+    return tuple(commands)
+
+
+def _visible_verification_argv(
+    task: AgentEvalTask,
+) -> tuple[tuple[str, ...], ...]:
+    """Backward-compatible adapter for callers using the Week4 name."""
+    return _verification_argv(task.verification_commands)
+
+
+def _resolve_pinned_patch(
+    *,
+    project_root: Path,
+    patch_path: Path,
+    expected_sha256: str | None,
+    task_id: str,
+    label: str,
+) -> Path:
+    resolved = (
+        patch_path.resolve()
+        if patch_path.is_absolute()
+        else (project_root / patch_path).resolve()
+    )
+    try:
+        resolved.relative_to(project_root)
+    except ValueError as error:
+        raise AgentEvalDatasetError(
+            f"{label} patch must be inside the project: {patch_path}"
+        ) from error
+    if not resolved.is_file():
+        raise AgentEvalDatasetError(f"{label} patch does not exist: {patch_path}")
+    actual_sha256 = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    if expected_sha256 != actual_sha256:
+        raise AgentEvalDatasetError(
+            f"{label} patch hash mismatch for {task_id}: "
+            f"expected {expected_sha256!r}, got {actual_sha256!r}"
+        )
+    return resolved
+
+
+def _apply_patch_bytes(
+    *,
+    destination: Path,
+    patch_bytes: bytes,
+    task_id: str,
+    label: str,
+) -> None:
+    for arguments in (["git", "apply", "--check", "-"], ["git", "apply", "-"]):
+        result = subprocess.run(  # noqa: UP022
+            arguments,
+            cwd=destination,
+            input=patch_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            raise AgentEvalDatasetError(
+                f"{label} patch apply failed for {task_id}: {stderr}"
+            )
+
+
+def _runtime_to_actor_result(
+    result: CodingAgentRunResult,
+    config: EvalRunConfig,
 ) -> PatchActorResult:
-    return current.model_copy(
-        update={
-            "patch_attempts": max(current.patch_attempts, previous.patch_attempts),
-            "repair_attempts": max(current.repair_attempts, previous.repair_attempts),
-            "tool_calls": previous.tool_calls + current.tool_calls,
-            "input_tokens": previous.input_tokens + current.input_tokens,
-            "output_tokens": previous.output_tokens + current.output_tokens,
-            "cost_usd": previous.cost_usd + current.cost_usd,
-            "changed_files": tuple(
-                dict.fromkeys((*previous.changed_files, *current.changed_files))
-            ),
-            "artifact_paths": tuple(
-                dict.fromkeys((*previous.artifact_paths, *current.artifact_paths))
-            ),
-            "events": (*previous.events, *current.events),
-        },
+    if result.status is RuntimeStatus.COMPLETED:
+        status = PatchActorStatus.COMPLETED
+    elif result.failure_category == "provider_blocked":
+        status = PatchActorStatus.PROVIDER_BLOCKED
+    elif result.failure_category == "no_patch":
+        status = PatchActorStatus.NO_PATCH
+    elif result.failure_category in {
+        "sandbox_unavailable",
+        "verification_environment_failed",
+    }:
+        status = PatchActorStatus.ENVIRONMENT_BLOCKED
+    elif result.failure_category in {"patch_failed", "security_failure"}:
+        status = PatchActorStatus.PATCH_FAILED
+    else:
+        status = PatchActorStatus.FAILED
+    return PatchActorResult(
+        task_id=result.task_id,
+        status=status,
+        planning_enabled=config.planning_enabled,
+        repair_enabled=config.repair_enabled,
+        compaction_mode=config.compaction_mode,
+        patch_attempts=result.patch_attempts,
+        repair_attempts=result.repair_attempts,
+        protocol_repair_attempts=result.protocol_repairs_used,
+        tool_calls=result.tool_calls_used,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        cost_usd=result.cost_usd,
+        duration_ms=result.duration_ms,
+        steps=result.steps_used,
+        model_duration_ms=result.model_duration_ms,
+        tool_duration_ms=result.tool_duration_ms,
+        repair_duration_ms=result.repair_duration_ms,
+        changed_files=result.changed_files,
+        sandbox_preflight_available=result.sandbox_preflight_available,
+        sandbox_preflight_category=result.sandbox_preflight_category,
+        verification_preflight_available=result.verification_preflight_available,
+        verification_preflight_category=result.verification_preflight_category,
+        verification_environment=result.verification_environment,
+        applied_patch=bool(result.changed_files),
+        error=result.error,
+        failure_category=result.failure_category,
+        failure_origin=result.failure_origin,
+        declared_tool_calls=result.declared_tool_calls,
+        processed_tool_calls=result.processed_tool_calls,
+        rejected_tool_calls=result.rejected_tool_calls,
+        unprocessed_safe_tool_calls=result.unprocessed_safe_tool_calls,
+        mechanical_no_progress_failure_count=(
+            result.mechanical_no_progress_failure_count
+        ),
+        batch_premature_stop_count=result.batch_premature_stop_count,
+        progress_guard_unprocessed_safe_tool_call_count=(
+            result.progress_guard_unprocessed_safe_tool_call_count
+        ),
+        source_no_progress_failure_count=result.source_no_progress_failure_count,
+        repeated_action_failure_count=result.repeated_action_failure_count,
+        events=result.events,
+        completion_ready=result.completion_ready,
+        post_ready_tool_calls=result.post_ready_tool_calls,
+        completion_mode=result.completion_mode,
+        effective_max_steps=result.effective_max_steps,
+        finalization_reserve_steps=result.finalization_reserve_steps,
+        finalization_reserve_entered=result.finalization_reserve_entered,
+        finalization_reserve_entry_step=result.finalization_reserve_entry_step,
+        budget_boundary_completion_count=(result.budget_boundary_completion_count),
+        post_ready_reopen_patch_count=result.post_ready_reopen_patch_count,
+        post_ready_skipped_optional_tool_count=(
+            result.post_ready_skipped_optional_tool_count
+        ),
+        post_ready_nonfinalization_tool_count=(
+            result.post_ready_nonfinalization_tool_count
+        ),
+        verification_workspace_mutations=(result.verification_workspace_mutations),
+        first_patch_step=result.first_patch_step,
+        pre_edit_step_count=result.pre_edit_step_count,
+        pre_edit_tool_call_count=result.pre_edit_tool_call_count,
+        progress_advisory_count=result.progress_advisory_count,
+        progress_advisory_level_counts=result.progress_advisory_level_counts,
+        no_source_progress_pause_count=result.no_source_progress_pause_count,
+        max_no_source_progress_streak=result.max_no_source_progress_streak,
+        environment_inspection_count=result.environment_inspection_count,
+        initial_context_cache_hit_count=result.initial_context_cache_hit_count,
+        initial_context_reference_hit_count=(
+            result.initial_context_reference_hit_count
+        ),
+        source_progress_count=result.source_progress_count,
+        diagnostic_progress_count=result.diagnostic_progress_count,
+        first_environment_inspection_step=(result.first_environment_inspection_step),
+    )
+
+
+def _save_runtime_artifacts(
+    *,
+    output_dir: Path,
+    result: CodingAgentRunResult,
+) -> tuple[str, ...]:
+    relative_root = Path("_artifacts") / _safe_name(result.task_id)
+    root = output_dir / relative_root
+    root.mkdir(parents=True, exist_ok=True)
+    messages_path = root / "runtime_messages.json"
+    messages_path.write_text(
+        json.dumps(
+            [message.model_dump(mode="json") for message in result.messages],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    diff_path = root / "final.diff"
+    diff_path.write_text(result.diff, encoding="utf-8")
+    verification_path = root / "verification.json"
+    verification_path.write_text(
+        json.dumps(
+            [item.model_dump(mode="json") for item in result.verification],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    model_outputs_path = root / "model_outputs.jsonl"
+    model_outputs_path.write_text(
+        "".join(
+            json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n"
+            for item in result.model_outputs
+        ),
+        encoding="utf-8",
+    )
+    return tuple(
+        path.as_posix()
+        for path in (
+            relative_root / messages_path.name,
+            relative_root / diff_path.name,
+            relative_root / verification_path.name,
+            relative_root / model_outputs_path.name,
+        )
     )
 
 
@@ -415,6 +1176,24 @@ def _init_git_repo(path: Path) -> None:
             stderr = result.stderr.decode("utf-8", errors="replace")
             raise RuntimeError(
                 f"workspace git command failed: {' '.join(command)}: {stderr}"
+            )
+
+
+def _commit_workspace_state(path: Path, *, message: str) -> None:
+    for command in (["git", "add", "."], ["git", "commit", "-m", message]):
+        result = subprocess.run(  # noqa: UP022
+            command,
+            cwd=path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            raise AgentEvalDatasetError(
+                f"workspace setup commit failed: {' '.join(command)}: {stderr}"
             )
 
 

@@ -18,12 +18,13 @@ import json
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
+from codeteam.agent.runtime_models import ModelOutputEvidence
 from codeteam.events import AgentEventType
 from codeteam.session.errors import (
     SessionAlreadyExistsError,
@@ -32,6 +33,7 @@ from codeteam.session.errors import (
     SessionSchemaUnsupportedError,
 )
 from codeteam.session.models import (
+    CURRENT_SCHEMA_VERSION,
     SUPPORTED_SCHEMA_VERSIONS,
     ContextMetadata,
     Session,
@@ -47,10 +49,11 @@ Store 只做防御性校验：它最终会变成目录名，绝不能含路径�
 _SNAPSHOT_NAME = "session.json"
 _EVENTS_NAME = "events.jsonl"
 _CONTEXT_NAME = "context.json"
+_MODEL_OUTPUTS_NAME = "model_outputs.jsonl"
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _atomic_write_bytes(target: Path, payload: bytes) -> None:
@@ -174,7 +177,16 @@ class JsonSessionStore:
             )
 
         try:
-            return Session.model_validate(raw)
+            session = Session.model_validate(raw)
+            if schema_version < CURRENT_SCHEMA_VERSION:
+                session = session.model_copy(
+                    update={
+                        "manifest": session.manifest.model_copy(
+                            update={"schema_version": CURRENT_SCHEMA_VERSION}
+                        )
+                    }
+                )
+            return session
         except ValidationError as error:
             raise SessionCorruptedError(
                 f"session.json 字段非法: {session_id}"
@@ -217,6 +229,30 @@ class JsonSessionStore:
             handle.flush()
             os.fsync(handle.fileno())
         return event
+
+    def append_model_output(
+        self,
+        session_id: str,
+        evidence: ModelOutputEvidence,
+    ) -> None:
+        """Append raw model evidence to a private audit stream."""
+        root = self._session_dir(session_id)
+        if not root.is_dir():
+            raise SessionNotFoundError(f"session 不存在: {session_id}")
+        path = root / _MODEL_OUTPUTS_NAME
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o600,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "ab", closefd=False) as handle:
+                handle.write((evidence.model_dump_json() + "\n").encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            os.close(descriptor)
 
     def load_events(
         self,

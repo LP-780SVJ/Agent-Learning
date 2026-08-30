@@ -452,7 +452,14 @@ class SafeExecutionService:
                 }
             ),
             audit=audit.records,
-            error=command_result.error if status is SafeExecutionStatus.SANDBOX_FAILED else None,
+            error=(
+                command_result.error
+                or command_result.stderr
+                or command_result.stdout
+                or "Sandbox backend failed."
+                if status is SafeExecutionStatus.SANDBOX_FAILED
+                else None
+            ),
         )
 
     def _command_terminal_result(
@@ -567,6 +574,12 @@ class _AuditBuilder:
 def _looks_like_sandbox_backend_failure(result: CommandResult) -> bool:
     if result.status is CommandStatus.START_FAILED:
         return True
+    if (
+        result.exit_code == 125
+        and result.argv
+        and Path(result.argv[0]).name == "docker"
+    ):
+        return True
 
     combined_output = " ".join(
         value.lower()
@@ -581,5 +594,8 @@ def _looks_like_sandbox_backend_failure(result: CommandResult) -> bool:
         "pull access denied",
         "image pull",
         "not found locally and pull policy is never",
+        "invalid mount config",
+        "bind source path does not exist",
+        "mounts denied",
     )
     return any(marker in combined_output for marker in backend_failure_markers)

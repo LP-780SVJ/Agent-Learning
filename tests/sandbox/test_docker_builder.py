@@ -72,6 +72,23 @@ def test_default_profile_builds_hardened_docker_run_argv(tmp_path: Path) -> None
     assert argv[argv.index("--memory-swap") + 1] == "512m"
     assert argv[argv.index("--cpus") + 1] == "1.0"
     assert argv[argv.index("--pids-limit") + 1] == "256"
+    assert argv[argv.index("--tmpfs") + 1] == (
+        "/tmp:rw,nosuid,nodev,noexec,mode=1777,size=128m"
+    )
+    environment = {
+        argv[index + 1]
+        for index, value in enumerate(argv)
+        if value == "--env"
+    }
+    assert {
+        "TMPDIR=/tmp",
+        "TMP=/tmp",
+        "TEMP=/tmp",
+        "HOME=/tmp/home",
+        "XDG_CACHE_HOME=/tmp/cache",
+        "PYTHONPYCACHEPREFIX=/tmp/pycache",
+        "PYTEST_ADDOPTS=-p no:cacheprovider",
+    } <= environment
     assert mount == f"type=bind,src={workspace.resolve()},dst=/workspace"
     assert "readonly" not in mount
     assert argv[-2:] == ("codeteam-sandbox:latest", "pytest")
@@ -99,6 +116,13 @@ def test_workspace_write_false_makes_workspace_mount_read_only(
     mount = _build_mount_by_destination(argv, "/workspace")
 
     assert mount == f"type=bind,src={workspace.resolve()},dst=/workspace,readonly"
+
+
+def test_tmpfs_size_is_positive_and_bounded() -> None:
+    with pytest.raises(ValidationError):
+        SandboxProfile(tmpfs_mb=0)
+    with pytest.raises(ValidationError):
+        SandboxProfile(tmpfs_mb=1025)
 
 
 def test_workspace_mount_preserves_docker_visible_tmp_alias() -> None:

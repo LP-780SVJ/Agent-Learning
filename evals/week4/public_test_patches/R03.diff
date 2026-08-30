@@ -1,0 +1,15 @@
+diff --git a/tests/task_verification/test_r03.py b/tests/task_verification/test_r03.py
+new file mode 100644
+--- /dev/null
++++ b/tests/task_verification/test_r03.py
+@@ -0,0 +1,10 @@
++from src.orders.events import build_order_cancelled_event
++
++
++def test_renamed_builder_preserves_event_shape() -> None:
++    event = build_order_cancelled_event("o-1", "user")
++    assert event.name == "order.cancelled"
++    assert event.payload == {
++        "order_id": "o-1",
++        "reason": "user",
++    }

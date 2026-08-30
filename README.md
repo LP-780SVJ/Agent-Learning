@@ -16,25 +16,43 @@ The first four weeks are now at a closeout baseline.
 
 | Area | Status | Evidence |
 |---|---|---|
-| Agent loop and tool protocol | Implemented | Unit tests for loop limits, tool calls, final output, usage, errors |
+| Agent loop and tool protocol | Native Agent Turn implemented offline | `ModelRequest → ModelTurn`, native tool calls, textual fallback |
 | Context engine and retrieval | Implemented | Week2 and medium repo retrieval evals |
 | Git patch/worktree/checkpoint | Implemented | `tests/git/` |
 | Command policy and approval | Implemented | `tests/execution/` |
 | Docker sandbox boundary | Implemented | `tests/sandbox/`, real Docker run passed with terminal access |
+| Verification environment contract | Python + pytest implemented | Separate toolchain preflight before Provider execution |
 | Repair and failure recovery | Implemented foundation | `tests/repair/`, `tests/failures/`, `tests/agent/` |
 | Durable session and resume | Implemented | `tests/session/` |
 | CLI product layer | Implemented | `tests/cli/`, subprocess E2E |
-| Agent EvalRunner / Grader | Implemented V1 | `codeteam/evaluation/agent_runner.py`, `eval_hidden/week4/` |
-| 15-task coding benchmark | Harness run with null actor; real LLM blocked by egress approval | `evals/week4/agent_runs/` |
+| Unified Coding Agent Runtime | Implemented | `codeteam/agent/runtime.py`, scripted-model integration tests |
+| Provider action normalization | Native-first + fallback | OpenAI-compatible native tools; JSON, fenced JSON, DSML fallback |
+| Agent EvalRunner / Grader | Implemented V2 | Same Runtime as `run`; hidden oracle remains grader-only |
+| Runtime-owned completion | Implemented offline | Versioned gate + native `submit_result`; real Provider smoke pending |
+| 11-task coding development benchmark | Historical pre-fix run inspected; post-fix NOT_RUN | Wait for user B01 smoke, then rerun |
 
 Latest closeout evidence:
 
 ```text
-normal sandbox:      1195 passed, 6 skipped
-Docker integration:  42 passed in prior elevated closeout run
+normal sandbox:      1368 passed, 9 skipped
+Docker integration:  60 passed with the project-owned image
 ```
 
-The current `codeteam run` command is still a productized shell around deterministic planning. It creates durable sessions and exercises orchestration, but it does not yet run a real LLM-backed patch-producing actor. For that reason the Week4 Day7 15-task task success rate is intentionally not claimed yet.
+`codeteam run` now uses the real provider-neutral `CodingAgentRuntime`. Its
+production model boundary is `ModelRequest → Provider Adapter → ModelTurn` and
+prefers native tool calling. The JSON/fenced-JSON/DSML dialect firewall remains
+as compatibility fallback. It creates a linked worktree from request-time
+`HEAD`, builds initial context, applies patches through the safe patch lane,
+runs visible verification in Docker, and keeps the worktree for review.
+`agent-eval` remains a thin batch shell over the same Runtime; hidden acceptance
+stays outside the Agent in `AgentGrader`.
+
+The Runtime now separates Docker infrastructure availability from verification
+toolchain readiness. Before the first Provider request it first proves that the
+configured image can start with the real worktree mount, then runs fixed
+`python --version` and `python -m pytest --version` probes. Missing Python or
+pytest returns `verification_environment_failed` with zero model calls instead
+of becoming a test failure, repair loop, or repeated action.
 
 ## Quick Start
 
@@ -67,16 +85,119 @@ Core CLI commands:
 .venv/bin/python -m codeteam.cli.app context "refresh token error path" --path tests/fixtures/test_repo --top-k 5 --budget 1024 --format json
 .venv/bin/python -m codeteam.cli.app eval --dataset evals/week2/file_retrieval.jsonl --repo tests/fixtures/test_repo --methods filename,ripgrep,ripgrep_symbol,hybrid --output evals/week2
 .venv/bin/python -m codeteam.cli.app agent-eval --suite evals/week4/agent_task_suite_v1.jsonl --output evals/week4/agent_runs/null_baseline --actor null --mode baseline
-.venv/bin/python -m codeteam.cli.app run "inspect this repository task" --repo .
+.venv/bin/python -m codeteam.cli.app run "fix the failing auth test" --repo . --context-budget 4096 --max-steps 20 --max-tool-calls 40 --max-repairs 3 --max-protocol-repairs 2
 ```
+
+Execution worktrees default to `~/.codeteam/worktrees`, which keeps them
+separate from result artifacts and places them under the current user's home
+directory for Colima sharing. Override the base directory with
+`--worktree-root PATH` or `CODETEAM_WORKTREE_ROOT`; the CLI option wins.
+
+Real-model commands read an OpenAI-compatible provider configuration from
+`secrets.local.env` or from environment variables. Environment variables take
+precedence, and the secret file is ignored by Git.
+
+```text
+CODETEAM_LLM_BASE_URL=https://provider.example/v1
+CODETEAM_LLM_API_KEY=...
+CODETEAM_LLM_MODEL=provider-model-id
+CODETEAM_LLM_RESPONSE_MODE=auto
+CODETEAM_LLM_TEMPERATURE=0
+```
+
+Native tools and reasoning control are per-run CLI options; the documented B01
+command explicitly uses `--native-tools --no-reasoning`.
+
+`--provider` and `--model` must be supplied together when overriding the
+configured defaults. The currently executable production provider is
+`openai-compatible`; the model registry and switching layer remain
+provider-neutral extension points.
+
+### `run` contract
+
+- A run creates `codeteam/<task-id>` from request-time `HEAD` below
+  `~/.codeteam/worktrees/repos/<repo>-<path-hash>/`; it never edits, commits,
+  or merges the caller's worktree. Sessions persist the exact worktree path.
+- The model receives an input-budgeted initial context snapshot and existing
+  ToolRegistry schemas in `ModelRequest`, then can call
+  `list_files`, `read_file`, `search_code`, `apply_patch`, `run_tests`,
+  `git_status`, and `git_diff` within the task worktree.
+- Production prefers provider-native tool calls. Exact text and structured turn
+  evidence are retained in `model_outputs.jsonl`; Model-visible history stores
+  structured assistant calls and real `role=tool` results. Runtime-owned
+  `step-n-call-m` and opaque provider call IDs remain separate and durable.
+  Bare JSON, a complete Markdown JSON fence, and validated DeepSeek DSML remain
+  accepted only as fallback, and the Runtime still assigns its own call IDs.
+- Invalid action formats receive at most two consecutive schema-only repair
+  turns. A valid action resets the streak; lifetime attempts remain separately
+  counted and both values survive Session resume.
+- OpenAI-compatible calls default to temperature `0`, native tools enabled,
+  reasoning disabled, and explicit `max_tokens`. An explicit unsupported-tools
+  400 falls back to JSON object/text capability negotiation and records the
+  actual mode in the evaluation manifest.
+- `--context-budget` is the maximum input budget. It must be no greater than
+  `--model-context-window - --max-output-tokens -
+  --safety-headroom-tokens`; oversized serialized messages plus tool schemas
+  fail before HTTP.
+- Patch application accepts unified diff, complete-file edits, or compact exact
+  replacements. Every representation becomes a local diff and passes through
+  path validation, checkpoint creation, the safe patch lane, and final
+  Git-state inspection. Failed patch calls are included in `patch_attempts`.
+- Visible verification runs through `CommandPolicy` and Docker. Docker
+  unavailability pauses verification instead of silently using the host shell.
+- Before the first provider call, Runtime starts a hardened read-only probe with
+  the real worktree mount. Missing CLI/daemon/image and invisible bind sources
+  return `PAUSED + sandbox_unavailable` with zero model tokens or cost. A
+  backend failure during verification also pauses immediately.
+- A second read-only verification preflight uses the same configured image and
+  records the image ID/digest, Python version, pytest version, probe argv, and
+  failure category. Its probe argv is Runtime-owned and never comes from the
+  model. Agent-issued `run_tests` still goes through CommandPolicy, the exact
+  task allowlist, SafeExecutionService, and Docker.
+- Verification argv and `cwd` are workspace-relative (`tests/auth`, `.`). The
+  Runtime canonicalizes legacy `/workspace/...` inputs before policy checks,
+  while Docker alone owns the host-worktree to `/workspace` mapping.
+- Read-only exploration uses `(tool, canonical arguments, workspace version)`
+  caching. One repeat receives cached evidence; a second unchanged repeat stops
+  as `NO_PROGRESS`. A patch increments the version and permits a fresh read.
+- Runtime separately tracks source, diagnostic, and completion progress. At
+  proportional model-turn checkpoints it adds an advisory to the next normal
+  request without another Provider call; sustained no-source progress pauses as
+  `no_source_progress` instead of waiting for an undifferentiated `max_steps`.
+- `inspect_environment` answers one validated Python-module or executable
+  availability question inside the actual read-only verification sandbox. The
+  fixed Runtime probe is distinct from Agent commands; arbitrary `python -c`
+  and generic shell execution remain prohibited.
+- A versioned `InitialContextSnapshot` can satisfy a complete current full-file
+  reread with a compact reference while that content remains in the current
+  request, or with cached full content after compaction. Partial, ranged, stale,
+  and resume-drift cases use the real file tool.
+- Semantically equivalent test retries share one action fingerprint. A retry is
+  allowed after the workspace version changes, but repeated failed variants in
+  an unchanged workspace stop before spending another model/tool cycle.
+- `completed` requires a real source diff, every task-specific visible test to
+  pass, an inspected final diff, and a passing final safety check. Broad
+  regression commands remain runnable but cannot substitute for the task test.
+  A model final message alone is not success.
+- Sessions are stored under the repository Git common directory at
+  `.git/codeteam/sessions`; the task branch and worktree are retained for human
+  inspection.
+- CLI exit codes are `0` for completed, `1` for runtime failure, `2` for an
+  invalid request, and `130` for pause, approval wait, or interruption.
 
 ## Architecture
 
 ```text
 CLI
   -> Request DTO / render
-  -> Application / Service layer
-  -> SingleAgentOrchestrator
+  -> Worktree + durable Session
+  -> CodingAgentRuntime
+       -> initial Context Engine snapshot
+       -> ModelRequest -> Provider Adapter -> ModelTurn
+       -> native action loop / textual dialect firewall fallback
+       -> sandbox infrastructure preflight -> verification environment preflight
+       -> list/read/search/apply_patch/run_tests/git_status/git_diff
+       -> final diff + visible verification gate
   -> Domain modules
        Task / Plan / Context / Git / Execution / Sandbox / Session / LLM
   -> Infrastructure
@@ -109,8 +230,14 @@ codeteam/
 ├── repair/                        # repair loop and attempt models
 ├── failures/                      # typed failure classification and recovery policy
 ├── session/                       # durable session, store, event log, resume
-├── llm/                           # provider-neutral model client pieces
-├── agent/                         # repository inspection and orchestrator
+├── llm/                           # ModelRequest/ModelTurn + provider adapters
+├── agent/                         # unified coding runtime, tools, edits, orchestration
+│   ├── protocol.py                # fallback JSON/fence/DSML -> canonical action
+│   ├── runtime.py                 # model/action/tool/verification execution loop
+│   ├── runtime_models.py          # runtime request, status, evidence, result
+│   ├── runtime_tools.py           # seven worktree-scoped coding tools
+│   ├── verification.py            # visible-command path canonicalization
+│   └── editing.py                 # structured file edits -> local unified diff
 ├── cli/                           # Typer CLI and commands
 └── evaluation/                    # retrieval eval + task-level agent eval
 ```
@@ -126,9 +253,9 @@ Detailed architecture notes are maintained in:
 Week1 builds the minimal but reliable runtime loop:
 
 ```text
-messages
-  -> model_client.complete()
-  -> parse tool calls or final output
+ModelRequest(messages, tools, budgets)
+  -> model_client.turn()
+  -> native ModelTurn tool calls, or textual fallback parsing
   -> ToolRegistry.execute()
   -> append ToolResult
   -> check limits / repeated action / no-progress
@@ -217,9 +344,16 @@ Capabilities:
 - CLI commands: `run`, `resume`, `diff`, `rollback`.
 - CLI invalid request handling with clean exit code `2`.
 - SIGINT E2E: `run` pauses a session, returns `130`, and `resume` rebuilds runtime in a new process.
-- Independent `agent-eval` path with `LLMPatchGenerator`, `PatchActor`, fresh workspace runner, hidden oracle grader, null baseline, and ablation modes.
+- One `CodingAgentRuntime` shared by `run` and `agent-eval`.
+- `agent-eval` prepares fresh repositories/worktrees and invokes the independent hidden-oracle Grader only after the Runtime stops.
 
-Important limitation: `run` is not yet a full autonomous coding task actor. The independent eval path can call a real LLM patch actor, but the latest real provider run was blocked by network/API egress approval. Null-actor benchmark runs prove the harness, not task-solving ability.
+Important limitation: the 11 tasks are explicitly a `dev` suite, not held-out
+evidence. The native Agent Turn path has offline coverage only. The user must
+rerun B01 after the verification environment fix; that validation is
+`NOT_RUN_BY_CODER`. The 11-task benchmark and native/text ablation remain
+`NOT_RUN` until the new B01 scratch/completion path is stable. Null preflight proves
+harness discrimination; the non-blind Codex reference proves task solvability,
+not model quality.
 
 ## Evaluation
 
@@ -229,9 +363,10 @@ Current evaluation artifacts:
 - `evals/medium_repo/file_retrieval.jsonl`: more realistic medium fixture benchmark.
 - `evals/week4/week2_retrieval/`: fresh Week4 rerun of the Week2 suite.
 - `evals/week4/medium_retrieval/`: fresh Week4 rerun of the medium suite.
-- `evals/week4/agent_task_suite_v1.jsonl`: 15-task agent benchmark suite.
-- `eval_hidden/week4/`: hidden oracle V1 for the 15 task suite.
-- `evals/week4/agent_runs/`: null baseline, null ablations, and LLM smoke outputs.
+- `evals/week4/agent_task_suite_v1.jsonl`: corrected 11-task medium-repo benchmark suite.
+- `evals/week4/task_seeds/`: hash-pinned per-task fault seeds applied after the common base archive.
+- `eval_hidden/week4/`: hidden acceptance oracle for the 11-task suite.
+- `evals/week4/agent_runs/`: null preflight, Codex reference, historical LLM, and ablation outputs.
 - `evals/week4/EVALUATION_WEEK4.md`: Week4 closeout report.
 - `test_log/2026-08-22_week4_day7_evaluation_log.md`: command log and conclusions.
 
@@ -255,19 +390,170 @@ Interpretation:
 - Current retrieval is strongest when exact symbols or direct text are present.
 - Current retrieval is weaker when the prompt describes behavior rather than implementation words.
 
-15-task coding benchmark status:
+11-task coding benchmark V3 status:
 
 ```text
-suite:         yes
-hidden oracle: yes, V1
-null baseline: 15 tasks, 0 success, 4 hidden acceptance pass, 14 regression pass
-null ablation: direct/single-shot/no-compaction/naive-compaction harness runs complete
-real LLM:      blocked by network/API egress approval in this environment
+fixture:       tests/fixtures/medium_repo only
+base commit:   3956afc05d6c1ad2f3efaac9a510133436c0f700
+hidden oracle: 11/11 fail on pristine state
+public oracle: 11/11 task tests fail on pristine state
+null V3:       0/11 success
+Codex reference: 11/11 success (non-blind oracle-informed solvability check)
+real LLM V2:  first unified Runtime run 0/11 due protocol integration failure
+agent-turn fix: offline native action loop passes; B01 NOT_RUN_BY_CODER
+prior user B01: native patch correct; Docker lacked pytest; external grader passed
+verification-contract fix: offline + real Docker passed; post-fix B01 NOT_RUN_BY_CODER
+11-task benchmark: NOT_RUN
+native/text ablation: NOT_RUN
 ```
 
-`LLMPatchGenerator` and `PatchActor` exist in the independent eval path. A trustworthy success rate still requires an explicitly approved provider endpoint and a full real-actor run.
+Legacy `LLMPatchGenerator` and `PatchActor` remain only for compatibility tests
+and historical artifacts; production CLI and evaluation execution no longer
+call them. The current harness has isolated worktrees, hash-pinned public task
+tests, separate broad regression, pristine public/hidden oracle checks,
+grader-only hidden acceptance, protected public-oracle paths, fixed task budgets, and
+safety invariants. A trustworthy score still requires a fresh real-model run,
+and provider failures must be reported separately from Agent failures.
 
-The project intentionally does not claim a task success rate until CodeTeam has an actor/judge evaluation harness with hidden acceptance tests, regression tests, fixed budgets, and safety invariants.
+All 11 tasks are a development benchmark. Their results measure regression and
+engineering progress, not blind held-out generalization.
+
+### User-run B01 verification-contract smoke
+
+The coder does not call a real LLM or read/print/persist the API key. Configure
+`CODETEAM_LLM_BASE_URL`, `CODETEAM_LLM_API_KEY`, and `CODETEAM_LLM_MODEL` in the
+environment or ignored `secrets.local.env`, then run this personally:
+
+```bash
+RUN_DIR="evals/week4/agent_runs/verification_contract_b01_$(date +%Y%m%d_%H%M%S)"
+.venv/bin/python -m codeteam.cli.app agent-eval \
+  --suite evals/week4/agent_task_suite_v1.jsonl \
+  --output "$RUN_DIR" \
+  --actor llm \
+  --mode baseline \
+  --task-id B01 \
+  --context-budget 8192 \
+  --max-output-tokens 4096 \
+  --model-context-window 32768 \
+  --safety-headroom-tokens 1024 \
+  --native-tools \
+  --no-reasoning \
+  --worktree-root "$HOME/.codeteam/worktrees" \
+  --keep-workspaces
+```
+
+Inspect these fields after the run:
+
+- `manifest.json`: `provider_runtime.native_tools_requested/actual`,
+  `response_mode_actual`, `reasoning_enabled`, `max_output_tokens`, input budget
+  and sandbox/worktree roots.
+- `manifest.json`: separate sandbox and verification-environment preflight
+  results, configured image, image ID/digest, Runtime Python/pytest versions,
+  and trusted-host Grader Python/pytest evidence.
+- result/summary: actor status, failure category, steps, tool calls, patch
+  attempts, verification, changed files, provider/environment blocking.
+- `_artifacts/B01/model_outputs.jsonl`: `finish_state`, `finish_reason`,
+  `actual_response_mode`, usage, response ID, native tool calls, and stable
+  `provider_call_id ↔ runtime_call_id` mappings.
+- `_artifacts/B01/runtime_messages.json`: structured assistant call followed by
+  real `role=tool`, then the next model turn; no textual protocol parse failure
+  on the native happy path.
+- kept worktree: source patch exists and all patch/test side effects came
+  through the existing SafeExecutionService evidence.
+
+Do not run the 11-task real benchmark or real native/text ablation yet. Their
+status in this revision is `NOT_RUN`; Fake Provider test pass rates are not
+benchmark scores.
+
+Future ablation A is native tool calling and B is the existing textual codec,
+with task/model/temperature/output budget held constant. Compare transport
+success, parse failure, Runtime execution reached, and task completion only
+after the baseline is repeatable.
+
+### Runtime-owned completion and isolated verification scratch
+
+Agent-visible `run_tests` now receives a read-only `/workspace` mount and a
+bounded `/tmp` tmpfs. Runtime fixes Python, cache, home, and pytest scratch
+variables below `/tmp`; it fingerprints tracked and non-ignored untracked
+workspace content before and after verification without following symlinks.
+Any mutation is recorded as `workspace_hygiene_failed`, advances the workspace
+version, invalidates evidence, and blocks completion. Runtime never cleans the
+mutation automatically and does not weaken checkpoint symlink checks.
+
+Verification and diff review are versioned. Completion requires the current
+workspace version to have a real safe diff, every task verification command,
+all configured broad regression commands, current diff review, clean hygiene,
+and no execution pause. The model then calls native `submit_result` alone;
+Runtime evaluates the gate, appends the correlated tool result, and owns the
+terminal transition. A textual final remains a compatibility fallback through
+the same gate. See [DD-W4-D7-09](docs/design_decisions/DD-W4-D7-09.md) and
+[DD-W4-D7-10](docs/design_decisions/DD-W4-D7-10.md).
+
+`--output` stores only reports and audit artifacts. Execution repositories live
+under the resolved worktree root. `environment_blocked_count` is reported
+separately from provider and Agent failures. The independent Grader still runs
+trusted post-run commands on the host, but a passing Grader never upgrades a
+paused or failed Runtime to success.
+
+### Finalization-aware model-step budget
+
+The model-step limit now bounds only further Provider work; it no longer forces
+an already-ready task to be mislabeled. The Runtime reserves part of the same
+budget for deterministic closeout (default `max(3, ceil(20%))`, so 4 of 20).
+Once a real diff exists and the reserve is reached, the next normal request
+includes remaining turns, current CompletionGate requirements, and the exact
+task/regression commands. This remains advisory: a legitimate `apply_patch` is
+allowed and invalidates old verification normally.
+
+If the last legal tool call makes CompletionGate READY, Runtime may settle at
+the boundary without another Provider call. It first honors safety pauses and
+then compares a fresh workspace fingerprint with the fingerprint attached to
+the evidence. Completion provenance is recorded as `model_submitted` or
+`runtime_budget_boundary_settlement` in Runtime, Session/events, evaluation
+results, summaries, and manifests. No hidden grader evidence participates.
+
+The stability command now explicitly passes `--max-steps 20` and fails for any
+grader-correct/actor-failed result even when `no_source_progress` is zero:
+
+```bash
+bash scripts/run_single_agent_stability_validation.sh --dry-run
+# user-run real campaign: F03 x5, B01 x2, full 11-task x3
+```
+
+See [DD-W4-D7-14](docs/design_decisions/DD-W4-D7-14.md),
+[FC-W4-D7-05](docs/failure_cases/FC-W4-D7-05.md), and
+[FC-W4-D7-06](docs/failure_cases/FC-W4-D7-06.md). Real stability validation is
+pending user execution; no new benchmark or ablation result is claimed.
+
+### Batch-aware mechanical stall detection
+
+Provider-native assistant turns may contain several ordered tool calls. The
+Agent Loop now detects cache hits and semantic repeats per call but decides
+whether the turn is mechanically stalled only after every safe executable call
+in that batch has been considered. Multiple cache hits contribute at most one
+stalled turn; an uncached observation or successful patch makes the turn
+non-pure mechanical. Two complete stalled turns still stop the loop.
+
+Repeated read/search/list/inspection and equivalent `run_tests` calls return a
+correlated cached or structured duplicate ToolResult and allow later fresh
+calls to proceed. Repeated `apply_patch`/`submit_result`, mixed completion
+batches, tool-budget exhaustion, and Runtime/sandbox halt retain fail-fast
+semantics. Safety/budget-rejected calls are explicitly accounted and are not
+reported as progress-guard drops.
+
+`failure_origin` separates `cached_batch_stall`, `empty_tool_batch`,
+`empty_model_turn`, and `completion_guidance_ignored` without parsing error
+text. Declared/processed/rejected/unprocessed-safe call metrics propagate from
+Agent Loop through Runtime and Eval. Stability permits a legitimate completed
+mechanical-loop stop but requires both `batch_premature_stop_count` and
+`progress_guard_unprocessed_safe_tool_call_count` to be zero.
+
+The user-run `stability_20260830_102307` baseline recorded Actor 39/40,
+security 40/40, targeted F03 4/5, B01 2/2, and three full 11-task runs at 33/33.
+Its sole F03 failure exposed the old mid-batch return; this revision has not
+rerun that campaign. See
+[DD-W4-D7-15](docs/design_decisions/DD-W4-D7-15.md) and
+[FC-W4-D7-07](docs/failure_cases/FC-W4-D7-07.md).
 
 ## Testing
 
@@ -280,15 +566,33 @@ Common commands:
 .venv/bin/python -m pytest tests/sandbox -q -rs
 .venv/bin/python -m pytest tests/session -q
 .venv/bin/python -m pytest tests/cli -q
+.venv/bin/python -m pytest tests/agent/test_coding_runtime.py -q
+.venv/bin/python -m pytest tests/agent/test_output_protocol.py tests/test_agent_loop_protocol.py -q
+.venv/bin/python -m pytest tests/evaluation/test_agent_eval_runner.py -q
+.venv/bin/python -m pytest tests/evaluation/test_week4_public_oracles.py -q
 ```
+
+Build the project-owned verification image before production/evaluation runs:
+
+```bash
+docker build -t codeteam-sandbox:latest -f docker/sandbox/Dockerfile docker/sandbox
+```
+
+The build context contains only the digest-pinned Python 3.11 Dockerfile and
+the exact Python/pytest requirements. It does not copy the repository, host
+`.venv`, or secret files, and Runtime never installs dependencies dynamically.
 
 `pytest.ini` excludes `tests/fixtures/` so fixture repository tests are not collected as project tests.
 
 Docker integration tests require:
 
 - Docker CLI and daemon available.
-- Local image `codeteam-sandbox:latest`.
+- Project-built image `codeteam-sandbox:latest` from `docker/sandbox/`.
 - A host directory visible to Docker.
+
+The Runtime preflight checks all three before spending Provider tokens. For
+Colima, keep the worktree root under the current `$HOME` unless the VM has an
+explicit additional mount.
 
 When running inside a restricted terminal sandbox, Docker tests may skip. In a user terminal with Docker permission they should execute.
 
@@ -296,11 +600,45 @@ When running inside a restricted terminal sandbox, Docker tests may skip. In a u
 
 - Full-project mypy still has historical import-chain/stub/type debt.
 - Full-project ruff has historical style/lint findings; touched-module ruff gates pass, but repo-wide cleanup should be a separate maintenance branch.
-- The real LLM smoke script reached provider code but was blocked by external `model_overloaded` during closeout.
-- The current CLI `run` path does not yet produce patches from a real model.
-- The 15-task benchmark suite has metadata but hidden tests and EvalRunner/Grader still need implementation.
+- Earlier real LLM runs predate canonical evidence and discriminative public
+  tests; the V3 suite needs the user-run native B01 smoke. B01 is
+  `NOT_RUN_BY_CODER`; benchmark and ablation are `NOT_RUN`.
+- Completion ownership is now Runtime-gated through versioned evidence and
+  `submit_result`. Real-Provider confirmation remains user-run; this coder did
+  not run B01, the 11-task benchmark, or an ablation.
+- Native tool calling is implemented for the OpenAI-compatible adapter and
+  falls back explicitly when unsupported. New Provider wire protocols still
+  require adapters; full reasoning-content continuation is not implemented.
+- Input budgeting counts complete serialized UTF-8 request structure and tools,
+  but still uses a replaceable approximate counter rather than a
+  provider-exact tokenizer.
+- Docker remains a hard execution dependency for production verification; unavailable Docker pauses instead of falling back to host shell.
+- The verification image currently guarantees only Python 3.11 + pytest 9.1.1.
+  It does not infer or install arbitrary repository dependencies or non-Python
+  toolchains; those require a future explicit environment contract.
 - Retrieval evaluation is still mostly Python and local fixtures, not a broad multi-language external benchmark.
 - Medium repo results show the context engine still needs better semantic retrieval and cross-module expansion.
+- Progress thresholds are control heuristics, not semantic code understanding;
+  they cannot prove that exploration is useful or a patch is correct. The
+  post-change F03/B01/11-task stability campaign remains user-run.
+- Environment inspection currently covers Python modules and bare executables
+  only. It does not install packages, resolve distribution/import-name aliases,
+  or generalize to Node/Rust/Java toolchains.
+
+Run the user-owned stability campaign after configuring the existing ignored
+provider settings:
+
+```bash
+scripts/run_single_agent_stability_validation.sh \
+  --output-root evals/week4/agent_runs/progress_stability_$(date +%Y%m%d_%H%M%S)
+```
+
+Set `CODETEAM_STABILITY_KEEP_WORKSPACES=true` only when retained worktrees are
+needed. Preview all ten commands without Provider calls or filesystem output:
+
+```bash
+scripts/run_single_agent_stability_validation.sh --dry-run
+```
 
 ## Repository Guide
 
@@ -319,10 +657,15 @@ Important directories:
 
 Recommended order:
 
-1. Run the four-week reviewer prompt in `code_review/four_week_reviewer_prompt.md`.
-2. Fix any P0/P1/P2 findings from that review.
-3. Build the Day7 EvalRunner/Grader with fresh worktrees and hidden acceptance tests.
-4. Connect a real LLM-backed patch actor to `codeteam run`.
-5. Run the 15-task suite and ablations: plan-first vs direct, repair vs single shot, structured compaction vs truncation.
-6. Improve retrieval on medium repo business/cross-module/doc/config misses.
-7. Tackle full-project ruff and mypy as separate cleanup/type-hardening branches.
+1. User builds the documented image and runs the B01 smoke to confirm isolated
+   scratch plus native `submit_result` on the real Provider path.
+2. Fix any real Provider adapter issue exposed by B01 without weakening
+   SafeExecution, checkpoint, hygiene, or dual-ID boundaries.
+3. After repeatable B01 evidence, run the 11-task dev baseline and compare the
+   completion-ready and workspace-mutation metrics with the historical run.
+4. Only after two repeatable B01 runs, run the controlled native-vs-text
+   transport ablation.
+5. Keep R02 as a semantic coding-quality case; improve repair/reasoning without
+   hardcoding its oracle.
+6. Improve retrieval on medium-repo business/cross-module/doc/config misses and
+   keep repo-wide lint/type cleanup as separate maintenance work.

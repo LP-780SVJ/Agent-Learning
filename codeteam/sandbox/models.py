@@ -4,6 +4,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
 
+DEFAULT_SANDBOX_IMAGE = "codeteam-sandbox:latest"
+
 
 class SandboxProfile(BaseModel):
     """描述安全意图
@@ -20,7 +22,7 @@ class SandboxProfile(BaseModel):
     - workspace_write: 是否允许写入工作目录
     - pull_policy: 镜像拉取策略（"always", "never", "if_not_present"）
     """
-    image: str = "codeteam-sandbox:latest"
+    image: str = DEFAULT_SANDBOX_IMAGE
 
     network_enabled: bool = False
     read_only_root: bool = True
@@ -30,6 +32,7 @@ class SandboxProfile(BaseModel):
     memory_mb: int = Field(default=512, gt=0)
     cpus: float = Field(default=1.0, gt=0)
     pids_limit: int = Field(default=256, gt=0)
+    tmpfs_mb: int = Field(default=128, gt=0, le=1024)
 
     workspace_write: bool = True
     pull_policy: str = "never"
