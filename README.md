@@ -495,6 +495,36 @@ separately from provider and Agent failures. The independent Grader still runs
 trusted post-run commands on the host, but a passing Grader never upgrades a
 paused or failed Runtime to success.
 
+### Finalization-aware model-step budget
+
+The model-step limit now bounds only further Provider work; it no longer forces
+an already-ready task to be mislabeled. The Runtime reserves part of the same
+budget for deterministic closeout (default `max(3, ceil(20%))`, so 4 of 20).
+Once a real diff exists and the reserve is reached, the next normal request
+includes remaining turns, current CompletionGate requirements, and the exact
+task/regression commands. This remains advisory: a legitimate `apply_patch` is
+allowed and invalidates old verification normally.
+
+If the last legal tool call makes CompletionGate READY, Runtime may settle at
+the boundary without another Provider call. It first honors safety pauses and
+then compares a fresh workspace fingerprint with the fingerprint attached to
+the evidence. Completion provenance is recorded as `model_submitted` or
+`runtime_budget_boundary_settlement` in Runtime, Session/events, evaluation
+results, summaries, and manifests. No hidden grader evidence participates.
+
+The stability command now explicitly passes `--max-steps 20` and fails for any
+grader-correct/actor-failed result even when `no_source_progress` is zero:
+
+```bash
+bash scripts/run_single_agent_stability_validation.sh --dry-run
+# user-run real campaign: F03 x5, B01 x2, full 11-task x3
+```
+
+See [DD-W4-D7-14](docs/design_decisions/DD-W4-D7-14.md),
+[FC-W4-D7-05](docs/failure_cases/FC-W4-D7-05.md), and
+[FC-W4-D7-06](docs/failure_cases/FC-W4-D7-06.md). Real stability validation is
+pending user execution; no new benchmark or ablation result is claimed.
+
 ## Testing
 
 Common commands:

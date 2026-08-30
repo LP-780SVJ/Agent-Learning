@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from codeteam.agent.completion import CompletionGateDecision
+from codeteam.agent.finalization import TerminalSettlementDecision
 from codeteam.agent.protocol import (
     ModelOutputDialect,
     ModelOutputNormalizationError,
@@ -121,7 +122,9 @@ def run_agent_loop(
     halt_signal_provider: Callable[[], tuple[StopReason, str] | None] | None = None,
     completion_gate_provider: Callable[[], CompletionGateDecision] | None = None,
     terminal_completion_provider: Callable[[], str | None] | None = None,
+    terminal_settlement_provider: Callable[[], TerminalSettlementDecision] | None = None,
     post_ready_tool_call_callback: Callable[[], None] | None = None,
+    post_ready_action_callback: Callable[[str], None] | None = None,
     request_advisory_provider: Callable[[AgentLoopState], Message | None] | None = None,
     tool_result_observer: Callable[
         [AgentLoopState, ToolCall, ToolResult, int, bool, bool], None
@@ -148,6 +151,84 @@ def run_agent_loop(
 
     while True:
         if check_step_limit(state, limits):
+            halt = halt_signal_provider() if halt_signal_provider is not None else None
+            if halt is not None:
+                stop_reason, error = halt
+                return _stop_with_pause(
+                    state,
+                    stop_reason,
+                    error,
+                    start_time,
+                    usage_tracker,
+                    events,
+                )
+            settlement = (
+                terminal_settlement_provider()
+                if terminal_settlement_provider is not None
+                else TerminalSettlementDecision(settled=False)
+            )
+            if settlement.settled:
+                if lifecycle_callback is not None:
+                    lifecycle_callback(
+                        "terminal_settlement.completed",
+                        state,
+                        {
+                            "step_index": state.step_count,
+                            "completion_mode": (
+                                "runtime_budget_boundary_settlement"
+                            ),
+                        },
+                    )
+                events.append(
+                    make_event(
+                        AgentEventType.TERMINAL_SETTLEMENT_COMPLETED,
+                        "Runtime settled ready completion at the model-step boundary.",
+                        step_index=state.step_count,
+                        data={
+                            "completion_mode": (
+                                "runtime_budget_boundary_settlement"
+                            )
+                        },
+                    )
+                )
+                if state_callback is not None:
+                    state_callback(state)
+                return _build_loop_result(
+                    state=state,
+                    status=CompletionStatus.COMPLETED,
+                    stop_reason=StopReason.COMPLETED,
+                    start_time=start_time,
+                    usage_tracker=usage_tracker,
+                    events=events,
+                    final_output=AgentFinalOutput(
+                        status=CompletionStatus.COMPLETED,
+                        summary=(
+                            settlement.summary
+                            or "Verified task changes completed successfully."
+                        ),
+                        tests_passed=True,
+                    ),
+                )
+            if settlement.reason is not None:
+                events.append(
+                    make_event(
+                        AgentEventType.TERMINAL_SETTLEMENT_REJECTED,
+                        "Runtime rejected budget-boundary settlement.",
+                        step_index=state.step_count,
+                        data={"reason": settlement.reason},
+                    )
+                )
+            halt = halt_signal_provider() if halt_signal_provider is not None else None
+            if halt is not None:
+                stop_reason, error = halt
+                return _stop_with_pause(
+                    state,
+                    stop_reason,
+                    error,
+                    start_time,
+                    usage_tracker,
+                    events,
+                )
             return _stop_with_failure(
                 state,
                 StopReason.MAX_STEPS,
@@ -419,6 +500,7 @@ def run_agent_loop(
                 completion_gate_provider=completion_gate_provider,
                 terminal_completion_provider=terminal_completion_provider,
                 post_ready_tool_call_callback=post_ready_tool_call_callback,
+                post_ready_action_callback=post_ready_action_callback,
                 tool_result_observer=tool_result_observer,
                 cached_no_progress_exempt_provider=(
                     cached_no_progress_exempt_provider
@@ -624,6 +706,7 @@ def _handle_tool_calls(
     completion_gate_provider: Callable[[], CompletionGateDecision] | None = None,
     terminal_completion_provider: Callable[[], str | None] | None = None,
     post_ready_tool_call_callback: Callable[[], None] | None = None,
+    post_ready_action_callback: Callable[[str], None] | None = None,
     tool_result_observer: Callable[
         [AgentLoopState, ToolCall, ToolResult, int, bool, bool], None
     ]
@@ -698,13 +781,74 @@ def _handle_tool_calls(
         completion_decision = (
             completion_gate_provider() if completion_gate_provider is not None else None
         )
-        if (
+        was_completion_ready = bool(
             completion_decision is not None
             and completion_decision.ready
             and call.name != "submit_result"
-            and post_ready_tool_call_callback is not None
-        ):
+        )
+        if was_completion_ready and post_ready_tool_call_callback is not None:
             post_ready_tool_call_callback()
+        if was_completion_ready and call.name in {
+            "run_tests",
+            "inspect_environment",
+            "list_files",
+            "git_status",
+            "git_diff",
+        }:
+            assert completion_decision is not None
+            if post_ready_action_callback is not None:
+                post_ready_action_callback("skipped_optional")
+            advisory = ToolResult(
+                call_id=call.call_id,
+                provider_call_id=call.provider_call_id,
+                name=call.name,
+                content=json.dumps(
+                    {
+                        "skipped": True,
+                        "completion_ready": True,
+                        "workspace_version": completion_decision.workspace_version,
+                        "allowed_next_actions": [
+                            "submit_result",
+                            "apply_patch",
+                            "targeted_read_or_search_when_reopening",
+                        ],
+                        "message": (
+                            "Current workspace already satisfies completion "
+                            "requirements. Optional or already-current work was "
+                            "not executed."
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                success=True,
+            )
+            record_tool_call(
+                state,
+                call.name,
+                fingerprint_arguments,
+                workspace_version,
+            )
+            state.messages.append(_tool_result_to_message(advisory))
+            if tool_result_observer is not None:
+                tool_result_observer(
+                    state,
+                    call,
+                    advisory,
+                    workspace_version,
+                    True,
+                    batch_complete,
+                )
+            events.append(
+                make_event(
+                    AgentEventType.TOOL_RESULT,
+                    "Completion-ready optional tool skipped.",
+                    step_index=state.step_count,
+                    data={"name": call.name, "success": True, "skipped": True},
+                )
+            )
+            if state_callback is not None:
+                state_callback(state)
+            continue
         repeated = is_repeated_action(
             state,
             call.name,
@@ -718,6 +862,8 @@ def _handle_tool_calls(
             and completion_decision.ready
             and call.name != "submit_result"
         ):
+            if post_ready_action_callback is not None:
+                post_ready_action_callback("skipped_optional")
             advisory = ToolResult(
                 call_id=call.call_id,
                 provider_call_id=call.provider_call_id,
@@ -770,6 +916,8 @@ def _handle_tool_calls(
             )
             if not cache_exempt:
                 state.cached_no_progress_count += 1
+            if was_completion_ready and post_ready_action_callback is not None:
+                post_ready_action_callback("skipped_optional")
             record_tool_call(
                 state,
                 call.name,
@@ -853,6 +1001,13 @@ def _handle_tool_calls(
             )
         )
 
+        if (
+            was_completion_ready
+            and call.name in {"read_file", "search_code"}
+            and post_ready_action_callback is not None
+        ):
+            post_ready_action_callback("nonfinalization")
+
         if lifecycle_callback is not None:
             lifecycle_callback(
                 "tool.started",
@@ -865,6 +1020,13 @@ def _handle_tool_calls(
             )
 
         result = tool_registry.execute(call)
+        if (
+            was_completion_ready
+            and call.name == "apply_patch"
+            and result.success
+            and post_ready_action_callback is not None
+        ):
+            post_ready_action_callback("reopen_patch")
         if (
             result.success
             and call.name != "submit_result"

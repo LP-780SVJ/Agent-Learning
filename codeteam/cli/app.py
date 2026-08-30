@@ -166,6 +166,18 @@ def agent_eval(
         int,
         typer.Option("--context-budget", help="Runtime context token budget"),
     ] = 4096,
+    max_steps: Annotated[
+        int,
+        typer.Option("--max-steps", min=1, help="Run-level model step cap"),
+    ] = 20,
+    finalization_reserve_steps: Annotated[
+        int | None,
+        typer.Option(
+            "--finalization-reserve-steps",
+            min=1,
+            help="Override deterministic finalization reserve inside max-steps",
+        ),
+    ] = None,
     max_output_tokens: Annotated[
         int,
         typer.Option("--max-output-tokens", min=1),
@@ -210,6 +222,8 @@ def agent_eval(
         task_id=task_id,
         limit=limit,
         context_budget=context_budget,
+        max_steps=max_steps,
+        finalization_reserve_steps=finalization_reserve_steps,
         max_output_tokens=max_output_tokens,
         model_context_window=model_context_window,
         safety_headroom_tokens=safety_headroom_tokens,

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
 
+from codeteam.agent.runtime_models import CompletionMode
 from codeteam.sandbox.verification_preflight import VerificationEnvironmentMetadata
 
 
@@ -42,6 +43,12 @@ class EvalRunMode(str, Enum):
     SINGLE_SHOT = "single_shot"
     NO_COMPACTION = "no_compaction"
     NAIVE_COMPACTION = "naive_compaction"
+
+
+class EffectiveBudgetSource(str, Enum):
+    RUN_CAP = "run_cap"
+    TASK_DECLARED = "task_declared"
+    TASK_AND_RUN_EQUAL = "task_and_run_equal"
 
 
 class EvalBudget(BaseModel):
@@ -101,6 +108,7 @@ class EvalRunConfig(BaseModel):
     reasoning_enabled: bool = False
     task_timeout_seconds: int = Field(default=900, gt=0)
     max_steps: int = Field(default=20, gt=0)
+    finalization_reserve_steps: int | None = Field(default=None, gt=0)
     max_repairs: int = Field(default=3, ge=0)
     max_protocol_repairs: int = Field(default=2, ge=0, le=2)
 
@@ -154,6 +162,20 @@ class PatchActorResult(BaseModel):
     verification_environment: VerificationEnvironmentMetadata | None = None
     completion_ready: bool = False
     post_ready_tool_calls: int = 0
+    completion_mode: CompletionMode | None = None
+    task_declared_max_steps: int = 20
+    run_max_steps_cap: int = 20
+    effective_max_steps: int = 20
+    effective_budget_source: EffectiveBudgetSource = (
+        EffectiveBudgetSource.TASK_AND_RUN_EQUAL
+    )
+    finalization_reserve_steps: int = 4
+    finalization_reserve_entered: bool = False
+    finalization_reserve_entry_step: int | None = None
+    budget_boundary_completion_count: int = 0
+    post_ready_reopen_patch_count: int = 0
+    post_ready_skipped_optional_tool_count: int = 0
+    post_ready_nonfinalization_tool_count: int = 0
     verification_workspace_mutations: int = 0
     first_patch_step: int | None = None
     pre_edit_step_count: int = 0
@@ -251,6 +273,20 @@ class AgentEvalTaskResult(BaseModel):
     verification_environment: VerificationEnvironmentMetadata | None = None
     completion_ready: bool = False
     post_ready_tool_calls: int = 0
+    completion_mode: CompletionMode | None = None
+    task_declared_max_steps: int = 20
+    run_max_steps_cap: int = 20
+    effective_max_steps: int = 20
+    effective_budget_source: EffectiveBudgetSource = (
+        EffectiveBudgetSource.TASK_AND_RUN_EQUAL
+    )
+    finalization_reserve_steps: int = 4
+    finalization_reserve_entered: bool = False
+    finalization_reserve_entry_step: int | None = None
+    budget_boundary_completion_count: int = 0
+    post_ready_reopen_patch_count: int = 0
+    post_ready_skipped_optional_tool_count: int = 0
+    post_ready_nonfinalization_tool_count: int = 0
     verification_workspace_mutations: int = 0
     first_patch_step: int | None = None
     pre_edit_step_count: int = 0
@@ -288,6 +324,17 @@ class AgentEvalRunSummary(BaseModel):
     completion_ready_count: int = 0
     completion_ready_but_actor_failed_count: int = 0
     post_ready_tool_call_count: int = 0
+    completion_mode_counts: dict[str, int] = Field(default_factory=dict)
+    grader_correct_but_actor_failed_count: int = 0
+    grader_correct_actor_max_steps_count: int = 0
+    budget_boundary_completion_count: int = 0
+    finalization_reserve_entry_count: int = 0
+    finalization_reserve_success_count: int = 0
+    post_ready_reopen_patch_count: int = 0
+    post_ready_skipped_optional_tool_count: int = 0
+    post_ready_nonfinalization_tool_count: int = 0
+    effective_max_steps_counts: dict[str, int] = Field(default_factory=dict)
+    effective_budget_source_counts: dict[str, int] = Field(default_factory=dict)
     verification_workspace_mutation_count: int = 0
     first_patch_step_count: int = 0
     first_patch_step_by_task: dict[str, int | None] = Field(default_factory=dict)

@@ -1,0 +1,83 @@
+{
+  "run_id": "baseline-fb3afc7d",
+  "mode": "baseline",
+  "task_count": 11,
+  "success_count": 11,
+  "provider_blocked_count": 0,
+  "environment_blocked_count": 0,
+  "protocol_repair_attempt_count": 0,
+  "protocol_failed_count": 0,
+  "acceptance_passed_count": 11,
+  "regression_passed_count": 11,
+  "task_verification_passed_count": 11,
+  "security_passed_count": 11,
+  "pristine_acceptance_passed_count": 0,
+  "pristine_task_verification_passed_count": 0,
+  "actor_completed_count": 11,
+  "within_budget_count": 11,
+  "failure_category_counts": {},
+  "completion_ready_count": 11,
+  "completion_ready_but_actor_failed_count": 0,
+  "post_ready_tool_call_count": 2,
+  "completion_mode_counts": {
+    "model_submitted": 11
+  },
+  "grader_correct_but_actor_failed_count": 0,
+  "grader_correct_actor_max_steps_count": 0,
+  "budget_boundary_completion_count": 0,
+  "finalization_reserve_entry_count": 0,
+  "finalization_reserve_success_count": 0,
+  "post_ready_reopen_patch_count": 0,
+  "post_ready_skipped_optional_tool_count": 2,
+  "post_ready_nonfinalization_tool_count": 0,
+  "effective_max_steps_counts": {
+    "20": 11
+  },
+  "effective_budget_source_counts": {
+    "task_and_run_equal": 6,
+    "run_cap": 5
+  },
+  "verification_workspace_mutation_count": 0,
+  "first_patch_step_count": 11,
+  "first_patch_step_by_task": {
+    "B01": 2,
+    "B02": 2,
+    "B03": 6,
+    "B04": 3,
+    "B05": 4,
+    "F01": 4,
+    "F03": 9,
+    "F04": 5,
+    "R01": 4,
+    "R02": 5,
+    "R03": 3
+  },
+  "pre_edit_step_count": 39,
+  "pre_edit_tool_call_count": 99,
+  "progress_advisory_count": 1,
+  "progress_advisory_level_counts": {
+    "1": 1,
+    "2": 0
+  },
+  "no_source_progress_pause_count": 0,
+  "max_no_source_progress_streak": 9,
+  "environment_inspection_count": 2,
+  "initial_context_cache_hit_count": 18,
+  "initial_context_reference_hit_count": 14,
+  "source_progress_count": 16,
+  "diagnostic_progress_count": 122,
+  "first_environment_inspection_step_count": 1,
+  "first_environment_inspection_step_by_task": {
+    "B01": null,
+    "B02": null,
+    "B03": null,
+    "B04": null,
+    "B05": null,
+    "F01": null,
+    "F03": 6,
+    "F04": null,
+    "R01": null,
+    "R02": null,
+    "R03": null
+  }
+}

@@ -189,6 +189,17 @@ def run_agent_task(request: RunRequest) -> None:
                                 evidence.workspace_hygiene_clean
                             ),
                             "progress_metrics": evidence.progress_metrics,
+                            "completion_mode": evidence.completion_mode,
+                            "effective_max_steps": evidence.effective_max_steps,
+                            "finalization_reserve_steps": (
+                                evidence.finalization_reserve_steps
+                            ),
+                            "finalization_reserve_entered": (
+                                evidence.finalization_reserve_entered
+                            ),
+                            "finalization_reserve_entry_step": (
+                                evidence.finalization_reserve_entry_step
+                            ),
                         }
                     ),
                     "checkpoint_ids": tuple(
@@ -213,6 +224,16 @@ def run_agent_task(request: RunRequest) -> None:
                 "tool_call_count": state.tool_call_count,
                 "workspace_version": evidence.workspace_version,
                 "last_role": state.messages[-1].role if state.messages else None,
+                "completion_mode": (
+                    evidence.completion_mode.value
+                    if evidence.completion_mode is not None
+                    else None
+                ),
+                "effective_max_steps": evidence.effective_max_steps,
+                "finalization_reserve_steps": evidence.finalization_reserve_steps,
+                "finalization_reserve_entered": (
+                    evidence.finalization_reserve_entered
+                ),
             },
         )
         session.manifest.last_event_seq = event.seq
@@ -259,6 +280,7 @@ def run_agent_task(request: RunRequest) -> None:
                 "operation_id": operation_id,
                 "tool_name": data.get("tool_name"),
                 "success": data.get("success"),
+                "completion_mode": data.get("completion_mode"),
             },
         )
         session.manifest.last_event_seq = event.seq
@@ -326,6 +348,21 @@ def run_agent_task(request: RunRequest) -> None:
                     result.checkpoint_ids[-1]
                     if result.checkpoint_ids
                     else session.current_checkpoint_id
+                ),
+                "runtime_state": session.runtime_state.model_copy(
+                    update={
+                        "completion_mode": result.completion_mode,
+                        "effective_max_steps": result.effective_max_steps,
+                        "finalization_reserve_steps": (
+                            result.finalization_reserve_steps
+                        ),
+                        "finalization_reserve_entered": (
+                            result.finalization_reserve_entered
+                        ),
+                        "finalization_reserve_entry_step": (
+                            result.finalization_reserve_entry_step
+                        ),
+                    }
                 ),
             }
         )
@@ -548,6 +585,17 @@ def resume_agent_session(request: ResumeRequest) -> None:
                                 evidence.workspace_hygiene_clean
                             ),
                             "progress_metrics": evidence.progress_metrics,
+                            "completion_mode": evidence.completion_mode,
+                            "effective_max_steps": evidence.effective_max_steps,
+                            "finalization_reserve_steps": (
+                                evidence.finalization_reserve_steps
+                            ),
+                            "finalization_reserve_entered": (
+                                evidence.finalization_reserve_entered
+                            ),
+                            "finalization_reserve_entry_step": (
+                                evidence.finalization_reserve_entry_step
+                            ),
                         }
                     ),
                     "checkpoint_ids": tuple(
@@ -572,6 +620,16 @@ def resume_agent_session(request: ResumeRequest) -> None:
                 "step_count": loop_state.step_count,
                 "tool_call_count": loop_state.tool_call_count,
                 "workspace_version": evidence.workspace_version,
+                "completion_mode": (
+                    evidence.completion_mode.value
+                    if evidence.completion_mode is not None
+                    else None
+                ),
+                "effective_max_steps": evidence.effective_max_steps,
+                "finalization_reserve_steps": evidence.finalization_reserve_steps,
+                "finalization_reserve_entered": (
+                    evidence.finalization_reserve_entered
+                ),
             },
         )
         session.manifest.last_event_seq = event.seq
@@ -619,6 +677,7 @@ def resume_agent_session(request: ResumeRequest) -> None:
                 "tool_name": data.get("tool_name"),
                 "success": data.get("success"),
                 "resumed": True,
+                "completion_mode": data.get("completion_mode"),
             },
         )
         session.manifest.last_event_seq = event.seq
@@ -659,6 +718,9 @@ def resume_agent_session(request: ResumeRequest) -> None:
             native_tools=state.native_tools,
             reasoning_enabled=state.reasoning_enabled,
             max_steps=remaining_steps,
+            effective_max_steps=state.effective_max_steps,
+            step_offset=state.step_count,
+            finalization_reserve_steps=state.finalization_reserve_steps,
             max_tool_calls=remaining_tool_calls,
             max_repairs=max(0, remaining_repairs),
             max_protocol_repairs=state.max_protocol_repairs,
@@ -717,6 +779,21 @@ def resume_agent_session(request: ResumeRequest) -> None:
                 ),
                 "checkpoint_ids": tuple(
                     dict.fromkeys((*session.checkpoint_ids, *result.checkpoint_ids))
+                ),
+                "runtime_state": session.runtime_state.model_copy(
+                    update={
+                        "completion_mode": result.completion_mode,
+                        "effective_max_steps": result.effective_max_steps,
+                        "finalization_reserve_steps": (
+                            result.finalization_reserve_steps
+                        ),
+                        "finalization_reserve_entered": (
+                            result.finalization_reserve_entered
+                        ),
+                        "finalization_reserve_entry_step": (
+                            result.finalization_reserve_entry_step
+                        ),
+                    }
                 ),
             }
         )

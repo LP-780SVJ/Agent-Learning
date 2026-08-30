@@ -19,6 +19,7 @@ from codeteam.agent.editing import (
 )
 from codeteam.agent.initial_context import InitialContextSnapshot
 from codeteam.agent.runtime_models import (
+    CompletionMode,
     VerificationEvidence,
     VerificationOutcomeCategory,
 )
@@ -111,6 +112,15 @@ class RuntimeEvidence:
     accepted_submission_notes: str | None = None
     completion_ready_seen: bool = False
     post_ready_tool_calls: int = 0
+    completion_mode: CompletionMode | None = None
+    effective_max_steps: int = 20
+    finalization_reserve_steps: int = 4
+    finalization_reserve_entered: bool = False
+    finalization_reserve_entry_step: int | None = None
+    budget_boundary_completion_count: int = 0
+    post_ready_reopen_patch_count: int = 0
+    post_ready_skipped_optional_tool_count: int = 0
+    post_ready_nonfinalization_tool_count: int = 0
     verification_workspace_mutations: int = 0
     progress_metrics: dict[str, object] = field(default_factory=dict)
 
@@ -411,6 +421,7 @@ def create_runtime_tools(
         if decision.ready:
             evidence.accepted_submission_summary = parsed.summary
             evidence.accepted_submission_notes = parsed.notes
+            evidence.completion_mode = CompletionMode.MODEL_SUBMITTED
         return json.dumps(payload, ensure_ascii=False)
 
     registry.register(

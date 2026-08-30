@@ -1,0 +1,639 @@
+[
+  {
+    "role": "system",
+    "content": "{\"role\": \"coding_agent\", \"protocol\": {\"rule\": \"Use provider-native tools when they are available. Only when native tools are unavailable, return exactly one raw JSON object containing non-empty tool_calls or a final output.\", \"tool_call_schema\": {\"tool_calls\": [{\"name\": \"read_file\", \"arguments\": {\"path\": \"src/example.py\"}}]}, \"tool_call_note\": \"Do not generate call_id; the Runtime assigns it after validation.\", \"preferred_patch_example\": {\"tool_calls\": [{\"name\": \"apply_patch\", \"arguments\": {\"replacements\": [{\"path\": \"src/example.py\", \"old_text\": \"OLD_VALUE\", \"new_text\": \"NEW_VALUE\", \"expected_replacements\": 1}]}}]}, \"final_output_schema\": {\"status\": \"completed | failed | needs_user_input\", \"summary\": \"short factual summary\", \"tests_passed\": true, \"error\": null, \"user_input_request\": null}, \"completion_tool\": {\"name\": \"submit_result\", \"arguments\": {\"summary\": \"short factual summary\", \"notes\": null}, \"rule\": \"Call submit_result alone; only the Runtime may accept completion.\"}}, \"tools\": [{\"name\": \"list_files\", \"description\": \"List files inside the workspace.\", \"arguments\": {\"properties\": {\"path\": {\"default\": \".\", \"title\": \"Path\", \"type\": \"string\"}, \"recursive\": {\"default\": true, \"title\": \"Recursive\", \"type\": \"boolean\"}}, \"title\": \"ListFilesArgs\", \"type\": \"object\"}}, {\"name\": \"read_file\", \"description\": \"Read a UTF-8 text file inside the workspace. A complete current initial-context copy may be returned as a compact reference.\", \"arguments\": {\"properties\": {\"path\": {\"title\": \"Path\", \"type\": \"string\"}, \"start_line\": {\"anyOf\": [{\"type\": \"integer\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Start Line\"}, \"end_line\": {\"anyOf\": [{\"type\": \"integer\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"End Line\"}}, \"required\": [\"path\"], \"title\": \"ReadFileArgs\", \"type\": \"object\"}}, {\"name\": \"search_code\", \"description\": \"Search text inside UTF-8 files in the workspace.\", \"arguments\": {\"properties\": {\"query\": {\"minLength\": 1, \"title\": \"Query\", \"type\": \"string\"}, \"path\": {\"default\": \".\", \"title\": \"Path\", \"type\": \"string\"}, \"max_results\": {\"default\": 50, \"minimum\": 1, \"title\": \"Max Results\", \"type\": \"integer\"}}, \"required\": [\"query\"], \"title\": \"SearchCodeArgs\", \"type\": \"object\"}}, {\"name\": \"inspect_environment\", \"description\": \"Check one Python module or bare executable in the actual verification Docker sandbox using a Runtime-owned fixed probe. The model cannot supply code or command arguments.\", \"arguments\": {\"properties\": {\"python_module\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Python Module\"}, \"executable\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Executable\"}}, \"title\": \"EnvironmentInspectionArgs\", \"type\": \"object\"}}, {\"name\": \"apply_patch\", \"description\": \"Apply a unified diff or complete structured file edits safely.\", \"arguments\": {\"$defs\": {\"FileEdit\": {\"description\": \"A complete replacement or deletion used by the provider-neutral protocol.\", \"properties\": {\"path\": {\"minLength\": 1, \"title\": \"Path\", \"type\": \"string\"}, \"content\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Content\"}, \"delete\": {\"default\": false, \"title\": \"Delete\", \"type\": \"boolean\"}}, \"required\": [\"path\"], \"title\": \"FileEdit\", \"type\": \"object\"}, \"TextReplacement\": {\"description\": \"A small exact text replacement converted to a local Git patch.\", \"properties\": {\"path\": {\"minLength\": 1, \"title\": \"Path\", \"type\": \"string\"}, \"old_text\": {\"minLength\": 1, \"title\": \"Old Text\", \"type\": \"string\"}, \"new_text\": {\"title\": \"New Text\", \"type\": \"string\"}, \"expected_replacements\": {\"default\": 1, \"minimum\": 1, \"title\": \"Expected Replacements\", \"type\": \"integer\"}}, \"required\": [\"path\", \"old_text\", \"new_text\"], \"title\": \"TextReplacement\", \"type\": \"object\"}}, \"properties\": {\"patch\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Patch\"}, \"edits\": {\"anyOf\": [{\"items\": {\"$ref\": \"#/$defs/FileEdit\"}, \"type\": \"array\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Edits\"}, \"replacements\": {\"anyOf\": [{\"items\": {\"$ref\": \"#/$defs/TextReplacement\"}, \"type\": \"array\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Replacements\"}}, \"title\": \"ApplyPatchArgs\", \"type\": \"object\"}}, {\"name\": \"run_tests\", \"description\": \"Run an argv-based visible verification command in Docker.\", \"arguments\": {\"properties\": {\"argv\": {\"items\": {\"type\": \"string\"}, \"minItems\": 1, \"title\": \"Argv\", \"type\": \"array\"}, \"cwd\": {\"default\": \".\", \"title\": \"Cwd\", \"type\": \"string\"}, \"timeout_seconds\": {\"default\": 120.0, \"exclusiveMinimum\": 0, \"maximum\": 900, \"title\": \"Timeout Seconds\", \"type\": \"number\"}}, \"required\": [\"argv\"], \"title\": \"RunTestsArgs\", \"type\": \"object\"}}, {\"name\": \"git_status\", \"description\": \"Inspect final changed files from Git.\", \"arguments\": {\"properties\": {}, \"title\": \"EmptyArgs\", \"type\": \"object\"}}, {\"name\": \"git_diff\", \"description\": \"Inspect the current source diff, including untracked text files.\", \"arguments\": {\"properties\": {}, \"title\": \"EmptyArgs\", \"type\": \"object\"}}, {\"name\": \"submit_result\", \"description\": \"Request Runtime-authorized completion after all current-version verification and diff-review requirements are satisfied. Call alone.\", \"arguments\": {\"properties\": {\"summary\": {\"minLength\": 1, \"title\": \"Summary\", \"type\": \"string\"}, \"notes\": {\"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"title\": \"Notes\"}}, \"required\": [\"summary\"], \"title\": \"SubmitResultArgs\", \"type\": \"object\"}}], \"budgets\": {\"max_steps\": 20, \"effective_max_steps\": 20, \"finalization_reserve_steps\": 4, \"max_tool_calls\": 60, \"max_repairs\": 3, \"max_protocol_repairs\": 2, \"context_tokens\": 8192, \"max_output_tokens\": 4096, \"model_context_window\": 32768, \"safety_headroom_tokens\": 1024}, \"completion\": [\"Make a real Git diff.\", \"Run every task verification command successfully.\", \"Inspect the final diff before returning completed.\", \"After the Runtime reports completion-ready, call submit_result as the sole tool call. Readiness does not auto-terminate the run.\", \"Never claim hidden acceptance results.\", \"The initial context is a current snapshot. Do not reread the same file unless it was truncated or the workspace changed.\"], \"execution_boundary\": \"run_tests argv paths and cwd are relative to the workspace; use '.' for the workspace root and paths such as tests/auth. The Runtime maps them to Docker /workspace, so do not put /workspace or host-only .venv paths in tool arguments. Use python -m pytest. Commands are argv arrays; shell strings, pipes, and redirection are unavailable.\", \"verification_command_priority\": \"Task-specific verification commands supplied by the Runtime are authoritative for completion. Repository-discovered commands are general guidance and are not substitutes unless the Runtime lists them as visible verification commands.\"}",
+    "tool_calls": null,
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "user",
+    "content": "{\"task\": \"Allow NotificationDispatcher to read notifications.email_dispatch_enabled from configs/feature_flags.yaml in the current project. Dispatch must be suppressed only when the flag is explicitly false and must preserve current behavior when the file, section, or flag is missing.\", \"workspace\": \"/Users/sqlee/.codeteam/worktrees/evals/baseline-cc374fbb/tasks/F03\", \"planning_enabled\": true, \"task_verification_commands\": [[\"python\", \"-m\", \"pytest\", \"tests/task_verification/test_f03.py\", \"-q\"]], \"regression_commands\": [[\"python\", \"-m\", \"pytest\", \"tests\", \"-q\"]], \"initial_context\": {\"repo_map\": \"# Repository map (query)\\n# Query: Allow NotificationDispatcher to read notifications.email_dispatch_enabled from configs/feature_flags.yaml in the current project. Dispatch must be suppressed only when the flag is explicitly false and must preserve current behavior when the file, section, or flag is missing.\\n\\nsrc/notifications/dispatcher.py:\\n│ class NotificationDispatcher\\n│ (self, sender: EmailSender | None) -> None\\n│ (self, event: EventEnvelope) -> None\\n\\ntests/task_verification/test_f03.py:\\n│ configs\\n│ class Sender\\n│ (self) -> None\\n│ (self, to: str, template: str, context: dict) -> None\\n│ (tmp_path, monkeypatch) -> None\\n\\nconfigs/feature_flags.yaml:\\n\\nsrc/orders/exporter.py:\\n│ file\\n│ class OrderExportStream\\n│ (self) -> Iterable[dict]\\n│ (output_path: str) -> int\\n\\nsrc/notifications/email.py:\\n│ class EmailSender\\n│ (self, to: str, template: str, context: dict) -> None\\n\\nsrc/billing/webhooks.py:\\n│ class PaymentWebhookVerifier\\n│ (self, gateway: PaymentGateway | None) -> None\\n\", \"files\": [{\"path\": \"src/notifications/dispatcher.py\", \"compression_level\": \"full_file\", \"token_count\": 195, \"content\": \"\\\"\\\"\\\"Event-driven notification dispatch.\\\"\\\"\\\"\\n\\nfrom src.common.events import EventEnvelope, INVOICE_RETRY_REQUESTED, ORDER_CANCELLED\\nfrom src.notifications.email import EmailSender\\nfrom src.notifications.templates import TEMPLATE_INVOICE_RETRY, TEMPLATE_ORDER_CANCELLED\\n\\n\\nclass NotificationDispatcher:\\n    \\\"\\\"\\\"Routes events to email templates.\\\"\\\"\\\"\\n\\n    def __init__(self, sender: EmailSender | None = None) -> None:\\n        self.sender = sender or EmailSender()\\n\\n    def handle(self, event: EventEnvelope) -> None:\\n        if event.name == ORDER_CANCELLED:\\n            self.sender.send(\\\"ops@example.com\\\", TEMPLATE_ORDER_CANCELLED, event.payload)\\n        if event.name == INVOICE_RETRY_REQUESTED:\\n            self.sender.send(\\\"billing@example.com\\\", TEMPLATE_INVOICE_RETRY, event.payload)\\n\\n\"}, {\"path\": \"tests/task_verification/test_f03.py\", \"compression_level\": \"full_file\", \"token_count\": 196, \"content\": \"from src.common.events import ORDER_CANCELLED, EventEnvelope\\nfrom src.notifications.dispatcher import NotificationDispatcher\\n\\n\\nclass Sender:\\n    def __init__(self) -> None:\\n        self.sent: list[tuple[str, str, dict]] = []\\n\\n    def send(self, to: str, template: str, context: dict) -> None:\\n        self.sent.append((to, template, context))\\n\\n\\ndef test_email_dispatch_can_be_explicitly_disabled(tmp_path, monkeypatch) -> None:\\n    configs = tmp_path / \\\"configs\\\"\\n    configs.mkdir()\\n    (configs / \\\"feature_flags.yaml\\\").write_text(\\n        \\\"notifications:\\\\n  email_dispatch_enabled: false\\\\n\\\", encoding=\\\"utf-8\\\"\\n    )\\n    monkeypatch.chdir(tmp_path)\\n    sender = Sender()\\n    NotificationDispatcher(sender=sender).handle(EventEnvelope(ORDER_CANCELLED, {}))\\n    assert sender.sent == []\\n\"}, {\"path\": \"configs/feature_flags.yaml\", \"compression_level\": \"full_file\", \"token_count\": 41, \"content\": \"auth:\\n  refresh_rotation_enabled: true\\norders:\\n  stream_export_enabled: true\\ninventory:\\n  reservation_audit_enabled: true\\nbilling:\\n  webhook_signature_required: true\\n\\n\"}, {\"path\": \"src/orders/exporter.py\", \"compression_level\": \"full_file\", \"token_count\": 210, \"content\": \"\\\"\\\"\\\"Order export utilities.\\\"\\\"\\\"\\n\\nimport csv\\nfrom pathlib import Path\\nfrom typing import Iterable\\n\\nfrom src.common.database import create_session\\n\\n\\nclass OrderExportStream:\\n    \\\"\\\"\\\"Streams order rows to avoid loading all data at once.\\\"\\\"\\\"\\n\\n    def rows(self) -> Iterable[dict]:\\n        session = create_session()\\n        result = session.execute(\\\"select id, status, total from orders order by id\\\")\\n        yield from result.rows\\n\\n\\ndef stream_orders_to_csv(output_path: str) -> int:\\n    \\\"\\\"\\\"Stream orders into a CSV file.\\\"\\\"\\\"\\n    exporter = OrderExportStream()\\n    count = 0\\n    with Path(output_path).open(\\\"w\\\", newline=\\\"\\\") as file:\\n        writer = csv.DictWriter(file, fieldnames=[\\\"id\\\", \\\"status\\\", \\\"total\\\"])\\n        writer.writeheader()\\n        for row in exporter.rows():\\n            writer.writerow(row)\\n            count += 1\\n    return count\\n\\n\"}, {\"path\": \"src/notifications/email.py\", \"compression_level\": \"full_file\", \"token_count\": 32, \"content\": \"\\\"\\\"\\\"Email sender.\\\"\\\"\\\"\\n\\n\\nclass EmailSender:\\n    def send(self, to: str, template: str, context: dict) -> None:\\n        return None\\n\\n\"}], \"instructions\": [\"src/notifications/dispatcher.py: AGENTS.md\", \"tests/task_verification/test_f03.py: AGENTS.md\", \"configs/feature_flags.yaml: AGENTS.md\", \"src/orders/exporter.py: AGENTS.md\", \"src/orders/exporter.py: src/orders/AGENTS.md\", \"src/notifications/email.py: AGENTS.md\"], \"visible_test_commands\": [{\"category\": \"test\", \"command\": \"uv run pytest tests/ -q\", \"source\": \"AGENTS.md:7\", \"description\": \"从 AGENTS.md 显式标签提取\"}, {\"category\": \"lint\", \"command\": \"uv run ruff check src tests\", \"source\": \"AGENTS.md:8\", \"description\": \"从 AGENTS.md 显式标签提取\"}, {\"category\": \"typecheck\", \"command\": \"uv run mypy src\", \"source\": \"AGENTS.md:9\", \"description\": \"从 AGENTS.md 显式标签提取\"}], \"diagnostics\": [\"src/experimental/broken_parser_case.py: 解析失败\"]}}",
+    "tool_calls": null,
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "assistant",
+    "content": "I'll start by exploring the project structure and understanding the relevant files.",
+    "tool_calls": [
+      {
+        "call_id": "step-1-call-1",
+        "provider_call_id": "call_00_4LDuIuwgI32cbYSGKTJI5247",
+        "name": "list_files",
+        "arguments": {
+          "path": ".",
+          "recursive": true
+        }
+      },
+      {
+        "call_id": "step-1-call-2",
+        "provider_call_id": "call_01_zLqHma7qyHPqRvsH6KPj0530",
+        "name": "read_file",
+        "arguments": {
+          "path": "AGENTS.md"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": ".git\nAGENTS.md\nREADME.md\nconfigs/feature_flags.yaml\nconfigs/logging.yaml\nconfigs/retry_policy.toml\ndocs/auth.md\ndocs/billing.md\ndocs/generated-code-policy.md\ndocs/inventory.md\ndocs/orders.md\npyproject.toml\nsrc/__init__.py\nsrc/auth/AGENTS.md\nsrc/auth/__init__.py\nsrc/auth/api.py\nsrc/auth/exceptions.py\nsrc/auth/repository.py\nsrc/auth/service.py\nsrc/auth/tokens.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/payment_gateway.py\nsrc/billing/retries.py\nsrc/billing/webhooks.py\nsrc/common/__init__.py\nsrc/common/database.py\nsrc/common/events.py\nsrc/common/logging.py\nsrc/common/settings.py\nsrc/common/time.py\nsrc/experimental/__init__.py\nsrc/experimental/broken_parser_case.py\nsrc/generated/__init__.py\nsrc/generated/billing_schema.py\nsrc/generated/openapi_client.py\nsrc/inventory/__init__.py\nsrc/inventory/allocator.py\nsrc/inventory/reservations.py\nsrc/inventory/service.py\nsrc/main.py\nsrc/notifications/__init__.py\nsrc/notifications/dispatcher.py\nsrc/notifications/email.py\nsrc/notifications/templates.py\nsrc/orders/AGENTS.md\nsrc/orders/__init__.py\nsrc/orders/api.py\nsrc/orders/events.py\nsrc/orders/exporter.py\nsrc/orders/service.py\nsrc/orders/worker.py\nsrc/plugins/__init__.py\nsrc/plugins/fraud_rules.py\nsrc/plugins/loader.py\ntests/__init__.py\ntests/auth/test_refresh_flow.py\ntests/auth/test_token_repository.py\ntests/billing/test_invoice_retry.py\ntests/billing/test_webhook_signature.py\ntests/inventory/test_reservations.py\ntests/orders/test_order_cancel.py\ntests/orders/test_order_export.py\ntests/task_verification/test_f03.py\nvendor/third_party_payment.py",
+    "tool_calls": null,
+    "tool_call_id": "step-1-call-1",
+    "provider_call_id": "call_00_4LDuIuwgI32cbYSGKTJI5247"
+  },
+  {
+    "role": "tool",
+    "content": "# AGENTS.md\n\nProject instructions for the medium CodeTeam fixture.\n\n## Commands\n\n- Run tests: `uv run pytest tests/ -q`\n- Lint: `uv run ruff check src tests`\n- Type check: `uv run mypy src`\n\n## Architecture\n\n- API modules may validate request shape, but business rules belong in service modules.\n- SQL and persistence helpers belong in repository modules or `src/common/database.py`.\n- Shared event names and event envelopes belong in `src/common/events.py`.\n- Inventory reservation state must be updated through `src/inventory/`.\n- Payment provider details must stay behind `src/billing/payment_gateway.py`.\n\n## Restrictions\n\n- Do not modify `src/generated/`; it is generated from schemas.\n- Do not edit `vendor/` code directly.\n- Database migrations require explicit approval.\n- New domain events must be documented in `docs/`.\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-1-call-2",
+    "provider_call_id": "call_01_zLqHma7qyHPqRvsH6KPj0530"
+  },
+  {
+    "role": "assistant",
+    "content": "Let me look at how other modules read config files, particularly the feature_flags.yaml, to follow existing patterns.",
+    "tool_calls": [
+      {
+        "call_id": "step-2-call-1",
+        "provider_call_id": "call_00_CeyTSvPuUCiZKLLjRAzz8717",
+        "name": "search_code",
+        "arguments": {
+          "query": "feature_flags"
+        }
+      },
+      {
+        "call_id": "step-2-call-2",
+        "provider_call_id": "call_01_HeB9AkUsNzh6IpdiFXhD3654",
+        "name": "search_code",
+        "arguments": {
+          "query": "yaml"
+        }
+      },
+      {
+        "call_id": "step-2-call-3",
+        "provider_call_id": "call_02_WKzOzMNTVJ4CQExpz73I6059",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/common/settings.py"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "tests/task_verification/test_f03.py:16:    (configs / \"feature_flags.yaml\").write_text(",
+    "tool_calls": null,
+    "tool_call_id": "step-2-call-1",
+    "provider_call_id": "call_00_CeyTSvPuUCiZKLLjRAzz8717"
+  },
+  {
+    "role": "tool",
+    "content": "tests/task_verification/test_f03.py:16:    (configs / \"feature_flags.yaml\").write_text(",
+    "tool_calls": null,
+    "tool_call_id": "step-2-call-2",
+    "provider_call_id": "call_01_HeB9AkUsNzh6IpdiFXhD3654"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Configuration loading helpers.\"\"\"\n\nfrom pathlib import Path\n\n\ndef config_path(name: str) -> Path:\n    return Path(\"configs\") / name\n\n\ndef load_retry_policy() -> dict:\n    return {\"initial_delay_seconds\": 30, \"max_attempts\": 5}\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-2-call-3",
+    "provider_call_id": "call_02_WKzOzMNTVJ4CQExpz73I6059"
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "call_id": "step-3-call-1",
+        "provider_call_id": "call_00_vCkaTAlBDLCeMY9TPmrA5174",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/orders/exporter.py"
+        }
+      },
+      {
+        "call_id": "step-3-call-2",
+        "provider_call_id": "call_01_wDrsiZM6I7lEIsaxKpQs9557",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/orders/AGENTS.md"
+        }
+      },
+      {
+        "call_id": "step-3-call-3",
+        "provider_call_id": "call_02_5sVPNYt46avjMlwlyhgM7246",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/billing/webhooks.py"
+        }
+      },
+      {
+        "call_id": "step-3-call-4",
+        "provider_call_id": "call_03_STTDf4CGKsKMYWf3is7v3197",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/orders/events.py"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"initial_context_reference\":true,\"initial_context_cache_hit\":true,\"path\":\"src/orders/exporter.py\",\"content_hash\":\"0946dd5e12ff2a3fef57946073a1fe45631ec55d79d0893cafd6648b563902e1\",\"workspace_version\":0,\"content_location\":\"current_model_request.initial_context\"}",
+    "tool_calls": null,
+    "tool_call_id": "step-3-call-1",
+    "provider_call_id": "call_00_vCkaTAlBDLCeMY9TPmrA5174"
+  },
+  {
+    "role": "tool",
+    "content": "# Orders Module Rules\n\n- Order cancellation tests live in `tests/orders/test_order_cancel.py`.\n- Export tests live in `tests/orders/test_order_export.py`.\n- Cancellation must release inventory reservations through `src/inventory/`.\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-3-call-2",
+    "provider_call_id": "call_01_wDrsiZM6I7lEIsaxKpQs9557"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Billing webhook handling.\"\"\"\n\nfrom src.billing.invoices import InvoiceRepository\nfrom src.billing.payment_gateway import PaymentGateway\nfrom src.common.events import EventBus, EventEnvelope, PAYMENT_WEBHOOK_ACCEPTED\n\n\nclass PaymentWebhookVerifier:\n    \"\"\"Validates payment webhook signatures.\"\"\"\n\n    def __init__(self, gateway: PaymentGateway | None = None) -> None:\n        self.gateway = gateway or PaymentGateway()\n\n    def verify(self, payload: bytes, signature: str) -> bool:\n        return self.gateway.verify_signature(payload, signature)\n\n\nclass BillingWebhookController:\n    \"\"\"Controller for provider callbacks.\"\"\"\n\n    def __init__(\n        self,\n        verifier: PaymentWebhookVerifier | None = None,\n        repository: InvoiceRepository | None = None,\n        event_bus: EventBus | None = None,\n    ) -> None:\n        self.verifier = verifier or PaymentWebhookVerifier()\n        self.repository = repository or InvoiceRepository()\n        self.event_bus = event_bus or EventBus()\n\n    def receive(self, payload: bytes, signature: str) -> dict:\n        if not self.verifier.verify(payload, signature):\n            return {\"status\": 401, \"error\": \"invalid provider signature\"}\n        self.repository.mark_retry_requested(\"invoice-123\")\n        self.event_bus.publish(EventEnvelope(PAYMENT_WEBHOOK_ACCEPTED, {\"invoice_id\": \"invoice-123\"}))\n        return {\"status\": 202}\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-3-call-3",
+    "provider_call_id": "call_02_5sVPNYt46avjMlwlyhgM7246"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Order events.\"\"\"\n\nfrom src.common.events import EventEnvelope, ORDER_CANCELLED\n\n\ndef order_cancelled_event(order_id: str, reason: str) -> EventEnvelope:\n    return EventEnvelope(\n        name=ORDER_CANCELLED,\n        payload={\"order_id\": order_id, \"reason\": reason},\n    )\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-3-call-4",
+    "provider_call_id": "call_03_STTDf4CGKsKMYWf3is7v3197"
+  },
+  {
+    "role": "assistant",
+    "content": "Let me look at how other modules read config files (e.g., retry_policy.toml, logging.yaml) to understand the pattern used in this project.",
+    "tool_calls": [
+      {
+        "call_id": "step-4-call-1",
+        "provider_call_id": "call_00_7dQE6wO0ouFhSbYXVBcQ1285",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/billing/retries.py"
+        }
+      },
+      {
+        "call_id": "step-4-call-2",
+        "provider_call_id": "call_01_Pnbzu61njGuiqARKoY5R0403",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/common/logging.py"
+        }
+      },
+      {
+        "call_id": "step-4-call-3",
+        "provider_call_id": "call_02_Yc3EdZ6dQpEURDZFxCi28238",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/common/events.py"
+        }
+      },
+      {
+        "call_id": "step-4-call-4",
+        "provider_call_id": "call_03_Q26PlhuH80gXzHmd0uY59779",
+        "name": "read_file",
+        "arguments": {
+          "path": "pyproject.toml"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Invoice retry policy.\"\"\"\n\nfrom dataclasses import dataclass\n\nfrom src.common.settings import load_retry_policy\n\n\n@dataclass(frozen=True)\nclass InvoiceRetryPolicy:\n    initial_delay_seconds: int\n    max_attempts: int\n    backoff_multiplier: int\n\n\ndef load_invoice_retry_policy() -> InvoiceRetryPolicy:\n    raw = load_retry_policy()\n    return InvoiceRetryPolicy(\n        initial_delay_seconds=raw[\"initial_delay_seconds\"],\n        max_attempts=raw[\"max_attempts\"],\n        backoff_multiplier=raw.get(\"backoff_multiplier\", 2),\n    )\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-4-call-1",
+    "provider_call_id": "call_00_7dQE6wO0ouFhSbYXVBcQ1285"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Logging helpers.\"\"\"\n\n\ndef get_logger_name(module: str) -> str:\n    return f\"medium_fixture.{module}\"\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-4-call-2",
+    "provider_call_id": "call_01_Pnbzu61njGuiqARKoY5R0403"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Domain event primitives.\"\"\"\n\nfrom dataclasses import dataclass\nfrom typing import Callable\n\n\nORDER_CANCELLED = \"order.cancelled\"\nPAYMENT_WEBHOOK_ACCEPTED = \"billing.webhook.accepted\"\nINVOICE_RETRY_REQUESTED = \"billing.invoice.retry_requested\"\n\n\n@dataclass(frozen=True)\nclass EventEnvelope:\n    \"\"\"Event wrapper shared by producers and consumers.\"\"\"\n\n    name: str\n    payload: dict\n\n\nclass EventBus:\n    \"\"\"In-memory event bus for the fixture.\"\"\"\n\n    def __init__(self) -> None:\n        self._handlers: dict[str, list[Callable[[EventEnvelope], None]]] = {}\n\n    def subscribe(self, name: str, handler: Callable[[EventEnvelope], None]) -> None:\n        self._handlers.setdefault(name, []).append(handler)\n\n    def publish(self, event: EventEnvelope) -> None:\n        for handler in self._handlers.get(event.name, []):\n            handler(event)\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-4-call-3",
+    "provider_call_id": "call_02_Yc3EdZ6dQpEURDZFxCi28238"
+  },
+  {
+    "role": "tool",
+    "content": "[project]\nname = \"medium-fixture\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11\"\n\n[tool.pytest.ini_options]\naddopts = \"-ra -q\"\ntestpaths = [\"tests\"]\n\n[tool.ruff]\ntarget-version = \"py311\"\n\n[tool.mypy]\nfiles = [\"src\"]\npython_version = \"3.11\"\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-4-call-4",
+    "provider_call_id": "call_03_Q26PlhuH80gXzHmd0uY59779"
+  },
+  {
+    "role": "assistant",
+    "content": "Now let me check if there's a YAML library available and how configs are loaded elsewhere. Let me check the pyproject for dependencies and look at how logging.yaml or retry_policy.toml are actually read.",
+    "tool_calls": [
+      {
+        "call_id": "step-5-call-1",
+        "provider_call_id": "call_00_ZzDzp5PppiPrl7vJ4kht7093",
+        "name": "read_file",
+        "arguments": {
+          "path": "configs/retry_policy.toml"
+        }
+      },
+      {
+        "call_id": "step-5-call-2",
+        "provider_call_id": "call_01_vcEszpHJGcnl0NRR5PId6728",
+        "name": "read_file",
+        "arguments": {
+          "path": "configs/logging.yaml"
+        }
+      },
+      {
+        "call_id": "step-5-call-3",
+        "provider_call_id": "call_02_ktH6UhkKU1nzrzkbDn970256",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/main.py"
+        }
+      },
+      {
+        "call_id": "step-5-call-4",
+        "provider_call_id": "call_03_JOrglT76BHAoy7Nhhpy62439",
+        "name": "inspect_environment",
+        "arguments": {
+          "python_module": "yaml"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "[invoice_retry]\ninitial_delay_seconds = 30\nmax_attempts = 5\nbackoff_multiplier = 2\n\n[webhook_retry]\ninitial_delay_seconds = 10\nmax_attempts = 3\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-5-call-1",
+    "provider_call_id": "call_00_ZzDzp5PppiPrl7vJ4kht7093"
+  },
+  {
+    "role": "tool",
+    "content": "version: 1\nformatters:\n  concise:\n    format: \"%(levelname)s %(name)s %(message)s\"\nloggers:\n  medium_fixture:\n    level: INFO\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-5-call-2",
+    "provider_call_id": "call_01_vcEszpHJGcnl0NRR5PId6728"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Application entrypoint for the medium fixture.\"\"\"\n\nfrom src.auth.api import AuthController\nfrom src.orders.api import OrderController\nfrom src.billing.webhooks import BillingWebhookController\n\n\ndef create_app() -> dict:\n    \"\"\"Wire controllers for tests and retrieval fixtures.\"\"\"\n    return {\n        \"auth\": AuthController(),\n        \"orders\": OrderController(),\n        \"billing_webhooks\": BillingWebhookController(),\n    }\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-5-call-3",
+    "provider_call_id": "call_02_ktH6UhkKU1nzrzkbDn970256"
+  },
+  {
+    "role": "tool",
+    "content": "{\"kind\":\"python_module\",\"name\":\"yaml\",\"runtime_available\":false,\"declared_by_project\":false,\"environment\":\"verification_sandbox\",\"warning\":null,\"error\":null}",
+    "tool_calls": null,
+    "tool_call_id": "step-5-call-4",
+    "provider_call_id": "call_03_JOrglT76BHAoy7Nhhpy62439"
+  },
+  {
+    "role": "assistant",
+    "content": "`yaml` is not available. Let me check what's available for parsing YAML, and check the test more carefully. The test writes a simple YAML file. Let me check available modules.",
+    "tool_calls": [
+      {
+        "call_id": "step-6-call-1",
+        "provider_call_id": "call_00_0wQlwEq9odUrJgXNfzRR9567",
+        "name": "inspect_environment",
+        "arguments": {
+          "python_module": "tomllib"
+        }
+      },
+      {
+        "call_id": "step-6-call-2",
+        "provider_call_id": "call_01_x6AhhkDFc3tQyTsViQev2590",
+        "name": "inspect_environment",
+        "arguments": {
+          "python_module": "ruamel"
+        }
+      },
+      {
+        "call_id": "step-6-call-3",
+        "provider_call_id": "call_02_EKUQuoNNRYzwklknl2cy7869",
+        "name": "inspect_environment",
+        "arguments": {
+          "python_module": "tomli"
+        }
+      },
+      {
+        "call_id": "step-6-call-4",
+        "provider_call_id": "call_03_tR67fWQabzaD3zO4Ud1c2271",
+        "name": "read_file",
+        "arguments": {
+          "path": "tests/task_verification/test_f03.py"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"kind\":\"python_module\",\"name\":\"tomllib\",\"runtime_available\":true,\"declared_by_project\":false,\"environment\":\"verification_sandbox\",\"warning\":\"Available in this verification sandbox but not declared by the project; relying on it is not portable.\",\"error\":null}",
+    "tool_calls": null,
+    "tool_call_id": "step-6-call-1",
+    "provider_call_id": "call_00_0wQlwEq9odUrJgXNfzRR9567"
+  },
+  {
+    "role": "tool",
+    "content": "{\"kind\":\"python_module\",\"name\":\"ruamel\",\"runtime_available\":false,\"declared_by_project\":false,\"environment\":\"verification_sandbox\",\"warning\":null,\"error\":null}",
+    "tool_calls": null,
+    "tool_call_id": "step-6-call-2",
+    "provider_call_id": "call_01_x6AhhkDFc3tQyTsViQev2590"
+  },
+  {
+    "role": "tool",
+    "content": "{\"kind\":\"python_module\",\"name\":\"tomli\",\"runtime_available\":false,\"declared_by_project\":false,\"environment\":\"verification_sandbox\",\"warning\":null,\"error\":null}",
+    "tool_calls": null,
+    "tool_call_id": "step-6-call-3",
+    "provider_call_id": "call_02_EKUQuoNNRYzwklknl2cy7869"
+  },
+  {
+    "role": "tool",
+    "content": "{\"initial_context_reference\":true,\"initial_context_cache_hit\":true,\"path\":\"tests/task_verification/test_f03.py\",\"content_hash\":\"d3eab955bfe9547002b4eff3d024c8acf0f315e394263fb012c908119ed2fbf9\",\"workspace_version\":0,\"content_location\":\"current_model_request.initial_context\"}",
+    "tool_calls": null,
+    "tool_call_id": "step-6-call-4",
+    "provider_call_id": "call_03_tR67fWQabzaD3zO4Ud1c2271"
+  },
+  {
+    "role": "assistant",
+    "content": "The test file content is cached. Let me read it directly to see the exact test expectations.",
+    "tool_calls": [
+      {
+        "call_id": "step-7-call-1",
+        "provider_call_id": "call_00_OSFsZt2rZJ0Mdx3diNIc4181",
+        "name": "read_file",
+        "arguments": {
+          "path": "tests/task_verification/test_f03.py",
+          "start_line": 1,
+          "end_line": 200
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "from src.common.events import ORDER_CANCELLED, EventEnvelope\nfrom src.notifications.dispatcher import NotificationDispatcher\n\n\nclass Sender:\n    def __init__(self) -> None:\n        self.sent: list[tuple[str, str, dict]] = []\n\n    def send(self, to: str, template: str, context: dict) -> None:\n        self.sent.append((to, template, context))\n\n\ndef test_email_dispatch_can_be_explicitly_disabled(tmp_path, monkeypatch) -> None:\n    configs = tmp_path / \"configs\"\n    configs.mkdir()\n    (configs / \"feature_flags.yaml\").write_text(\n        \"notifications:\\n  email_dispatch_enabled: false\\n\", encoding=\"utf-8\"\n    )\n    monkeypatch.chdir(tmp_path)\n    sender = Sender()\n    NotificationDispatcher(sender=sender).handle(EventEnvelope(ORDER_CANCELLED, {}))\n    assert sender.sent == []\n",
+    "tool_calls": null,
+    "tool_call_id": "step-7-call-1",
+    "provider_call_id": "call_00_OSFsZt2rZJ0Mdx3diNIc4181"
+  },
+  {
+    "role": "assistant",
+    "content": "Now let me read the dispatcher and email files.",
+    "tool_calls": [
+      {
+        "call_id": "step-8-call-1",
+        "provider_call_id": "call_00_akoUNMPIysGT6y5qkGzn0945",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/notifications/dispatcher.py"
+        }
+      },
+      {
+        "call_id": "step-8-call-2",
+        "provider_call_id": "call_01_bVSH0MCqYgB3yUcDkNBq3734",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/notifications/email.py"
+        }
+      },
+      {
+        "call_id": "step-8-call-3",
+        "provider_call_id": "call_02_jO8OiHppM5KNkrbzWAsE4275",
+        "name": "read_file",
+        "arguments": {
+          "path": "src/notifications/templates.py"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Event-driven notification dispatch.\"\"\"\n\nfrom src.common.events import EventEnvelope, INVOICE_RETRY_REQUESTED, ORDER_CANCELLED\nfrom src.notifications.email import EmailSender\nfrom src.notifications.templates import TEMPLATE_INVOICE_RETRY, TEMPLATE_ORDER_CANCELLED\n\n\nclass NotificationDispatcher:\n    \"\"\"Routes events to email templates.\"\"\"\n\n    def __init__(self, sender: EmailSender | None = None) -> None:\n        self.sender = sender or EmailSender()\n\n    def handle(self, event: EventEnvelope) -> None:\n        if event.name == ORDER_CANCELLED:\n            self.sender.send(\"ops@example.com\", TEMPLATE_ORDER_CANCELLED, event.payload)\n        if event.name == INVOICE_RETRY_REQUESTED:\n            self.sender.send(\"billing@example.com\", TEMPLATE_INVOICE_RETRY, event.payload)\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-8-call-1",
+    "provider_call_id": "call_00_akoUNMPIysGT6y5qkGzn0945"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Email sender.\"\"\"\n\n\nclass EmailSender:\n    def send(self, to: str, template: str, context: dict) -> None:\n        return None\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-8-call-2",
+    "provider_call_id": "call_01_bVSH0MCqYgB3yUcDkNBq3734"
+  },
+  {
+    "role": "tool",
+    "content": "\"\"\"Notification templates.\"\"\"\n\n\nTEMPLATE_ORDER_CANCELLED = \"order_cancelled\"\nTEMPLATE_INVOICE_RETRY = \"invoice_retry\"\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-8-call-3",
+    "provider_call_id": "call_02_jO8OiHppM5KNkrbzWAsE4275"
+  },
+  {
+    "role": "assistant",
+    "content": "Now I understand the full picture. I need to:\n\n1. Read `configs/feature_flags.yaml` to check `notifications.email_dispatch_enabled`.\n2. Suppress dispatch only when the flag is explicitly `false`.\n3. Preserve current behavior when file/section/flag is missing.\n\nSince `yaml` is not available, I need to parse the YAML manually or use a minimal approach. The YAML structure is simple: `notifications:\\n  email_dispatch_enabled: false`. Let me check the actual config file content.",
+    "tool_calls": [
+      {
+        "call_id": "step-9-call-1",
+        "provider_call_id": "call_00_HEFAdtS0EXL6OguIuSyr4770",
+        "name": "read_file",
+        "arguments": {
+          "path": "configs/feature_flags.yaml"
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "auth:\n  refresh_rotation_enabled: true\norders:\n  stream_export_enabled: true\ninventory:\n  reservation_audit_enabled: true\nbilling:\n  webhook_signature_required: true\n\n",
+    "tool_calls": null,
+    "tool_call_id": "step-9-call-1",
+    "provider_call_id": "call_00_HEFAdtS0EXL6OguIuSyr4770"
+  },
+  {
+    "role": "assistant",
+    "content": "The current `configs/feature_flags.yaml` doesn't have a `notifications` section. The test creates its own config with `notifications:\\n  email_dispatch_enabled: false`.\n\nI need to write a YAML parser. Since `yaml` isn't available, I'll write a minimal, robust parser for this simple YAML structure. But I should be careful — the task says \"read notifications.email_dispatch_enabled from configs/feature_flags.yaml\". \n\nLet me think about the best approach. The YAML is simple nested structure. I'll write a small helper that parses the YAML. But a full YAML parser is complex. Given the constraints, I'll implement a minimal parser that handles the simple `key: value` and nested indentation structure.\n\nActually, let me check if there's a simpler approach. The flag value could be `true` or `false`. I need to detect `notifications:` section and `email_dispatch_enabled:` key within it.\n\nLet me write a focused parser. I'll add a helper in `src/common/settings.py` or directly in the dispatcher. Given the architecture, config loading belongs in `src/common/settings.py` (it already has `config_path` and `load_retry_policy`).\n\nLet me write a minimal YAML parser that handles:\n- Top-level keys like `notifications:`\n- Nested keys with indentation like `  email_dispatch_enabled: false`\n- Values `true`/`false`\n\nI'll implement a simple line-based parser. Let me write it carefully to handle the structure.\n\nLet me design the parser:\n\n```python\ndef load_feature_flags() -> dict:\n    path = config_path(\"feature_flags.yaml\")\n    if not path.exists():\n        return {}\n    return _parse_simple_yaml(path.read_text(encoding=\"utf-8\"))\n```\n\nThe parser needs to handle nested sections. A simple approach: track indentation levels.\n\nActually, let me write a minimal but correct parser for this specific YAML subset (mappings with scalar values, 2-space indentation).\n\nLet me implement:\n\n```python\ndef _parse_simple_yaml(text: str) -> dict:\n    result: dict = {}\n    stack: list[tuple[int, dict]] = []  # (indent, dict)\n    for raw_line in text.splitlines():\n        line = raw_line.rstrip()\n        if not line.strip() or line.strip().startswith(\"#\"):\n            continue\n        indent = len(line) - len(line.lstrip(\" \"))\n        content = line.strip()\n        if content.endswith(\":\"):\n            key = content[:-1].strip()\n            new_dict: dict = {}\n            # pop stack until indent < current\n            while stack and stack[-1][0] >= indent:\n                stack.pop()\n            if stack:\n                stack[-1][1][key] = new_dict\n            else:\n                result[key] = new_dict\n            stack.append((indent, new_dict))\n        else:\n            key, _, value = content.partition(\":\")\n            key = key.strip()\n            value = value.strip()\n            while stack and stack[-1][0] >= indent:\n                stack.pop()\n            target = stack[-1][1] if stack else result\n            target[key] = _parse_scalar(value)\n    return result\n```\n\nThis handles the structure. `_parse_scalar` converts \"true\"/\"false\" to bool, numbers to int, etc.\n\nActually, let me keep it simpler and focused. The flag value is `false` or `true`. I'll parse booleans.\n\nLet me write the helper in settings.py and use it in dispatcher.\n\nNow, the dispatcher logic:\n\n```python\ndef handle(self, event):\n    if not self._email_dispatch_enabled():\n        return\n    ...\n```\n\nWhere `_email_dispatch_enabled` reads the flag and returns True unless explicitly false.\n\nLet me write:\n\n```python\ndef _email_dispatch_enabled(self) -> bool:\n    flags = load_feature_flags()\n    notifications = flags.get(\"notifications\")\n    if not isinstance(notifications, dict):\n        return True\n    value = notifications.get(\"email_dispatch_enabled\")\n    if value is None:\n        return True\n    return value is not False\n```\n\nWait, \"suppressed only when the flag is explicitly false\". So if value is `False`, return False (suppress). Otherwise return True. So `return value is not False` — but if value is `False` (bool), `value is not False` → False. If value is `True`, → True. If value is some other truthy/falsy... but the flag should be boolean. Let me be precise: suppress only when explicitly false.\n\n`return value is not False` works: only `False` (the bool) suppresses. But what if value is string \"false\"? The parser converts to bool. Good.\n\nActually simpler: `return value is not False`. But to be safe and clear, I'll write:\n\n```python\nif value is False:\n    return False\nreturn True\n```\n\nLet me now implement. I'll add to settings.py.\n\nLet me also consider: should I read the file each time `handle` is called, or cache? The test monkeypatches chdir and creates the file before calling. Reading each time is fine and simplest, and matches \"read from configs/feature_flags.yaml in the current project\" (relative path via config_path).\n\nLet me write the code.Now I understand the full picture. I need to:\n1. Add a YAML parsing helper (since `yaml` isn't available) to read `configs/feature_flags.yaml`.\n2. Modify `NotificationDispatcher.handle` to suppress dispatch only when `notifications.email_dispatch_enabled` is explicitly `false`.\n\nLet me implement the config loading helper in `src/common/settings.py`:",
+    "tool_calls": [
+      {
+        "call_id": "step-10-call-1",
+        "provider_call_id": "call_00_iqzBs5enMAvteporg0rx4481",
+        "name": "apply_patch",
+        "arguments": {
+          "edits": [
+            {
+              "path": "src/common/settings.py",
+              "content": "\"\"\"Configuration loading helpers.\"\"\"\n\nfrom pathlib import Path\n\n\ndef config_path(name: str) -> Path:\n    return Path(\"configs\") / name\n\n\ndef load_retry_policy() -> dict:\n    return {\"initial_delay_seconds\": 30, \"max_attempts\": 5}\n\n\ndef _parse_scalar(value: str):\n    value = value.strip()\n    if value == \"true\":\n        return True\n    if value == \"false\":\n        return False\n    if value == \"null\" or value == \"~\":\n        return None\n    try:\n        return int(value)\n    except ValueError:\n        pass\n    try:\n        return float(value)\n    except ValueError:\n        pass\n    return value\n\n\ndef _parse_simple_yaml(text: str) -> dict:\n    \"\"\"Parse the small subset of YAML used by feature_flags.yaml.\n\n    Supports nested mappings with scalar values and 2-space indentation.\n    \"\"\"\n    result: dict = {}\n    stack: list[tuple[int, dict]] = []\n    for raw_line in text.splitlines():\n        line = raw_line.rstrip()\n        stripped = line.strip()\n        if not stripped or stripped.startswith(\"#\"):\n            continue\n        indent = len(line) - len(line.lstrip(\" \"))\n        if stripped.endswith(\":\"):\n            key = stripped[:-1].strip()\n            child: dict = {}\n            while stack and stack[-1][0] >= indent:\n                stack.pop()\n            if stack:\n                stack[-1][1][key] = child\n            else:\n                result[key] = child\n            stack.append((indent, child))\n        else:\n            key, _, value = stripped.partition(\":\")\n            key = key.strip()\n            while stack and stack[-1][0] >= indent:\n                stack.pop()\n            target = stack[-1][1] if stack else result\n            target[key] = _parse_scalar(value)\n    return result\n\n\ndef load_feature_flags() -> dict:\n    \"\"\"Load feature flags from configs/feature_flags.yaml.\n\n    Returns an empty dict when the file is missing or unreadable.\n    \"\"\"\n    path = config_path(\"feature_flags.yaml\")\n    try:\n        text = path.read_text(encoding=\"utf-8\")\n    except OSError:\n        return {}\n    return _parse_simple_yaml(text)\n"
+            }
+          ]
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"applied\": true, \"changed_files\": [\"src/common/settings.py\"]}",
+    "tool_calls": null,
+    "tool_call_id": "step-10-call-1",
+    "provider_call_id": "call_00_iqzBs5enMAvteporg0rx4481"
+  },
+  {
+    "role": "assistant",
+    "content": "Now update the dispatcher:",
+    "tool_calls": [
+      {
+        "call_id": "step-11-call-1",
+        "provider_call_id": "call_00_WPbMGKme2W1H5QrdBQwm6630",
+        "name": "apply_patch",
+        "arguments": {
+          "edits": [
+            {
+              "path": "src/notifications/dispatcher.py",
+              "content": "\"\"\"Event-driven notification dispatch.\"\"\"\n\nfrom src.common.events import EventEnvelope, INVOICE_RETRY_REQUESTED, ORDER_CANCELLED\nfrom src.common.settings import load_feature_flags\nfrom src.notifications.email import EmailSender\nfrom src.notifications.templates import TEMPLATE_INVOICE_RETRY, TEMPLATE_ORDER_CANCELLED\n\n\nclass NotificationDispatcher:\n    \"\"\"Routes events to email templates.\"\"\"\n\n    def __init__(self, sender: EmailSender | None = None) -> None:\n        self.sender = sender or EmailSender()\n\n    def _email_dispatch_enabled(self) -> bool:\n        \"\"\"Return False only when the flag is explicitly false.\"\"\"\n        flags = load_feature_flags()\n        notifications = flags.get(\"notifications\")\n        if not isinstance(notifications, dict):\n            return True\n        value = notifications.get(\"email_dispatch_enabled\")\n        if value is False:\n            return False\n        return True\n\n    def handle(self, event: EventEnvelope) -> None:\n        if not self._email_dispatch_enabled():\n            return\n        if event.name == ORDER_CANCELLED:\n            self.sender.send(\"ops@example.com\", TEMPLATE_ORDER_CANCELLED, event.payload)\n        if event.name == INVOICE_RETRY_REQUESTED:\n            self.sender.send(\"billing@example.com\", TEMPLATE_INVOICE_RETRY, event.payload)\n"
+            }
+          ]
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"applied\": true, \"changed_files\": [\"src/common/settings.py\", \"src/notifications/dispatcher.py\"]}",
+    "tool_calls": null,
+    "tool_call_id": "step-11-call-1",
+    "provider_call_id": "call_00_WPbMGKme2W1H5QrdBQwm6630"
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "call_id": "step-12-call-1",
+        "provider_call_id": "call_00_OZAVuO0HUTVwNJx2Iqyz5038",
+        "name": "run_tests",
+        "arguments": {
+          "argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests/task_verification/test_f03.py",
+            "-q"
+          ]
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"argv\":[\"python\",\"-m\",\"pytest\",\"tests/task_verification/test_f03.py\",\"-q\"],\"passed\":true,\"category\":\"passed\",\"environment_failure_category\":null,\"exit_code\":0,\"duration_ms\":399.9900408089161,\"stdout\":\".                                                                        [100%]\\n\",\"stderr\":\"\",\"error\":null,\"completion_required\":true,\"workspace_version\":2,\"workspace_fingerprint_before\":\"7af5e6e717d10e7a971db2bed35d0915b3441a46cf9f163eb5fc2f3c117b02c7\",\"workspace_fingerprint_after\":\"7af5e6e717d10e7a971db2bed35d0915b3441a46cf9f163eb5fc2f3c117b02c7\",\"workspace_mutations\":[]}",
+    "tool_calls": null,
+    "tool_call_id": "step-12-call-1",
+    "provider_call_id": "call_00_OZAVuO0HUTVwNJx2Iqyz5038"
+  },
+  {
+    "role": "assistant",
+    "content": "The task verification passes. Now let me run the full regression suite.",
+    "tool_calls": [
+      {
+        "call_id": "step-13-call-1",
+        "provider_call_id": "call_00_YyoKIEFBYjNXECkrv7Gb7528",
+        "name": "run_tests",
+        "arguments": {
+          "argv": [
+            "python",
+            "-m",
+            "pytest",
+            "tests",
+            "-q"
+          ]
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"argv\":[\"python\",\"-m\",\"pytest\",\"tests\",\"-q\"],\"passed\":true,\"category\":\"passed\",\"environment_failure_category\":null,\"exit_code\":0,\"duration_ms\":403.01566710695624,\"stdout\":\"........                                                                 [100%]\\n\",\"stderr\":\"\",\"error\":null,\"completion_required\":true,\"workspace_version\":2,\"workspace_fingerprint_before\":\"7af5e6e717d10e7a971db2bed35d0915b3441a46cf9f163eb5fc2f3c117b02c7\",\"workspace_fingerprint_after\":\"7af5e6e717d10e7a971db2bed35d0915b3441a46cf9f163eb5fc2f3c117b02c7\",\"workspace_mutations\":[]}",
+    "tool_calls": null,
+    "tool_call_id": "step-13-call-1",
+    "provider_call_id": "call_00_YyoKIEFBYjNXECkrv7Gb7528"
+  },
+  {
+    "role": "assistant",
+    "content": "All tests pass. Let me review the final diff.",
+    "tool_calls": [
+      {
+        "call_id": "step-14-call-1",
+        "provider_call_id": "call_00_uhLW5shGFQTWah8pc4Xk6789",
+        "name": "git_diff",
+        "arguments": {}
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "diff --git a/src/common/settings.py b/src/common/settings.py\nindex 9da8c11..9cfce12 100644\n--- a/src/common/settings.py\n+++ b/src/common/settings.py\n@@ -10,3 +10,67 @@ def config_path(name: str) -> Path:\n def load_retry_policy() -> dict:\n     return {\"initial_delay_seconds\": 30, \"max_attempts\": 5}\n \n+\n+def _parse_scalar(value: str):\n+    value = value.strip()\n+    if value == \"true\":\n+        return True\n+    if value == \"false\":\n+        return False\n+    if value == \"null\" or value == \"~\":\n+        return None\n+    try:\n+        return int(value)\n+    except ValueError:\n+        pass\n+    try:\n+        return float(value)\n+    except ValueError:\n+        pass\n+    return value\n+\n+\n+def _parse_simple_yaml(text: str) -> dict:\n+    \"\"\"Parse the small subset of YAML used by feature_flags.yaml.\n+\n+    Supports nested mappings with scalar values and 2-space indentation.\n+    \"\"\"\n+    result: dict = {}\n+    stack: list[tuple[int, dict]] = []\n+    for raw_line in text.splitlines():\n+        line = raw_line.rstrip()\n+        stripped = line.strip()\n+        if not stripped or stripped.startswith(\"#\"):\n+            continue\n+        indent = len(line) - len(line.lstrip(\" \"))\n+        if stripped.endswith(\":\"):\n+            key = stripped[:-1].strip()\n+            child: dict = {}\n+            while stack and stack[-1][0] >= indent:\n+                stack.pop()\n+            if stack:\n+                stack[-1][1][key] = child\n+            else:\n+                result[key] = child\n+            stack.append((indent, child))\n+        else:\n+            key, _, value = stripped.partition(\":\")\n+            key = key.strip()\n+            while stack and stack[-1][0] >= indent:\n+                stack.pop()\n+            target = stack[-1][1] if stack else result\n+            target[key] = _parse_scalar(value)\n+    return result\n+\n+\n+def load_feature_flags() -> dict:\n+    \"\"\"Load feature flags from configs/feature_flags.yaml.\n+\n+    Returns an empty dict when the file is missing or unreadable.\n+    \"\"\"\n+    path = config_path(\"feature_flags.yaml\")\n+    try:\n+        text = path.read_text(encoding=\"utf-8\")\n+    except OSError:\n+        return {}\n+    return _parse_simple_yaml(text)\ndiff --git a/src/notifications/dispatcher.py b/src/notifications/dispatcher.py\nindex 36d4e13..1cfcb94 100644\n--- a/src/notifications/dispatcher.py\n+++ b/src/notifications/dispatcher.py\n@@ -1,6 +1,7 @@\n \"\"\"Event-driven notification dispatch.\"\"\"\n \n from src.common.events import EventEnvelope, INVOICE_RETRY_REQUESTED, ORDER_CANCELLED\n+from src.common.settings import load_feature_flags\n from src.notifications.email import EmailSender\n from src.notifications.templates import TEMPLATE_INVOICE_RETRY, TEMPLATE_ORDER_CANCELLED\n \n@@ -11,9 +12,21 @@ class NotificationDispatcher:\n     def __init__(self, sender: EmailSender | None = None) -> None:\n         self.sender = sender or EmailSender()\n \n+    def _email_dispatch_enabled(self) -> bool:\n+        \"\"\"Return False only when the flag is explicitly false.\"\"\"\n+        flags = load_feature_flags()\n+        notifications = flags.get(\"notifications\")\n+        if not isinstance(notifications, dict):\n+            return True\n+        value = notifications.get(\"email_dispatch_enabled\")\n+        if value is False:\n+            return False\n+        return True\n+\n     def handle(self, event: EventEnvelope) -> None:\n+        if not self._email_dispatch_enabled():\n+            return\n         if event.name == ORDER_CANCELLED:\n             self.sender.send(\"ops@example.com\", TEMPLATE_ORDER_CANCELLED, event.payload)\n         if event.name == INVOICE_RETRY_REQUESTED:\n             self.sender.send(\"billing@example.com\", TEMPLATE_INVOICE_RETRY, event.payload)\n-\n\n\n{\"completion_ready\": true, \"workspace_version\": 2, \"next_action\": \"Call submit_result alone.\"}",
+    "tool_calls": null,
+    "tool_call_id": "step-14-call-1",
+    "provider_call_id": "call_00_uhLW5shGFQTWah8pc4Xk6789"
+  },
+  {
+    "role": "assistant",
+    "content": "The implementation is complete and all tests pass. Let me submit the result.",
+    "tool_calls": [
+      {
+        "call_id": "step-15-call-1",
+        "provider_call_id": "call_00_gzKhvb0n3HeT3TlN5wt79189",
+        "name": "submit_result",
+        "arguments": {
+          "summary": "Implemented feature flag support for NotificationDispatcher. Added `load_feature_flags()` and a minimal YAML parser to `src/common/settings.py` that reads `configs/feature_flags.yaml` (returning `{}` when the file is missing/unreadable). Updated `NotificationDispatcher.handle` to suppress dispatch only when `notifications.email_dispatch_enabled` is explicitly `false`, preserving current behavior when the file, section, or flag is missing. Task verification and full regression suite both pass."
+        }
+      }
+    ],
+    "tool_call_id": null,
+    "provider_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"accepted\": true, \"ready\": true, \"workspace_version\": 2, \"missing_requirements\": []}",
+    "tool_calls": null,
+    "tool_call_id": "step-15-call-1",
+    "provider_call_id": "call_00_gzKhvb0n3HeT3TlN5wt79189"
+  }
+]

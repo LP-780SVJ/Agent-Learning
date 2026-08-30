@@ -22,6 +22,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
 
+from codeteam.agent.runtime_models import CompletionMode
 from codeteam.context.compaction import ContextSummary
 from codeteam.events import AgentEventType
 from codeteam.failures.models import AgentFailure
@@ -30,10 +31,10 @@ from codeteam.schemas.messages import Message
 from codeteam.task.models import TaskSpec
 from codeteam.task.state import TaskStatus
 
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4})
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4, 5})
 """Loader 允许加载的 schema 代数。旧版本 ≠ 损坏（未来走 Migration）。"""
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 _SENSITIVE_METADATA_KEY_MARKERS = frozenset(
     {
@@ -240,6 +241,11 @@ class AgentRuntimeState(BaseModel):
     verification_commands: tuple[tuple[str, ...], ...] = ()
     task_verification_commands: tuple[tuple[str, ...], ...] = ()
     progress_metrics: dict[str, Any] = Field(default_factory=dict)
+    completion_mode: CompletionMode | None = None
+    effective_max_steps: int = 20
+    finalization_reserve_steps: int = 4
+    finalization_reserve_entered: bool = False
+    finalization_reserve_entry_step: int | None = None
 
 
 class SessionEvent(BaseModel):

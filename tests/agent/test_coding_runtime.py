@@ -13,10 +13,15 @@ from codeteam.agent.editing import (
     file_edits_to_patch,
     text_replacements_to_patch,
 )
+from codeteam.agent.finalization import (
+    FinalizationBudgetPolicy,
+    FinalizationBudgetTracker,
+)
 from codeteam.agent.runtime import CodingAgentRuntime, _message_transform
 from codeteam.agent.runtime_models import (
     CodingAgentRunRequest,
     CompactionMode,
+    CompletionMode,
     RuntimeStatus,
     VerificationEvidence,
 )
@@ -268,6 +273,49 @@ def _native_call(index: int, name: str, arguments: dict) -> ModelTurn:
     )
 
 
+def _native_calls(*calls: tuple[int, str, dict]) -> ModelTurn:
+    return ModelTurn(
+        text=None,
+        tool_calls=tuple(
+            ToolCall(
+                provider_call_id=f"provider-call-{index}",
+                name=name,
+                arguments=arguments,
+            )
+            for index, name, arguments in calls
+        ),
+        finish_state=ModelFinishState.TOOL_CALLS,
+        finish_reason="tool_calls",
+        model="mock-model",
+    )
+
+
+@pytest.mark.parametrize(
+    ("effective_max_steps", "expected_reserve"),
+    [(1, 1), (10, 3), (20, 4), (30, 6)],
+)
+def test_finalization_budget_policy_default_reserve(
+    effective_max_steps: int,
+    expected_reserve: int,
+) -> None:
+    policy = FinalizationBudgetPolicy(effective_max_steps=effective_max_steps)
+
+    assert policy.reserve_steps == expected_reserve
+
+
+def test_finalization_budget_tracker_enters_only_with_real_diff() -> None:
+    policy = FinalizationBudgetPolicy(
+        effective_max_steps=20,
+        configured_reserve_steps=5,
+    )
+    tracker = FinalizationBudgetTracker(policy=policy)
+
+    assert not tracker.observe(step=16, has_real_diff=False)
+    assert tracker.observe(step=16, has_real_diff=True)
+    assert tracker.reserve_entry_step == 16
+    assert not tracker.observe(step=17, has_real_diff=True)
+
+
 def test_native_patch_test_diff_closes_through_safe_execution(
     tmp_path: Path,
 ) -> None:
@@ -382,6 +430,181 @@ def test_native_submit_result_is_runtime_owned_terminal_action(
     assert [message.role for message in result.messages[-2:]] == ["assistant", "tool"]
     assert result.messages[-1].provider_call_id == "provider-call-4"
     assert json.loads(result.messages[-1].content or "{}")["accepted"] is True
+    assert result.completion_mode is CompletionMode.MODEL_SUBMITTED
+    assert result.budget_boundary_completion_count == 0
+
+
+def test_step_boundary_without_ready_evidence_remains_max_steps(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    model = NativeScriptedModel(
+        [
+            _native_call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            )
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="boundary-not-ready",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            max_steps=1,
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert result.status is RuntimeStatus.FAILED
+    assert result.failure_category == "max_steps"
+    assert result.completion_mode is None
+    assert len(model.requests) == 1
+
+
+def test_ready_on_last_legal_turn_uses_runtime_terminal_settlement(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    model = NativeScriptedModel(
+        [
+            _native_call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
+            _native_call(2, "run_tests", {"argv": ["python", "-m", "pytest"]}),
+            _native_call(3, "git_diff", {}),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=SafeExecutionService(sandbox_runner=PassingSandbox()),
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="boundary-ready",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            max_steps=3,
+            verification_commands=(("python", "-m", "pytest"),),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert result.completion_mode is CompletionMode.RUNTIME_BUDGET_BOUNDARY_SETTLEMENT
+    assert result.budget_boundary_completion_count == 1
+    assert result.steps_used == 3
+    assert len(model.requests) == 3
+    assert "app.py" in result.summary
+    assert all(
+        "Completed verified changes in:" not in (output.raw_content or "")
+        for output in result.model_outputs
+    )
+
+
+def test_stale_verification_cannot_settle_at_step_boundary(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    model = NativeScriptedModel(
+        [
+            _native_call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
+            _native_call(2, "run_tests", {"argv": ["python", "-m", "pytest"]}),
+            _native_call(
+                3,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 3\n"}]},
+            ),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=SafeExecutionService(sandbox_runner=PassingSandbox()),
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="boundary-stale",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            max_steps=3,
+            verification_commands=(("python", "-m", "pytest"),),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert result.status is RuntimeStatus.FAILED
+    assert result.failure_category == "max_steps"
+    assert result.workspace_version == 2
+    assert result.completion_mode is None
+    assert len(model.requests) == 3
+
+
+def test_external_mutation_blocks_ready_terminal_settlement(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    mutated = False
+
+    def mutate_after_diff(state, evidence) -> None:
+        nonlocal mutated
+        if (
+            not mutated
+            and state.step_count == 3
+            and evidence.git_diff_checked_version == evidence.workspace_version
+        ):
+            (repo / "external.txt").write_text("unobserved\n", encoding="utf-8")
+            mutated = True
+
+    model = NativeScriptedModel(
+        [
+            _native_call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
+            _native_call(2, "run_tests", {"argv": ["python", "-m", "pytest"]}),
+            _native_call(3, "git_diff", {}),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=SafeExecutionService(sandbox_runner=PassingSandbox()),
+        context_service=StubContext(),
+        state_callback=mutate_after_diff,
+    ).run(
+        CodingAgentRunRequest(
+            task_id="boundary-drift",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            max_steps=3,
+            verification_commands=(("python", "-m", "pytest"),),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert mutated
+    assert result.status is RuntimeStatus.PAUSED
+    assert result.failure_category == "workspace_drift"
+    assert result.completion_mode is None
+    assert len(model.requests) == 3
 
 
 def test_submit_result_rejection_preserves_pairing_and_continues(
@@ -469,6 +692,226 @@ def test_completion_ready_duplicate_is_advisory_then_submit_can_finish(
     )
     assert json.loads(advisory.content or "{}")["completion_ready"] is True
     assert result.post_ready_tool_calls == 1
+    assert result.status is RuntimeStatus.COMPLETED
+
+
+def test_finalization_reserve_recovers_after_late_patch(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    task_command = ("python", "-m", "pytest", "tests/task")
+    regression_command = ("python", "-m", "pytest", "tests/regression")
+    model = NativeScriptedModel(
+        [
+            _native_call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
+            _native_call(2, "run_tests", {"argv": list(task_command)}),
+            _native_call(3, "run_tests", {"argv": list(regression_command)}),
+            _native_call(
+                4,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 3\n"}]},
+            ),
+            _native_call(5, "run_tests", {"argv": list(task_command)}),
+            _native_call(6, "run_tests", {"argv": list(regression_command)}),
+            _native_call(7, "git_diff", {}),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=SafeExecutionService(sandbox_runner=PassingSandbox()),
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="late-patch-finalization",
+            task="change VALUE and keep docs current",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            max_steps=7,
+            finalization_reserve_steps=3,
+            task_verification_commands=(task_command,),
+            verification_commands=(regression_command,),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    advisory = next(
+        json.loads(message.content or "{}")
+        for message in model.requests[4].messages
+        if "finalization_budget" in (message.content or "")
+    )["finalization_budget"]
+    assert advisory["remaining_turns"] == 3
+    assert advisory["missing_requirements"] == [
+        "current_version_verification",
+        "current_version_diff_review",
+    ]
+    assert advisory["task_verification_commands"] == [list(task_command)]
+    assert advisory["regression_commands"] == [list(regression_command)]
+    assert result.status is RuntimeStatus.COMPLETED
+    assert result.completion_mode is CompletionMode.RUNTIME_BUDGET_BOUNDARY_SETTLEMENT
+    assert result.finalization_reserve_entered
+    assert result.finalization_reserve_entry_step == 5
+    assert result.workspace_version == 2
+    assert len(model.requests) == 7
+
+
+def test_ready_optional_test_is_skipped_without_backend_execution(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    safe_execution = RecordingSafeExecution(
+        SafeExecutionService(sandbox_runner=PassingSandbox())
+    )
+    command = ("python", "-m", "pytest")
+    model = NativeScriptedModel(
+        [
+            _native_call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
+            _native_call(2, "run_tests", {"argv": list(command)}),
+            _native_call(3, "git_diff", {}),
+            _native_call(4, "run_tests", {"argv": list(command)}),
+            _native_call(5, "submit_result", {"summary": "done"}),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=safe_execution,
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="ready-test-skip",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            verification_commands=(command,),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    skipped = next(
+        json.loads(message.content or "{}")
+        for message in result.messages
+        if message.provider_call_id == "provider-call-4"
+    )
+    assert skipped["skipped"] is True
+    assert safe_execution.command_calls == 1
+    assert result.post_ready_tool_calls == 1
+    assert result.post_ready_skipped_optional_tool_count == 1
+    assert result.status is RuntimeStatus.COMPLETED
+
+
+def test_ready_targeted_read_executes_once_then_uses_advisory_cache(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    command = ("python", "-m", "pytest")
+    model = NativeScriptedModel(
+        [
+            _native_call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
+            _native_call(2, "run_tests", {"argv": list(command)}),
+            _native_call(3, "git_diff", {}),
+            _native_call(4, "read_file", {"path": "app.py"}),
+            _native_call(5, "read_file", {"path": "app.py"}),
+            _native_call(6, "submit_result", {"summary": "done"}),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=SafeExecutionService(sandbox_runner=PassingSandbox()),
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="ready-targeted-read",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            verification_commands=(command,),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    first = next(
+        message.content
+        for message in result.messages
+        if message.provider_call_id == "provider-call-4"
+    )
+    second = next(
+        json.loads(message.content or "{}")
+        for message in result.messages
+        if message.provider_call_id == "provider-call-5"
+    )
+    assert first is not None and first.startswith("VALUE = 2\n")
+    assert second["skipped"] is True
+    assert result.post_ready_nonfinalization_tool_count == 1
+    assert result.post_ready_skipped_optional_tool_count == 1
+    assert result.status is RuntimeStatus.COMPLETED
+
+
+def test_ready_batch_recomputes_gate_after_patch_before_authoritative_test(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    safe_execution = RecordingSafeExecution(
+        SafeExecutionService(sandbox_runner=PassingSandbox())
+    )
+    command = ("python", "-m", "pytest")
+    model = NativeScriptedModel(
+        [
+            _native_call(
+                1,
+                "apply_patch",
+                {"edits": [{"path": "app.py", "content": "VALUE = 2\n"}]},
+            ),
+            _native_call(2, "run_tests", {"argv": list(command)}),
+            _native_call(3, "git_diff", {}),
+            _native_calls(
+                (
+                    4,
+                    "apply_patch",
+                    {"edits": [{"path": "app.py", "content": "VALUE = 3\n"}]},
+                ),
+                (5, "run_tests", {"argv": list(command)}),
+            ),
+            _native_call(6, "git_diff", {}),
+            _native_call(7, "submit_result", {"summary": "done"}),
+        ]
+    )
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        safe_execution=safe_execution,
+        context_service=StubContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="ready-reopen-batch",
+            task="change VALUE",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            verification_commands=(command,),
+            checkpoint_state_root=tmp_path / "checkpoints",
+        )
+    )
+
+    assert safe_execution.patch_calls == 2
+    assert safe_execution.command_calls == 2
+    assert result.workspace_version == 2
+    assert result.post_ready_reopen_patch_count == 1
+    assert result.post_ready_skipped_optional_tool_count == 0
     assert result.status is RuntimeStatus.COMPLETED
 
 

@@ -6,12 +6,18 @@ from collections.abc import Callable
 from typing import Any
 
 from codeteam.agent.completion import CompletionGate
+from codeteam.agent.finalization import (
+    FinalizationBudgetPolicy,
+    FinalizationBudgetTracker,
+    TerminalSettlementDecision,
+)
 from codeteam.agent.initial_context import InitialContextSnapshot
 from codeteam.agent.progress import ProgressPolicy, ProgressTracker
 from codeteam.agent.runtime_models import (
     CodingAgentRunRequest,
     CodingAgentRunResult,
     CompactionMode,
+    CompletionMode,
     RuntimeStatus,
 )
 from codeteam.agent.runtime_tools import (
@@ -92,6 +98,11 @@ class CodingAgentRuntime:
 
     def run(self, request: CodingAgentRunRequest) -> CodingAgentRunResult:
         root = request.workspace_root.resolve(strict=True)
+        effective_max_steps = request.effective_max_steps or request.max_steps
+        finalization_policy = FinalizationBudgetPolicy(
+            effective_max_steps=effective_max_steps,
+            configured_reserve_steps=request.finalization_reserve_steps,
+        )
         preflight = self._sandbox_preflight.check(root)
         if not preflight.available:
             return CodingAgentRunResult(
@@ -103,6 +114,8 @@ class CodingAgentRuntime:
                 error=preflight.error,
                 sandbox_preflight_available=False,
                 sandbox_preflight_category=preflight.category,
+                effective_max_steps=effective_max_steps,
+                finalization_reserve_steps=finalization_policy.reserve_steps,
                 events=(
                     AgentEventType.SANDBOX_PREFLIGHT_STARTED.value,
                     AgentEventType.SANDBOX_PREFLIGHT_FAILED.value,
@@ -134,6 +147,8 @@ class CodingAgentRuntime:
                 verification_preflight_available=False,
                 verification_preflight_category=verification_preflight.category,
                 verification_environment=verification_preflight.metadata,
+                effective_max_steps=effective_max_steps,
+                finalization_reserve_steps=finalization_policy.reserve_steps,
                 events=(
                     AgentEventType.SANDBOX_PREFLIGHT_STARTED.value,
                     AgentEventType.SANDBOX_PREFLIGHT_PASSED.value,
@@ -174,8 +189,11 @@ class CodingAgentRuntime:
             workspace_hygiene_clean=(
                 request.initial_workspace_hygiene_clean if resume_matches else True
             ),
+            effective_max_steps=effective_max_steps,
+            finalization_reserve_steps=finalization_policy.reserve_steps,
         )
         progress = _progress_tracker_from_request(request, evidence.workspace_version)
+        finalization = FinalizationBudgetTracker(policy=finalization_policy)
         allowed_verification_commands = tuple(
             dict.fromkeys(
                 (*request.task_verification_commands, *request.verification_commands)
@@ -287,14 +305,133 @@ class CodingAgentRuntime:
                 evidence.paused_reason = progress.paused_reason
             evidence.progress_metrics = _progress_metrics(progress)
 
-        def progress_advisory(state: AgentLoopState) -> Message | None:
+        def request_advisory(state: AgentLoopState) -> Message | None:
+            decision = completion_decision()
+            workspace = GitWorkspace(root)
+            changed_files = tuple(change.path for change in workspace.changed_files())
+            diff = render_workspace_diff(root) if changed_files else ""
+            absolute_step = request.step_offset + state.step_count
+            finalization.observe(
+                step=absolute_step,
+                has_real_diff=bool(changed_files and diff.strip()),
+            )
+            evidence.finalization_reserve_entered = finalization.reserve_entered
+            evidence.finalization_reserve_entry_step = finalization.reserve_entry_step
+            if evidence.paused_reason is not None:
+                return None
+            remaining_turns = finalization_policy.remaining_turns(absolute_step)
+            if decision.ready:
+                return Message(
+                    role="user",
+                    content=json.dumps(
+                        {
+                            "completion_ready": {
+                                "workspace_version": evidence.workspace_version,
+                                "remaining_turns": remaining_turns,
+                                "allowed_next_actions": [
+                                    "submit_result",
+                                    "apply_patch",
+                                    "targeted_read_or_search_when_reopening",
+                                ],
+                                "guidance": (
+                                    "Call submit_result alone unless a concrete issue "
+                                    "requires reopening the workspace."
+                                ),
+                            }
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            if finalization.reserve_entered:
+                return Message(
+                    role="user",
+                    content=json.dumps(
+                        {
+                            "finalization_budget": {
+                                "remaining_turns": remaining_turns,
+                                "effective_max_steps": effective_max_steps,
+                                "reserve_steps": finalization_policy.reserve_steps,
+                                "workspace_version": evidence.workspace_version,
+                                "missing_requirements": list(
+                                    decision.missing_requirements
+                                ),
+                                "task_verification_commands": [
+                                    list(command)
+                                    for command in evidence.task_verification_commands
+                                ],
+                                "regression_commands": [
+                                    list(command)
+                                    for command in (
+                                        evidence.regression_verification_commands
+                                    )
+                                ],
+                                "git_diff_current": (
+                                    evidence.git_diff_checked_version
+                                    == evidence.workspace_version
+                                ),
+                                "allowed_completion_actions": [
+                                    "run_tests",
+                                    "git_diff",
+                                    "submit_result",
+                                    "apply_patch_if_a_real_issue_is_found",
+                                ],
+                                "guidance": (
+                                    "Prioritize authoritative completion requirements "
+                                    "before optional diagnostics. Repository-discovered "
+                                    "lint/typecheck commands do not contribute unless "
+                                    "listed above. One model turn may return multiple "
+                                    "ordered, non-conflicting tool calls; batch required "
+                                    "verification and git_diff when appropriate."
+                                ),
+                            }
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
             advisory = progress.advisory_for_request(
                 step=state.step_count,
                 tool_call_count=state.tool_call_count,
-                completion_ready=completion_decision().ready,
+                completion_ready=decision.ready,
             )
             evidence.progress_metrics = _progress_metrics(progress)
             return advisory
+
+        def terminal_settlement() -> TerminalSettlementDecision:
+            decision = completion_decision()
+            if not decision.ready:
+                return TerminalSettlementDecision(
+                    settled=False,
+                    reason="completion_gate_not_ready",
+                )
+            fresh_fingerprint = GitWorkspace(root).content_fingerprint()[0]
+            if fresh_fingerprint != evidence.workspace_fingerprint:
+                evidence.paused_category = "workspace_drift"
+                evidence.paused_reason = (
+                    "Workspace fingerprint changed after completion evidence was "
+                    "recorded; budget-boundary settlement was refused."
+                )
+                return TerminalSettlementDecision(
+                    settled=False,
+                    reason="fresh_workspace_fingerprint_mismatch",
+                )
+            workspace = GitWorkspace(root)
+            changed_files = tuple(change.path for change in workspace.changed_files())
+            evidence.completion_mode = (
+                CompletionMode.RUNTIME_BUDGET_BOUNDARY_SETTLEMENT
+            )
+            evidence.budget_boundary_completion_count += 1
+            return TerminalSettlementDecision(
+                settled=True,
+                summary=_runtime_settlement_summary(changed_files),
+            )
+
+        def observe_post_ready_action(kind: str) -> None:
+            if kind == "reopen_patch":
+                evidence.post_ready_reopen_patch_count += 1
+            elif kind == "skipped_optional":
+                evidence.post_ready_skipped_optional_tool_count += 1
+            elif kind == "nonfinalization":
+                evidence.post_ready_nonfinalization_tool_count += 1
 
         def fingerprint_action(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             normalized = normalize_runtime_action(name, arguments)
@@ -353,6 +490,7 @@ class CodingAgentRuntime:
             ),
             completion_gate_provider=completion_decision,
             terminal_completion_provider=(lambda: evidence.accepted_submission_summary),
+            terminal_settlement_provider=terminal_settlement,
             post_ready_tool_call_callback=(
                 lambda: setattr(
                     evidence,
@@ -360,7 +498,8 @@ class CodingAgentRuntime:
                     evidence.post_ready_tool_calls + 1,
                 )
             ),
-            request_advisory_provider=progress_advisory,
+            post_ready_action_callback=observe_post_ready_action,
+            request_advisory_provider=request_advisory,
             tool_result_observer=observe_tool_result,
             cached_no_progress_exempt_provider=(
                 lambda call, workspace_version: _initial_context_reuse_for_call(
@@ -387,6 +526,8 @@ class CodingAgentRuntime:
         changed_files = tuple(change.path for change in workspace.changed_files())
         diff = render_workspace_diff(root) if changed_files else ""
         status, category, error = self._finalize(loop, evidence, changed_files, diff)
+        if status is RuntimeStatus.COMPLETED and evidence.completion_mode is None:
+            evidence.completion_mode = CompletionMode.MODEL_SUBMITTED
         summary = (
             loop.final_output.summary
             if loop.final_output is not None
@@ -442,6 +583,25 @@ class CodingAgentRuntime:
             workspace_hygiene_clean=evidence.workspace_hygiene_clean,
             completion_ready=evidence.completion_ready_seen,
             post_ready_tool_calls=evidence.post_ready_tool_calls,
+            completion_mode=evidence.completion_mode,
+            effective_max_steps=effective_max_steps,
+            finalization_reserve_steps=finalization_policy.reserve_steps,
+            finalization_reserve_entered=evidence.finalization_reserve_entered,
+            finalization_reserve_entry_step=(
+                evidence.finalization_reserve_entry_step
+            ),
+            budget_boundary_completion_count=(
+                evidence.budget_boundary_completion_count
+            ),
+            post_ready_reopen_patch_count=(
+                evidence.post_ready_reopen_patch_count
+            ),
+            post_ready_skipped_optional_tool_count=(
+                evidence.post_ready_skipped_optional_tool_count
+            ),
+            post_ready_nonfinalization_tool_count=(
+                evidence.post_ready_nonfinalization_tool_count
+            ),
             verification_workspace_mutations=(
                 evidence.verification_workspace_mutations
             ),
@@ -545,6 +705,13 @@ class CodingAgentRuntime:
             "tools": schemas,
             "budgets": {
                 "max_steps": request.max_steps,
+                "effective_max_steps": request.effective_max_steps,
+                "finalization_reserve_steps": FinalizationBudgetPolicy(
+                    effective_max_steps=(
+                        request.effective_max_steps or request.max_steps
+                    ),
+                    configured_reserve_steps=request.finalization_reserve_steps,
+                ).reserve_steps,
                 "max_tool_calls": request.max_tool_calls,
                 "max_repairs": request.max_repairs,
                 "max_protocol_repairs": request.max_protocol_repairs,
@@ -642,6 +809,16 @@ class CodingAgentRuntime:
                 return RuntimeStatus.PAUSED, "verification_required", missing
             return RuntimeStatus.PAUSED, "diff_review_required", missing
         return RuntimeStatus.COMPLETED, None, None
+
+
+def _runtime_settlement_summary(changed_files: tuple[str, ...]) -> str:
+    if not changed_files:
+        return "Verified task changes completed successfully."
+    visible = changed_files[:10]
+    lines = ["Completed verified changes in:", *(f"- {path}" for path in visible)]
+    if len(changed_files) > len(visible):
+        lines.append(f"- and {len(changed_files) - len(visible)} additional files")
+    return "\n".join(lines)
 
 
 def _message_transform(

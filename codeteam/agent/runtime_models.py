@@ -17,6 +17,11 @@ class RuntimeStatus(str, Enum):
     PAUSED = "paused"
 
 
+class CompletionMode(str, Enum):
+    MODEL_SUBMITTED = "model_submitted"
+    RUNTIME_BUDGET_BOUNDARY_SETTLEMENT = "runtime_budget_boundary_settlement"
+
+
 class CompactionMode(str, Enum):
     STRUCTURED = "structured"
     NONE = "none"
@@ -60,6 +65,9 @@ class CodingAgentRunRequest(BaseModel):
     native_tools: bool = True
     reasoning_enabled: bool | None = False
     max_steps: int = Field(default=20, gt=0)
+    effective_max_steps: int | None = Field(default=None, gt=0)
+    step_offset: int = Field(default=0, ge=0)
+    finalization_reserve_steps: int | None = Field(default=None, gt=0)
     max_tool_calls: int = Field(default=40, gt=0)
     max_repairs: int = Field(default=3, ge=0)
     max_protocol_repairs: int = Field(default=2, ge=0, le=2)
@@ -87,6 +95,19 @@ class CodingAgentRunRequest(BaseModel):
             raise ValueError(
                 "context_budget is the max input budget and must reserve "
                 "max_output_tokens plus safety_headroom_tokens"
+            )
+        if self.effective_max_steps is None:
+            self.effective_max_steps = self.step_offset + self.max_steps
+        if self.step_offset + self.max_steps > self.effective_max_steps:
+            raise ValueError(
+                "step_offset plus max_steps cannot exceed effective_max_steps"
+            )
+        if (
+            self.finalization_reserve_steps is not None
+            and self.finalization_reserve_steps > self.effective_max_steps
+        ):
+            raise ValueError(
+                "finalization_reserve_steps cannot exceed effective_max_steps"
             )
         return self
 
@@ -149,6 +170,15 @@ class CodingAgentRunResult(BaseModel):
     workspace_hygiene_clean: bool = True
     completion_ready: bool = False
     post_ready_tool_calls: int = 0
+    completion_mode: CompletionMode | None = None
+    effective_max_steps: int = 20
+    finalization_reserve_steps: int = 4
+    finalization_reserve_entered: bool = False
+    finalization_reserve_entry_step: int | None = None
+    budget_boundary_completion_count: int = 0
+    post_ready_reopen_patch_count: int = 0
+    post_ready_skipped_optional_tool_count: int = 0
+    post_ready_nonfinalization_tool_count: int = 0
     verification_workspace_mutations: int = 0
     first_patch_step: int | None = None
     pre_edit_step_count: int = 0

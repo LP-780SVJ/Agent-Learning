@@ -1254,3 +1254,65 @@ Post-change real LLM: NOT_RUN_BY_CODER
 Post-change benchmark: NOT_RUN_BY_CODER
 Commit: UNCOMMITTED
 ```
+
+### 2026-08-30：第五刀——Finalization-aware Budget & Terminal Settlement
+
+#### 问题：40/40 正确，但 Actor 只有 38/40
+
+本轮继续读取用户已运行的
+`evals/week4/agent_runs/stability_20260830_002409`，不由 coder 重跑。40 个结果的
+acceptance/regression/task verification/security/within-budget correctness 全部通过，
+但 Actor success 为 38/40。两个失败都不是“模型不会写代码”：
+
+1. F03 run `03_F03_3_20260830_002622`：第 17/18 turn 已通过 task/regression，
+   第 20 turn `git_diff` 才使 CompletionGate READY；flat budget 先报 MAX_STEPS，无法再
+   用第 21 turn submit。
+2. F04 run `09_11task_2_20260830_003505`：v4 verification PASS 后第 17 turn 合法 docs
+   patch 推进到 v5，旧验证被正确 stale；optional diagnostics/diff/submit 用完余量，
+   submit 被正确拒绝缺少 v5 verification。task declared 30 被 run default 20 裁成
+   effective 20，但旧 artifacts 没有明确记录三种预算来源。
+
+真实记录分别落在 [FC-W4-D7-05](../docs/failure_cases/FC-W4-D7-05.md) 和
+[FC-W4-D7-06](../docs/failure_cases/FC-W4-D7-06.md)。归因是 Finalization Budget / Actor
+Orchestration False Negative，而不是 retrieval、patch correctness、grader、Provider、
+protocol、sandbox 或 security failure。
+
+#### 方法：预算内 reserve，而不是提高 max_steps
+
+[DD-W4-D7-14](../docs/design_decisions/DD-W4-D7-14.md) 选择组合方案：
+
+- 在 effective budget 内预留 `max(3, ceil(20%))`；20 步默认 reserve 4，可显式覆盖。
+- 有真实 diff 且 remaining turns 进入 reserve 时，Runtime 用 CompletionGate 的当前
+  missing requirements、精确 task/regression commands 和 diff state 生成 finalization
+  advisory。reserve 不冻结代码；发现真实 bug 仍允许 patch，版本和证据照常失效。
+- READY 后 submit accepted；patch 合法 reopen；first targeted read/search 合法；重复
+  read/search 和 test/list/status/diff 等冗余工作返回 cache/advisory。batched tool calls
+  每次调用前重算 gate，防止 READY→patch 后错误跳过新版本验证。
+
+#### 新问题：最后一轮才 READY，仍没有 submit turn
+
+Reserve 不能保证模型一定提前 submit。F03 证明最后一个合法 tool call 本身可能才生成
+current diff-review evidence。因此只做 prompt/advisory 仍会把客观完成误报成预算失败。
+
+#### 新方法：Runtime-only terminal settlement
+
+step boundary 现在先处理已有 safety halt，再读取当前 CompletionGate。NOT READY 保持
+MAX_STEPS；READY 时重新计算 fresh Git content fingerprint，只有与 Runtime evidence
+fingerprint 相同才无额外 Provider call 地完成。外部未观察 mutation 会
+`PAUSED + workspace_drift`，stale verification/environment/security pause 都不能结算。
+fallback summary 只列 bounded changed files，不伪装成 model output；`completion_mode`
+区分 `model_submitted` 与 `runtime_budget_boundary_settlement` 并进入 Runtime、Session
+schema v5/events、Eval result/summary/manifest。
+
+#### 证据与后续验证
+
+Eval CLI 和 stability script 显式支持/传递 `--max-steps 20`。每个结果和 manifest 记录
+task declared、run cap、effective 和 source；B02/B05/F04/R02/R03 的 25/25/30/30/30
+声明预算在本轮因果实验里都明确裁为 20。新的稳定性聚合不再只盯
+`no_source_progress`：只要 Actor 非 completed，而 acceptance/regression/task
+verification/security/within-budget 全真，就计入
+`grader_correct_but_actor_failed_count` 并让 campaign 非零退出；同时 fail provider、
+environment、protocol、ready-actor failure、workspace mutation 或非 20 effective budget。
+
+Coder 只执行 deterministic tests、`bash -n` 和 stability `--dry-run`；F03 x5、B01 x2、
+11-task x3 真实 campaign 仍由用户运行。没有执行 benchmark、ablation 或 11-task。

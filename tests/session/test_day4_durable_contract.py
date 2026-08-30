@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
+from codeteam.agent.runtime_models import CompletionMode
 from codeteam.events import AgentEventType
 from codeteam.schemas.messages import Message
 from codeteam.session.models import (
@@ -117,3 +118,52 @@ def test_runtime_state_messages_are_redacted_at_serialization_boundary(
 
     assert "sk-abcdefghijk" not in payload
     assert "<redacted>" in payload
+
+
+def test_runtime_completion_provenance_round_trips_in_session_state(
+    git_repo,
+) -> None:
+    session = make_session(git_repo).model_copy(
+        update={
+            "runtime_state": AgentRuntimeState(
+                completion_mode=(
+                    CompletionMode.RUNTIME_BUDGET_BOUNDARY_SETTLEMENT
+                ),
+                effective_max_steps=20,
+                finalization_reserve_steps=4,
+                finalization_reserve_entered=True,
+                finalization_reserve_entry_step=17,
+            )
+        }
+    )
+
+    restored = Session.model_validate_json(session.model_dump_json())
+
+    assert restored.runtime_state.completion_mode is (
+        CompletionMode.RUNTIME_BUDGET_BOUNDARY_SETTLEMENT
+    )
+    assert restored.runtime_state.effective_max_steps == 20
+    assert restored.runtime_state.finalization_reserve_steps == 4
+    assert restored.runtime_state.finalization_reserve_entry_step == 17
+
+
+def test_terminal_settlement_provenance_round_trips_in_event_payload() -> None:
+    event = SessionEvent(
+        event_id="evt-settlement",
+        session_id="ses-settlement",
+        seq=1,
+        state_version=1,
+        type=AgentEventType.TURN_COMPLETED,
+        timestamp=datetime.now(UTC),
+        payload={
+            "phase": "terminal_settlement.completed",
+            "completion_mode": "runtime_budget_boundary_settlement",
+        },
+    )
+
+    restored = SessionEvent.model_validate_json(event.model_dump_json())
+
+    assert restored.payload == {
+        "phase": "terminal_settlement.completed",
+        "completion_mode": "runtime_budget_boundary_settlement",
+    }

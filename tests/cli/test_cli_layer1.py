@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from argparse import Namespace
 from pathlib import Path
 
 import typer
@@ -24,6 +25,35 @@ def test_help_lists_product_commands() -> None:
     assert "resume" in result.stdout
     assert "diff" in result.stdout
     assert "rollback" in result.stdout
+
+
+def test_agent_eval_argv_passes_explicit_step_cap_and_reserve(monkeypatch) -> None:
+    captured: dict[str, Namespace] = {}
+
+    def fake_agent_eval(args: Namespace) -> None:
+        captured["args"] = args
+        raise typer.Exit(0)
+
+    monkeypatch.setattr(
+        "codeteam.cli.agent_eval_command.run_agent_eval",
+        fake_agent_eval,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "agent-eval",
+            "--max-steps",
+            "20",
+            "--finalization-reserve-steps",
+            "4",
+        ],
+    )
+
+    assert result.exit_code == 0
+    args = captured["args"]
+    assert args.max_steps == 20
+    assert args.finalization_reserve_steps == 4
 
 
 def test_run_argv_builds_run_request(monkeypatch) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from argparse import Namespace
+from collections import Counter
 from pathlib import Path
 
 from codeteam.agent.runtime import CodingAgentRuntime
@@ -109,6 +110,10 @@ def run_agent_eval(args: Namespace) -> None:
         provider_id=provider_id,
         model_id=model_id,
         context_budget=args.context_budget,
+        max_steps=getattr(args, "max_steps", 20),
+        finalization_reserve_steps=getattr(
+            args, "finalization_reserve_steps", None
+        ),
         max_output_tokens=getattr(args, "max_output_tokens", 4096),
         model_context_window=getattr(args, "model_context_window", 32768),
         safety_headroom_tokens=getattr(args, "safety_headroom_tokens", 1024),
@@ -118,6 +123,7 @@ def run_agent_eval(args: Namespace) -> None:
     output_root = Path(args.output)
     output_root.mkdir(parents=True, exist_ok=True)
     all_results = []
+    run_summaries = []
     for config in configs:
         output_dir = output_root if len(configs) == 1 else output_root / config.mode.value
         results = runner.run_suite(
@@ -131,6 +137,7 @@ def run_agent_eval(args: Namespace) -> None:
             run_id=config.run_id,
             mode=config.mode,
         )
+        run_summaries.append(summary)
         print(json.dumps(summary.model_dump(mode="json"), ensure_ascii=False))
 
     combined = {
@@ -152,6 +159,35 @@ def run_agent_eval(args: Namespace) -> None:
             result.failure_category == "invalid_final_output"
             for result in all_results
         ),
+        "grader_correct_but_actor_failed_count": sum(
+            summary.grader_correct_but_actor_failed_count
+            for summary in run_summaries
+        ),
+        "grader_correct_actor_max_steps_count": sum(
+            summary.grader_correct_actor_max_steps_count
+            for summary in run_summaries
+        ),
+        "budget_boundary_completion_count": sum(
+            result.budget_boundary_completion_count for result in all_results
+        ),
+        "finalization_reserve_entry_count": sum(
+            result.finalization_reserve_entered for result in all_results
+        ),
+        "completion_mode_counts": dict(
+            Counter(
+                result.completion_mode.value
+                for result in all_results
+                if result.completion_mode is not None
+            )
+        ),
+        "effective_max_steps_counts": dict(
+            Counter(str(result.effective_max_steps) for result in all_results)
+        ),
+        "effective_budget_source_counts": dict(
+            Counter(
+                result.effective_budget_source.value for result in all_results
+            )
+        ),
     }
     (output_root / "combined_summary.json").write_text(
         json.dumps(combined, ensure_ascii=False, indent=2) + "\n",
@@ -165,6 +201,8 @@ def _build_run_configs(
     provider_id: str,
     model_id: str,
     context_budget: int,
+    max_steps: int = 20,
+    finalization_reserve_steps: int | None = None,
     max_output_tokens: int = 4096,
     model_context_window: int = 32768,
     safety_headroom_tokens: int = 1024,
@@ -196,6 +234,8 @@ def _build_run_configs(
             provider_id=provider_id,
             model_id=model_id,
             context_budget=context_budget,
+            max_steps=max_steps,
+            finalization_reserve_steps=finalization_reserve_steps,
             max_output_tokens=max_output_tokens,
             model_context_window=model_context_window,
             safety_headroom_tokens=safety_headroom_tokens,
@@ -212,6 +252,8 @@ def _config_for_mode(
     provider_id: str,
     model_id: str,
     context_budget: int,
+    max_steps: int = 20,
+    finalization_reserve_steps: int | None = None,
     max_output_tokens: int = 4096,
     model_context_window: int = 32768,
     safety_headroom_tokens: int = 1024,
@@ -233,6 +275,8 @@ def _config_for_mode(
         repair_enabled=repair_enabled,
         compaction_mode=compaction_mode,
         context_budget=context_budget,
+        max_steps=max_steps,
+        finalization_reserve_steps=finalization_reserve_steps,
         max_output_tokens=max_output_tokens,
         model_context_window=model_context_window,
         safety_headroom_tokens=safety_headroom_tokens,

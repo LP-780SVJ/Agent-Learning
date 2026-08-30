@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -28,6 +29,7 @@ from codeteam.evaluation.agent_models import (
     AgentEvalSplit,
     AgentEvalTask,
     AgentEvalTaskResult,
+    EffectiveBudgetSource,
     EvalRunConfig,
     PatchActorResult,
     PatchActorStatus,
@@ -90,6 +92,11 @@ class AgentEvalRunner:
 
         results: list[AgentEvalTaskResult] = []
         for task in tasks:
+            effective_max_steps = min(task.budget.max_steps, config.max_steps)
+            effective_budget_source = _effective_budget_source(
+                task_declared=task.budget.max_steps,
+                run_cap=config.max_steps,
+            )
             task_repo = workspace_root / "_repos" / _safe_name(task.task_id)
             task_workspace = workspace_root / "tasks" / _safe_name(task.task_id)
             pristine_workspace = workspace_root / "_pristine" / _safe_name(task.task_id)
@@ -128,9 +135,11 @@ class AgentEvalRunner:
                     safety_headroom_tokens=config.safety_headroom_tokens,
                     native_tools=config.native_tools,
                     reasoning_enabled=config.reasoning_enabled,
-                    max_steps=min(task.budget.max_steps, config.max_steps),
+                    max_steps=effective_max_steps,
+                    effective_max_steps=effective_max_steps,
+                    finalization_reserve_steps=config.finalization_reserve_steps,
                     max_tool_calls=max(
-                        1, min(task.budget.max_steps, config.max_steps) * 3
+                        1, effective_max_steps * 3
                     ),
                     max_repairs=min(task.budget.max_repairs, config.max_repairs),
                     max_protocol_repairs=config.max_protocol_repairs,
@@ -150,6 +159,10 @@ class AgentEvalRunner:
             actor_result = _runtime_to_actor_result(runtime_result, config)
             actor_result = actor_result.model_copy(
                 update={
+                    "task_declared_max_steps": task.budget.max_steps,
+                    "run_max_steps_cap": config.max_steps,
+                    "effective_max_steps": effective_max_steps,
+                    "effective_budget_source": effective_budget_source,
                     "artifact_paths": _save_runtime_artifacts(
                         output_dir=output_dir,
                         result=runtime_result,
@@ -224,6 +237,32 @@ class AgentEvalRunner:
                     verification_environment=actor_result.verification_environment,
                     completion_ready=actor_result.completion_ready,
                     post_ready_tool_calls=actor_result.post_ready_tool_calls,
+                    completion_mode=actor_result.completion_mode,
+                    task_declared_max_steps=actor_result.task_declared_max_steps,
+                    run_max_steps_cap=actor_result.run_max_steps_cap,
+                    effective_max_steps=actor_result.effective_max_steps,
+                    effective_budget_source=actor_result.effective_budget_source,
+                    finalization_reserve_steps=(
+                        actor_result.finalization_reserve_steps
+                    ),
+                    finalization_reserve_entered=(
+                        actor_result.finalization_reserve_entered
+                    ),
+                    finalization_reserve_entry_step=(
+                        actor_result.finalization_reserve_entry_step
+                    ),
+                    budget_boundary_completion_count=(
+                        actor_result.budget_boundary_completion_count
+                    ),
+                    post_ready_reopen_patch_count=(
+                        actor_result.post_ready_reopen_patch_count
+                    ),
+                    post_ready_skipped_optional_tool_count=(
+                        actor_result.post_ready_skipped_optional_tool_count
+                    ),
+                    post_ready_nonfinalization_tool_count=(
+                        actor_result.post_ready_nonfinalization_tool_count
+                    ),
                     verification_workspace_mutations=(
                         actor_result.verification_workspace_mutations
                     ),
@@ -280,6 +319,10 @@ class AgentEvalRunner:
                     "compaction_mode": config.compaction_mode,
                     "context_budget": config.context_budget,
                     "max_protocol_repairs": config.max_protocol_repairs,
+                    "run_max_steps_cap": config.max_steps,
+                    "configured_finalization_reserve_steps": (
+                        config.finalization_reserve_steps
+                    ),
                     "task_count": len(tasks),
                     "tasks": [
                         {
@@ -299,6 +342,44 @@ class AgentEvalRunner:
                             ),
                             "public_test_patch_sha256": (task.public_test_patch_sha256),
                             "oracle_review_status": task.oracle_review_status,
+                            "task_declared_max_steps": task.budget.max_steps,
+                            "run_max_steps_cap": config.max_steps,
+                            "effective_max_steps": min(
+                                task.budget.max_steps, config.max_steps
+                            ),
+                            "effective_budget_source": _effective_budget_source(
+                                task_declared=task.budget.max_steps,
+                                run_cap=config.max_steps,
+                            ).value,
+                            "finalization_reserve_steps": next(
+                                result.finalization_reserve_steps
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "finalization_reserve_entered": next(
+                                result.finalization_reserve_entered
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "finalization_reserve_entry_step": next(
+                                result.finalization_reserve_entry_step
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "completion_mode": next(
+                                (
+                                    result.completion_mode.value
+                                    if result.completion_mode is not None
+                                    else None
+                                )
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
+                            "budget_boundary_completion_count": next(
+                                result.budget_boundary_completion_count
+                                for result in results
+                                if result.task_id == task.task_id
+                            ),
                         }
                         for task in tasks
                     ],
@@ -592,6 +673,16 @@ def summarize_agent_eval_results(
             failure_category_counts[result.failure_category] = (
                 failure_category_counts.get(result.failure_category, 0) + 1
             )
+    grader_correct_actor_failed = [
+        result
+        for result in results
+        if result.actor_status is not PatchActorStatus.COMPLETED
+        and result.acceptance_passed
+        and result.regression_passed
+        and result.task_verification_passed
+        and result.security_passed
+        and result.within_budget
+    ]
     return AgentEvalRunSummary(
         run_id=run_id,
         mode=mode,
@@ -636,6 +727,47 @@ def summarize_agent_eval_results(
         ),
         post_ready_tool_call_count=sum(
             result.post_ready_tool_calls for result in results
+        ),
+        completion_mode_counts=dict(
+            Counter(
+                result.completion_mode.value
+                for result in results
+                if result.completion_mode is not None
+            )
+        ),
+        grader_correct_but_actor_failed_count=len(grader_correct_actor_failed),
+        grader_correct_actor_max_steps_count=sum(
+            result.failure_category == "max_steps"
+            for result in grader_correct_actor_failed
+        ),
+        budget_boundary_completion_count=sum(
+            result.budget_boundary_completion_count for result in results
+        ),
+        finalization_reserve_entry_count=sum(
+            result.finalization_reserve_entered for result in results
+        ),
+        finalization_reserve_success_count=sum(
+            result.finalization_reserve_entered
+            and result.actor_status is PatchActorStatus.COMPLETED
+            for result in results
+        ),
+        post_ready_reopen_patch_count=sum(
+            result.post_ready_reopen_patch_count for result in results
+        ),
+        post_ready_skipped_optional_tool_count=sum(
+            result.post_ready_skipped_optional_tool_count for result in results
+        ),
+        post_ready_nonfinalization_tool_count=sum(
+            result.post_ready_nonfinalization_tool_count for result in results
+        ),
+        effective_max_steps_counts={
+            str(value): count
+            for value, count in Counter(
+                result.effective_max_steps for result in results
+            ).items()
+        },
+        effective_budget_source_counts=dict(
+            Counter(result.effective_budget_source.value for result in results)
         ),
         verification_workspace_mutation_count=sum(
             result.verification_workspace_mutations for result in results
@@ -691,6 +823,16 @@ def summarize_agent_eval_results(
 
 def make_run_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
+
+
+def _effective_budget_source(
+    *, task_declared: int, run_cap: int
+) -> EffectiveBudgetSource:
+    if task_declared == run_cap:
+        return EffectiveBudgetSource.TASK_AND_RUN_EQUAL
+    if run_cap < task_declared:
+        return EffectiveBudgetSource.RUN_CAP
+    return EffectiveBudgetSource.TASK_DECLARED
 
 
 def _verification_argv(
@@ -819,6 +961,19 @@ def _runtime_to_actor_result(
         events=result.events,
         completion_ready=result.completion_ready,
         post_ready_tool_calls=result.post_ready_tool_calls,
+        completion_mode=result.completion_mode,
+        effective_max_steps=result.effective_max_steps,
+        finalization_reserve_steps=result.finalization_reserve_steps,
+        finalization_reserve_entered=result.finalization_reserve_entered,
+        finalization_reserve_entry_step=result.finalization_reserve_entry_step,
+        budget_boundary_completion_count=(result.budget_boundary_completion_count),
+        post_ready_reopen_patch_count=result.post_ready_reopen_patch_count,
+        post_ready_skipped_optional_tool_count=(
+            result.post_ready_skipped_optional_tool_count
+        ),
+        post_ready_nonfinalization_tool_count=(
+            result.post_ready_nonfinalization_tool_count
+        ),
         verification_workspace_mutations=(result.verification_workspace_mutations),
         first_patch_step=result.first_patch_step,
         pre_edit_step_count=result.pre_edit_step_count,

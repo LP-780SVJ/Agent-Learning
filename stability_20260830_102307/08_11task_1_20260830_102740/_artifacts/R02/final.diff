@@ -1,0 +1,87 @@
+diff --git a/src/billing/payment_gateway.py b/src/billing/payment_gateway.py
+index 340d338..93d3114 100644
+--- a/src/billing/payment_gateway.py
++++ b/src/billing/payment_gateway.py
+@@ -1,17 +1,45 @@
+ """Payment provider abstraction."""
+ 
++import time
++
+ from vendor.third_party_payment import ProviderClient
+ 
++from src.billing.retries import InvoiceRetryPolicy, RetryExecutor, RetryPolicyProvider
++
+ 
+ class PaymentGateway:
+     """Wraps the vendored provider client."""
+ 
+-    def __init__(self, client: ProviderClient | None = None) -> None:
++    def __init__(
++        self,
++        client: ProviderClient | None = None,
++        executor: RetryExecutor | None = None,
++        policy_provider: RetryPolicyProvider | None = None,
++    ) -> None:
+         self.client = client or ProviderClient()
++        self.executor = executor
++        self.policy_provider = policy_provider
+ 
+     def verify_signature(self, payload: bytes, signature: str) -> bool:
+         return self.client.verify(payload, signature)
+ 
+     def charge(self, customer_id: str, cents: int) -> dict:
++        invoice = {"customer_id": customer_id, "cents": cents}
++        if self.executor is not None and self.policy_provider is not None:
++            policy = self.policy_provider.get_policy(invoice)
++            return self._execute_with_retry(invoice, policy)
+         return self.client.charge(customer_id, cents)
+ 
++    def _execute_with_retry(self, invoice: dict, policy: InvoiceRetryPolicy) -> dict:
++        delay = policy.initial_delay_seconds
++        last_error: Exception | None = None
++        for _ in range(policy.max_attempts):
++            try:
++                return self.executor.execute(invoice)
++            except Exception as exc:  # noqa: BLE001 - retry any provider failure
++                last_error = exc
++                if delay:
++                    time.sleep(delay)
++                delay *= policy.backoff_multiplier
++        assert last_error is not None
++        raise last_error
+diff --git a/src/billing/retries.py b/src/billing/retries.py
+index 4cbef19..c512ace 100644
+--- a/src/billing/retries.py
++++ b/src/billing/retries.py
+@@ -1,6 +1,7 @@
+ """Invoice retry policy."""
+ 
+ from dataclasses import dataclass
++from typing import Protocol
+ 
+ from src.common.settings import load_retry_policy
+ 
+@@ -12,6 +13,18 @@ class InvoiceRetryPolicy:
+     backoff_multiplier: int
+ 
+ 
++class RetryExecutor(Protocol):
++    """Executes a single charge attempt for an invoice."""
++
++    def execute(self, invoice: dict) -> dict: ...
++
++
++class RetryPolicyProvider(Protocol):
++    """Selects the retry policy for a given invoice."""
++
++    def get_policy(self, invoice: dict) -> InvoiceRetryPolicy: ...
++
++
+ def load_invoice_retry_policy() -> InvoiceRetryPolicy:
+     raw = load_retry_policy()
+     return InvoiceRetryPolicy(
+@@ -19,4 +32,3 @@ def load_invoice_retry_policy() -> InvoiceRetryPolicy:
+         max_attempts=raw["max_attempts"],
+         backoff_multiplier=raw.get("backoff_multiplier", 2),
+     )
+-

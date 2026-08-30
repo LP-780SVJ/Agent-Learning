@@ -13,6 +13,7 @@ from codeteam.agent.runtime import CodingAgentRuntime
 from codeteam.agent.runtime_models import (
     CodingAgentRunRequest,
     CodingAgentRunResult,
+    CompletionMode,
     RuntimeStatus,
 )
 from codeteam.cli import agent_eval_command, run_command
@@ -22,6 +23,7 @@ from codeteam.evaluation.agent_models import (
     AgentEvalTask,
     AgentEvalTaskResult,
     AgentTaskType,
+    EffectiveBudgetSource,
     EvalRunConfig,
     EvalRunMode,
     PatchActorResult,
@@ -30,6 +32,7 @@ from codeteam.evaluation.agent_models import (
 from codeteam.evaluation.agent_runner import (
     AgentEvalDatasetError,
     AgentEvalRunner,
+    _effective_budget_source,
     _runtime_to_actor_result,
     _visible_verification_argv,
     load_agent_eval_tasks,
@@ -373,6 +376,8 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
     assert manifest["runtime_execution"] == "docker"
     assert manifest["grader_execution"] == "trusted_host_subprocess"
     assert manifest["max_protocol_repairs"] == 2
+    assert manifest["run_max_steps_cap"] == 20
+    assert manifest["configured_finalization_reserve_steps"] is None
     assert manifest["tasks"] == [
         {
             "task_id": "T01",
@@ -383,9 +388,20 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
             "public_test_patch": None,
             "public_test_patch_sha256": None,
             "oracle_review_status": "test",
+            "task_declared_max_steps": 20,
+            "run_max_steps_cap": 20,
+            "effective_max_steps": 20,
+            "effective_budget_source": "task_and_run_equal",
+            "finalization_reserve_steps": 4,
+            "finalization_reserve_entered": False,
+            "finalization_reserve_entry_step": None,
+            "completion_mode": None,
+            "budget_boundary_completion_count": 0,
         }
     ]
     runtime_request = runtime.requests[0]
+    assert runtime_request.max_steps == 20
+    assert runtime_request.effective_max_steps == 20
     assert runtime_request.verification_commands == (
         ("python", "-c", "import app; assert app.VALUE == 2"),
     )
@@ -395,6 +411,43 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
         for command in runtime_request.verification_commands
         for part in command
     )
+
+
+@pytest.mark.parametrize(
+    ("task_id", "declared"),
+    [("B02", 25), ("B05", 25), ("F04", 30), ("R02", 30), ("R03", 30)],
+)
+def test_declared_task_budget_is_capped_at_explicit_run_budget(
+    task_id: str,
+    declared: int,
+) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    tasks = load_agent_eval_tasks(
+        project_root / "evals/week4/agent_task_suite_v1.jsonl"
+    )
+    task = next(item for item in tasks if item.task_id == task_id)
+
+    assert task.budget.max_steps == declared
+    assert min(task.budget.max_steps, 20) == 20
+    assert _effective_budget_source(
+        task_declared=task.budget.max_steps,
+        run_cap=20,
+    ) is EffectiveBudgetSource.RUN_CAP
+
+
+def test_eval_config_preserves_explicit_cli_step_cap_and_reserve() -> None:
+    configs = agent_eval_command._build_run_configs(
+        mode="baseline",
+        provider_id="scripted",
+        model_id="scripted",
+        context_budget=4096,
+        max_steps=20,
+        finalization_reserve_steps=4,
+    )
+
+    assert len(configs) == 1
+    assert configs[0].max_steps == 20
+    assert configs[0].finalization_reserve_steps == 4
 
 
 def test_summary_separates_protocol_repair_and_exhaustion() -> None:
@@ -436,6 +489,68 @@ def test_summary_separates_protocol_repair_and_exhaustion() -> None:
     assert summary.completion_ready_but_actor_failed_count == 1
     assert summary.post_ready_tool_call_count == 3
     assert summary.verification_workspace_mutation_count == 1
+
+
+@pytest.mark.parametrize(
+    "failure_category",
+    ["max_steps", "no_source_progress", "repeated_action"],
+)
+def test_summary_counts_any_grader_correct_actor_failure(
+    failure_category: str,
+) -> None:
+    result = AgentEvalTaskResult(
+        run_id="false-negative-run",
+        task_id="T01",
+        split=AgentEvalSplit.DEV,
+        type=AgentTaskType.BUG,
+        difficulty="L1",
+        mode=EvalRunMode.BASELINE,
+        provider_id="scripted",
+        model_id="scripted",
+        success=False,
+        actor_status=PatchActorStatus.FAILED,
+        acceptance_passed=True,
+        regression_passed=True,
+        task_verification_passed=True,
+        within_budget=True,
+        security_passed=True,
+        duration_ms=1,
+        failure_category=failure_category,
+    )
+
+    summary = summarize_agent_eval_results(
+        [result],
+        run_id="false-negative-run",
+        mode=EvalRunMode.BASELINE,
+    )
+
+    assert summary.grader_correct_but_actor_failed_count == 1
+    assert summary.grader_correct_actor_max_steps_count == (
+        1 if failure_category == "max_steps" else 0
+    )
+
+
+def test_runtime_completion_provenance_propagates_to_eval_actor() -> None:
+    runtime_result = CodingAgentRunResult(
+        task_id="T01",
+        status=RuntimeStatus.COMPLETED,
+        summary="settled",
+        workspace_root=Path("/tmp/workspace"),
+        completion_mode=CompletionMode.RUNTIME_BUDGET_BOUNDARY_SETTLEMENT,
+        budget_boundary_completion_count=1,
+        finalization_reserve_entered=True,
+        finalization_reserve_entry_step=17,
+    )
+
+    actor = _runtime_to_actor_result(
+        runtime_result,
+        EvalRunConfig(run_id="provenance-run"),
+    )
+
+    assert actor.completion_mode is CompletionMode.RUNTIME_BUDGET_BOUNDARY_SETTLEMENT
+    assert actor.budget_boundary_completion_count == 1
+    assert actor.finalization_reserve_entered
+    assert actor.finalization_reserve_entry_step == 17
 
 
 def test_grader_treats_public_task_test_changes_as_safety_violation() -> None:
