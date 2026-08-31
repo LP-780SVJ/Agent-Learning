@@ -447,7 +447,7 @@ def test_broadcast_batch_duplicate_message_id_is_all_or_nothing(
 def test_task_completed_message_does_not_change_scheduler_state() -> None:
     scheduler = TaskScheduler(_dag(), _registry(_worker()))
     scheduler.schedule()
-    claim = scheduler.claim("worker-1")
+    claim = scheduler.claim(scheduler.registry.lease("worker-1"))
     assert claim is not None
     before_record = scheduler.runtime_records["node-1"]
     before_queue = scheduler.queue
@@ -468,8 +468,8 @@ def test_task_completed_message_does_not_change_scheduler_state() -> None:
     assert scheduler.queue == before_queue
     assert scheduler.events == before_events
 
-    scheduler.start("node-1", "worker-1")
-    completed = scheduler.complete("node-1", "worker-1")
+    scheduler.start(claim)
+    completed = scheduler.complete(claim)
 
     assert completed.status is TaskStatus.COMPLETED
     assert scheduler.runtime_records["node-1"] == TaskRuntimeRecord(
@@ -482,9 +482,9 @@ def test_task_completed_message_does_not_change_scheduler_state() -> None:
 def test_task_failed_message_does_not_change_scheduler_state() -> None:
     scheduler = TaskScheduler(_dag(), _registry(_worker()), max_attempts=1)
     scheduler.schedule()
-    claim = scheduler.claim("worker-1")
+    claim = scheduler.claim(scheduler.registry.lease("worker-1"))
     assert claim is not None
-    scheduler.start("node-1", "worker-1")
+    scheduler.start(claim)
     before_record = scheduler.runtime_records["node-1"]
     before_queue = scheduler.queue
     before_events = scheduler.events
@@ -504,7 +504,7 @@ def test_task_failed_message_does_not_change_scheduler_state() -> None:
     assert scheduler.queue == before_queue
     assert scheduler.events == before_events
 
-    failed = scheduler.fail("node-1", "worker-1", "reported failure")
+    failed = scheduler.fail(claim, "reported failure")
 
     assert failed.status is TaskStatus.FAILED
     assert scheduler.runtime_records["node-1"] == TaskRuntimeRecord(

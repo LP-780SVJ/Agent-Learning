@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from codeteam.agent_team.models import AgentInfo, AgentRole
+from codeteam.agent_team.registry import AgentRegistry as WorkerRegistry
+from codeteam.agent_team.registry import DuplicateWorkerError, WorkerNotFoundError
 
-
-class DuplicateWorkerError(ValueError):
-    """Raised when a worker id is registered more than once."""
-
-
-class WorkerNotFoundError(LookupError):
-    """Raised when a worker id is not present in the registry."""
+__all__ = [
+    "DuplicateWorkerError",
+    "WorkerAgent",
+    "WorkerNotFoundError",
+    "WorkerRegistry",
+]
 
 
 class WorkerAgent:
@@ -23,27 +24,3 @@ class WorkerAgent:
 
     def supports(self, role: AgentRole) -> bool:
         return self._info.role is role
-
-
-class WorkerRegistry:
-    def __init__(self) -> None:
-        self._workers: dict[str, WorkerAgent] = {}
-
-    def register(self, worker: WorkerAgent) -> None:
-        worker_id = worker.info.identity.agent_id
-        if worker_id in self._workers:
-            raise DuplicateWorkerError(worker_id)
-        self._workers[worker_id] = worker
-
-    def get(self, worker_id: str) -> WorkerAgent:
-        try:
-            return self._workers[worker_id]
-        except KeyError as exc:
-            raise WorkerNotFoundError(worker_id) from exc
-
-    def compatible(self, role: AgentRole) -> tuple[WorkerAgent, ...]:
-        return tuple(
-            worker
-            for worker in self._workers.values()
-            if worker.supports(role)
-        )

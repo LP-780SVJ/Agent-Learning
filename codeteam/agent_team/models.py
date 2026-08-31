@@ -21,6 +21,7 @@ class AgentStatus(str, Enum):
     READY = "ready"
     BUSY = "busy"
     FAILED = "failed"
+    RESTARTING = "restarting"
     STOPPED = "stopped"
 
 
@@ -38,6 +39,8 @@ class AgentIdentity(BaseModel):
 
 
 class AgentInfo(BaseModel):
+    """Identity and bootstrap status; live state belongs to AgentRegistry."""
+
     identity: AgentIdentity
     role: AgentRole
     status: AgentStatus = AgentStatus.CREATED

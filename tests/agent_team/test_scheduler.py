@@ -29,7 +29,7 @@ from codeteam.agent_team.scheduler import (
     WorkerUnavailableError,
 )
 from codeteam.agent_team.worker import WorkerAgent, WorkerNotFoundError, WorkerRegistry
-from codeteam.events import AgentEventType
+from codeteam.events import AgentEvent, AgentEventType
 
 JOIN_TIMEOUT_SECONDS = 2.0
 
@@ -114,6 +114,8 @@ def test_scheduler_models_are_serializable() -> None:
     claim = TaskClaim(
         node_id="A",
         worker_id="worker-1",
+        runtime_id="runtime-1",
+        worker_generation=1,
         attempt=1,
         claimed_at=1.25,
     )
@@ -146,7 +148,7 @@ def test_transition_table_mutation_attempt_does_not_break_scheduler() -> None:
     scheduler = _scheduler(_dag("A"))
 
     scheduler.schedule()
-    claim = scheduler.claim("worker-backend-1")
+    claim = scheduler.claim(scheduler.registry.lease("worker-backend-1"))
 
     assert claim is not None
     assert claim.node_id == "A"
@@ -169,7 +171,7 @@ def test_claim_assigns_unique_owner_and_marks_worker_busy() -> None:
     scheduler = _scheduler(_dag("A"))
     scheduler.schedule()
 
-    claim = scheduler.claim("worker-backend-1")
+    claim = scheduler.claim(scheduler.registry.lease("worker-backend-1"))
 
     assert claim is not None
     assert claim.node_id == "A"
@@ -180,13 +182,13 @@ def test_claim_assigns_unique_owner_and_marks_worker_busy() -> None:
     assert scheduler.queue == ()
 
     with pytest.raises(WorkerUnavailableError):
-        scheduler.claim("worker-backend-1")
+        scheduler.claim(scheduler.registry.lease("worker-backend-1"))
 
 
 def test_empty_queue_claim_returns_none() -> None:
     scheduler = _scheduler(_dag("A"))
 
-    assert scheduler.claim("worker-backend-1") is None
+    assert scheduler.claim(scheduler.registry.lease("worker-backend-1")) is None
 
 
 def test_unknown_worker_is_rejected() -> None:
@@ -194,7 +196,7 @@ def test_unknown_worker_is_rejected() -> None:
     scheduler.schedule()
 
     with pytest.raises(WorkerNotFoundError, match="missing-worker"):
-        scheduler.claim("missing-worker")
+        scheduler.claim(scheduler.registry.lease("missing-worker"))
 
 
 def test_role_mismatch_does_not_leave_half_written_claim() -> None:
@@ -208,7 +210,7 @@ def test_role_mismatch_does_not_leave_half_written_claim() -> None:
     scheduler.schedule()
 
     with pytest.raises(WorkerRoleMismatchError):
-        scheduler.claim("worker-frontend-1")
+        scheduler.claim(scheduler.registry.lease("worker-frontend-1"))
 
     record = scheduler.runtime_records["A"]
     assert record.status is TaskStatus.READY
@@ -225,7 +227,7 @@ def test_unavailable_worker_status_cannot_claim(status: AgentStatus) -> None:
     scheduler.schedule()
 
     with pytest.raises(WorkerUnavailableError):
-        scheduler.claim("worker-backend-1")
+        scheduler.claim(scheduler.registry.lease("worker-backend-1"))
 
     assert scheduler.runtime_records["A"].owner_id is None
     assert scheduler.queue == ("A",)
@@ -247,7 +249,7 @@ def test_two_workers_contend_for_one_task_and_only_one_claims() -> None:
     def contender(worker_id: str) -> None:
         try:
             barrier.wait()
-            claims.append(scheduler.claim(worker_id))
+            claims.append(scheduler.claim(scheduler.registry.lease(worker_id)))
         except (RuntimeError, SchedulerError, WorkerNotFoundError) as exc:
             errors.append(exc)
 
@@ -281,7 +283,7 @@ def test_many_workers_claim_many_tasks_without_duplicates_or_loss() -> None:
     def contender(worker: WorkerAgent) -> None:
         try:
             barrier.wait()
-            claims.append(scheduler.claim(worker.info.identity.agent_id))
+            claims.append(scheduler.claim(scheduler.registry.lease(worker.info.identity.agent_id)))
         except (RuntimeError, SchedulerError, WorkerNotFoundError) as exc:
             errors.append(exc)
 
@@ -307,14 +309,14 @@ def test_start_complete_requires_owner_and_unlocks_dependent() -> None:
         ),
     )
     scheduler.schedule()
-    claim = scheduler.claim("worker-backend-1")
+    claim = scheduler.claim(scheduler.registry.lease("worker-backend-1"))
     assert claim is not None
-    scheduler.start("A", "worker-backend-1")
+    scheduler.start(claim)
 
     with pytest.raises(TaskOwnershipError):
-        scheduler.complete("A", "worker-backend-2")
+        scheduler.complete(claim.model_copy(update={"worker_id": "worker-backend-2"}))
 
-    completed = scheduler.complete("A", "worker-backend-1")
+    completed = scheduler.complete(claim)
 
     assert completed.status is TaskStatus.COMPLETED
     assert completed.owner_id is None
@@ -331,12 +333,12 @@ def test_fail_requires_owner() -> None:
         ),
     )
     scheduler.schedule()
-    claim = scheduler.claim("worker-backend-1")
+    claim = scheduler.claim(scheduler.registry.lease("worker-backend-1"))
     assert claim is not None
-    scheduler.start("A", "worker-backend-1")
+    scheduler.start(claim)
 
     with pytest.raises(TaskOwnershipError):
-        scheduler.fail("A", "worker-backend-2", "not mine")
+        scheduler.fail(claim.model_copy(update={"worker_id": "worker-backend-2"}), "not mine")
 
     record = scheduler.runtime_records["A"]
     assert record.status is TaskStatus.RUNNING
@@ -346,11 +348,11 @@ def test_fail_requires_owner() -> None:
 def test_invalid_state_progression_is_rejected_without_half_write() -> None:
     scheduler = _scheduler(_dag("A"))
     scheduler.schedule()
-    claim = scheduler.claim("worker-backend-1")
+    claim = scheduler.claim(scheduler.registry.lease("worker-backend-1"))
     assert claim is not None
 
     with pytest.raises(StaleTaskStateError):
-        scheduler.complete("A", "worker-backend-1")
+        scheduler.complete(claim)
 
     record = scheduler.runtime_records["A"]
     assert record.status is TaskStatus.CLAIMED
@@ -360,11 +362,11 @@ def test_invalid_state_progression_is_rejected_without_half_write() -> None:
 def test_retry_under_limit_requeues_and_clears_owner() -> None:
     scheduler = _scheduler(_dag("A"), max_attempts=2)
     scheduler.schedule()
-    claim = scheduler.claim("worker-backend-1")
+    claim = scheduler.claim(scheduler.registry.lease("worker-backend-1"))
     assert claim is not None
-    scheduler.start("A", "worker-backend-1")
+    scheduler.start(claim)
 
-    retried = scheduler.fail("A", "worker-backend-1", "test failed")
+    retried = scheduler.fail(claim, "test failed")
 
     assert retried.status is TaskStatus.READY
     assert retried.owner_id is None
@@ -376,11 +378,11 @@ def test_retry_under_limit_requeues_and_clears_owner() -> None:
 def test_retry_limit_keeps_terminal_failed() -> None:
     scheduler = _scheduler(_dag("A"), max_attempts=1)
     scheduler.schedule()
-    claim = scheduler.claim("worker-backend-1")
+    claim = scheduler.claim(scheduler.registry.lease("worker-backend-1"))
     assert claim is not None
-    scheduler.start("A", "worker-backend-1")
+    scheduler.start(claim)
 
-    failed = scheduler.fail("A", "worker-backend-1", "test failed")
+    failed = scheduler.fail(claim, "test failed")
 
     assert failed.status is TaskStatus.FAILED
     assert failed.owner_id is None
@@ -393,11 +395,11 @@ def test_non_retryable_failure_blocks_dependent() -> None:
     dag.add_dependency("A", "B")
     scheduler = _scheduler(dag, max_attempts=3)
     scheduler.schedule()
-    claim = scheduler.claim("worker-backend-1")
+    claim = scheduler.claim(scheduler.registry.lease("worker-backend-1"))
     assert claim is not None
-    scheduler.start("A", "worker-backend-1")
+    scheduler.start(claim)
 
-    scheduler.fail("A", "worker-backend-1", "policy denied", retryable=False)
+    scheduler.fail(claim, "policy denied", retryable=False)
 
     assert scheduler.runtime_records["A"].status is TaskStatus.FAILED
     assert scheduler.runtime_records["B"].status is TaskStatus.BLOCKED
@@ -449,10 +451,10 @@ def test_runtime_record_snapshots_do_not_mutate_scheduler() -> None:
 def test_scheduler_events_use_existing_event_log_and_safe_fields() -> None:
     scheduler = _scheduler(_dag("A"))
     scheduler.schedule()
-    claim = scheduler.claim("worker-backend-1")
+    claim = scheduler.claim(scheduler.registry.lease("worker-backend-1"))
     assert claim is not None
-    scheduler.start("A", "worker-backend-1")
-    scheduler.complete("A", "worker-backend-1")
+    scheduler.start(claim)
+    scheduler.complete(claim)
 
     event_types = [event.event_type for event in scheduler.events]
     assert event_types == [
@@ -471,11 +473,15 @@ def test_scheduler_events_use_existing_event_log_and_safe_fields() -> None:
             "reason_code",
             "failed_event_type",
             "error_type",
+            "runtime_id",
+            "generation",
+            "transaction_id",
+            "transaction_event_index",
         }
 
 
 def test_event_sink_receives_scheduler_event_snapshot() -> None:
-    received = []
+    received: list[AgentEvent] = []
     scheduler = TaskScheduler(
         _dag("A"),
         _registry(_worker("worker-backend-1")),
@@ -547,7 +553,7 @@ def test_raising_event_sink_does_not_hide_successful_claim() -> None:
     )
     scheduler.schedule()
 
-    claim = scheduler.claim("worker-backend-1")
+    claim = scheduler.claim(scheduler.registry.lease("worker-backend-1"))
 
     assert claim is not None
     assert claim.node_id == "A"
@@ -620,18 +626,18 @@ def test_failed_operations_do_not_emit_false_success_events() -> None:
     scheduler.schedule()
 
     with pytest.raises(WorkerRoleMismatchError):
-        scheduler.claim("worker-frontend-1")
+        scheduler.claim(scheduler.registry.lease("worker-frontend-1"))
     assert AgentEventType.SCHEDULER_TASK_CLAIMED not in [
         event.event_type for event in scheduler.events
     ]
 
-    claim = scheduler.claim("worker-backend-1")
+    claim = scheduler.claim(scheduler.registry.lease("worker-backend-1"))
     assert claim is not None
 
     with pytest.raises(StaleTaskStateError):
-        scheduler.complete("A", "worker-backend-1")
+        scheduler.complete(claim)
     with pytest.raises(TaskOwnershipError):
-        scheduler.start("A", "worker-frontend-1")
+        scheduler.start(claim.model_copy(update={"worker_id": "worker-frontend-1"}))
 
     event_types = [event.event_type for event in scheduler.events]
     assert AgentEventType.SCHEDULER_TASK_COMPLETED not in event_types
@@ -726,7 +732,7 @@ def test_concurrent_claims_are_stable_over_repeated_runs() -> None:
         ) -> None:
             try:
                 current_barrier.wait()
-                current_claims.append(current_scheduler.claim(worker_id))
+                current_claims.append(current_scheduler.claim(current_scheduler.registry.lease(worker_id)))
             except (RuntimeError, SchedulerError, WorkerNotFoundError) as exc:
                 current_errors.append(exc)
 

@@ -1,5 +1,13 @@
 # W5 Scheduler Benchmark
 
+## Day5 Validity Notice
+
+STALE_AFTER_LIFECYCLE_MIGRATION / RERUN_DEFERRED_UNTIL_WEEK5_COMPLETION.
+Day5 changes the Registry, transaction and mandatory claim-token contracts. The
+script has only been migrated to explicit leases; it has not been rerun. Results
+below remain historical measurements of the recorded hashes, not current Day5
+performance. See `W5_LIFECYCLE.md` for the weekend plan and unverified scope.
+
 ## Scope
 
 This benchmark measures the in-process synchronous TaskScheduler only. It covers schedule latency, first-wave claim throughput, and duplicate-claim contention failure rate. It does not measure Worker execution, mailbox behavior, crash recovery, durable queue replay, or Multi-Agent speedup.

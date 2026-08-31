@@ -139,7 +139,7 @@ def claim_throughput(task_count: int, worker_count: int) -> float:
     start = time.perf_counter_ns()
     claim_count = 0
     for index in range(worker_count):
-        claim = scheduler.claim(worker_id(index))
+        claim = scheduler.claim(scheduler.registry.lease(worker_id(index)))
         if claim is not None:
             claim_count += 1
     elapsed_seconds = (time.perf_counter_ns() - start) / 1_000_000_000
@@ -158,7 +158,7 @@ def contention_failure_rate(worker_count: int) -> float:
     def contender(index: int) -> None:
         try:
             barrier.wait()
-            claims.append(scheduler.claim(worker_id(index)))
+            claims.append(scheduler.claim(scheduler.registry.lease(worker_id(index))))
         except RuntimeError as exc:
             errors.append(exc)
 
