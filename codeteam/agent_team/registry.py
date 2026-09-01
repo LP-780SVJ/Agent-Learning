@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -25,6 +26,7 @@ from codeteam.agent_team.models import AgentInfo, AgentRole, AgentStatus
 from codeteam.events import AgentEvent, AgentEventType, make_event
 
 if TYPE_CHECKING:
+    from codeteam.agent_team.persistence_models import DurableWorkerState
     from codeteam.agent_team.worker import WorkerAgent
 
 
@@ -58,6 +60,96 @@ class AgentRegistry:
         self._records: dict[str, WorkerRuntimeRecord] = {}
         self._events: list[AgentEvent] = []
         self._event_sink = event_sink
+
+    @classmethod
+    def from_durable_state(
+        cls,
+        workers: Mapping[str, DurableWorkerState],
+        *,
+        coordinator: TeamStateCoordinator,
+        clock: Clock | None = None,
+        worker_factory: Callable[[AgentInfo], WorkerAgent] | None = None,
+        now_utc: datetime | None = None,
+    ) -> AgentRegistry:
+        """Hydrate a new Registry from validated durable Worker facts."""
+        from codeteam.agent_team.persistence_models import DurableWorkerState
+        from codeteam.agent_team.worker import WorkerAgent
+
+        factory = worker_factory or WorkerAgent
+        durable = {
+            worker_id: DurableWorkerState.model_validate(state)
+            for worker_id, state in workers.items()
+        }
+        built: dict[str, tuple[WorkerAgent, AgentInfo, DurableWorkerState]] = {}
+        for worker_id, state in sorted(durable.items()):
+            if worker_id != state.info.identity.agent_id:
+                raise WorkerStateError("durable Worker key and identity differ")
+            if state.status in {AgentStatus.BUSY, AgentStatus.RESTARTING}:
+                raise WorkerStateError("in-flight Worker must be reconciled before hydrate")
+            info = state.info.model_copy(update={"status": state.status}, deep=True)
+            worker = factory(info.model_copy(deep=True))
+            if not isinstance(worker, WorkerAgent):
+                raise TypeError("worker_factory must return WorkerAgent")
+            actual = AgentInfo.model_validate(worker.info.model_dump())
+            if actual != info:
+                raise WorkerStateError("worker_factory changed durable identity or metadata")
+            built[worker_id] = (worker, info, state)
+
+        registry = cls(coordinator=coordinator, clock=clock)
+        wall_now = now_utc or datetime.now(UTC)
+        if wall_now.tzinfo is None or wall_now.utcoffset() is None:
+            raise ValueError("now_utc must be timezone-aware")
+        with registry.coordinator.lock:
+            monotonic_now = registry._checked_now_locked()
+            for worker_id, (worker, info, state) in built.items():
+                delay = 0.0
+                if state.restart_not_before_utc is not None:
+                    delay = max(
+                        0.0,
+                        (state.restart_not_before_utc - wall_now).total_seconds(),
+                    )
+                registry._workers[worker_id] = worker
+                registry._infos[worker_id] = info.model_copy(deep=True)
+                registry._records[worker_id] = WorkerRuntimeRecord(
+                    worker_id=worker_id,
+                    status=state.status,
+                    generation=state.generation,
+                    revision=state.revision,
+                    last_heartbeat_monotonic=monotonic_now
+                    if state.status is AgentStatus.READY
+                    else None,
+                    restart_attempts=state.restart_attempts,
+                    next_restart_monotonic=monotonic_now + delay,
+                )
+        return registry
+
+    def export_durable_workers(
+        self, *, now_utc: datetime | None = None
+    ) -> dict[str, DurableWorkerState]:
+        """Return JSON-safe durable Worker projections, never WorkerAgent objects."""
+        from codeteam.agent_team.persistence_models import DurableWorkerState
+
+        wall_now = now_utc or datetime.now(UTC)
+        if wall_now.tzinfo is None or wall_now.utcoffset() is None:
+            raise ValueError("now_utc must be timezone-aware")
+        with self.coordinator.lock:
+            monotonic_now = self._checked_now_locked()
+            result: dict[str, DurableWorkerState] = {}
+            for worker_id, record in sorted(self._records.items()):
+                deadline = None
+                if record.next_restart_monotonic > monotonic_now:
+                    deadline = wall_now + timedelta(
+                        seconds=record.next_restart_monotonic - monotonic_now
+                    )
+                result[worker_id] = DurableWorkerState(
+                    info=self._infos[worker_id].model_copy(deep=True),
+                    status=record.status,
+                    generation=record.generation,
+                    revision=record.revision,
+                    restart_attempts=record.restart_attempts,
+                    restart_not_before_utc=deadline,
+                )
+            return result
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:

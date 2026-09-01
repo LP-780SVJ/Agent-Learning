@@ -7,12 +7,22 @@ from collections.abc import Callable
 from enum import Enum
 from math import isfinite
 from threading import Lock
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from pydantic import BaseModel, Field, field_validator
 
 from codeteam.agent_team.models import AgentIdentity
 from codeteam.events import AgentEvent, AgentEventType, make_event
+
+if TYPE_CHECKING:
+    from codeteam.agent_team.persistence_models import DurableMessage
+
+
+class DurableMailboxState(TypedDict):
+    mailbox_agents: tuple[AgentIdentity, ...]
+    messages: tuple[DurableMessage, ...]
+    seen_message_ids: frozenset[str]
+    mailbox_capacity: int
 
 
 class AgentMessageType(str, Enum):
@@ -121,9 +131,118 @@ class AgentMailbox:
         self._lock = Lock()
         self._agents: dict[str, AgentIdentity] = {}
         self._inboxes: dict[str, deque[AgentMessage]] = {}
+        self._inflight: dict[str, DurableMessage] = {}
+        self._message_enqueue_seq: dict[str, int] = {}
+        self._delivery_attempts: dict[str, int] = {}
+        self._next_enqueue_seq = 1
         self._seen_message_ids: set[str] = set()
         self._events: list[AgentEvent] = []
         self._event_sink = event_sink
+
+    @classmethod
+    def from_durable_state(
+        cls,
+        *,
+        agents: tuple[AgentIdentity, ...],
+        messages: tuple[DurableMessage, ...],
+        seen_message_ids: frozenset[str],
+        capacity_per_inbox: int,
+        event_sink: EventSink | None = None,
+    ) -> AgentMailbox:
+        mailbox = cls(
+            capacity_per_inbox=capacity_per_inbox,
+            event_sink=event_sink,
+        )
+        mailbox.restore_durable_state(
+            agents=agents,
+            messages=messages,
+            seen_message_ids=seen_message_ids,
+        )
+        return mailbox
+
+    def restore_durable_state(
+        self,
+        *,
+        agents: tuple[AgentIdentity, ...],
+        messages: tuple[DurableMessage, ...],
+        seen_message_ids: frozenset[str],
+    ) -> None:
+        """Replace mailbox state from a fully validated durable projection."""
+        from codeteam.agent_team.persistence_models import (
+            DurableMessage,
+            DurableMessageState,
+        )
+
+        durable = tuple(DurableMessage.model_validate(item) for item in messages)
+        identities = tuple(AgentIdentity.model_validate(item) for item in agents)
+        known = {identity.agent_id for identity in identities}
+        if len(known) != len(identities):
+            raise DuplicateAgentError("durable mailbox contains duplicate agents")
+        if any(
+            item.message.sender_id not in known or item.message.recipient_id not in known
+            for item in durable
+        ):
+            raise UnknownAgentError("durable message references unknown agent")
+        if not {item.message.message_id for item in durable} <= seen_message_ids:
+            raise DuplicateMessageError("durable dedupe state is incomplete")
+        with self._lock:
+            self._agents = {
+                identity.agent_id: identity.model_copy(deep=True)
+                for identity in identities
+            }
+            self._inboxes = {agent_id: deque() for agent_id in known}
+            self._inflight = {}
+            self._message_enqueue_seq = {}
+            self._delivery_attempts = {}
+            for item in sorted(durable, key=lambda value: value.enqueue_seq):
+                message_id = item.message.message_id
+                self._message_enqueue_seq[message_id] = item.enqueue_seq
+                self._delivery_attempts[message_id] = item.delivery_attempt
+                if item.state is DurableMessageState.PENDING:
+                    self._inboxes[item.message.recipient_id].append(
+                        item.message.model_copy(deep=True)
+                    )
+                else:
+                    self._inflight[message_id] = item.model_copy(deep=True)
+            self._next_enqueue_seq = (
+                max(self._message_enqueue_seq.values(), default=0) + 1
+            )
+            self._seen_message_ids = set(seen_message_ids)
+
+    def export_durable_mailbox_state(self) -> DurableMailboxState:
+        from codeteam.agent_team.persistence_models import (
+            DurableMessage,
+            DurableMessageState,
+        )
+
+        with self._lock:
+            pending = [
+                DurableMessage(
+                    message=message.model_copy(deep=True),
+                    state=DurableMessageState.PENDING,
+                    enqueue_seq=self._message_enqueue_seq[message.message_id],
+                    delivery_attempt=self._delivery_attempts.get(message.message_id, 0),
+                )
+                for inbox in self._inboxes.values()
+                for message in inbox
+            ]
+            inflight = [
+                DurableMessage.model_validate(item) for item in self._inflight.values()
+            ]
+            return {
+                "mailbox_agents": tuple(
+                    self._agents[agent_id].model_copy(deep=True)
+                    for agent_id in sorted(self._agents)
+                ),
+                "messages": tuple(
+                    sorted(
+                        (*pending, *inflight),
+                        key=lambda item: item.enqueue_seq,
+                    )
+                ),
+                "seen_message_ids": frozenset(self._seen_message_ids),
+                "mailbox_capacity": self._capacity_per_inbox,
+            }
 
     @property
     def events(self) -> tuple[AgentEvent, ...]:
@@ -174,6 +293,9 @@ class AgentMailbox:
 
             stored = message.model_copy(deep=True)
             self._inboxes[stored.recipient_id].append(stored)
+            self._message_enqueue_seq[stored.message_id] = self._next_enqueue_seq
+            self._delivery_attempts[stored.message_id] = 0
+            self._next_enqueue_seq += 1
             self._seen_message_ids.add(stored.message_id)
             queue_size = len(self._inboxes[stored.recipient_id])
             self._record_event_locked(
@@ -194,6 +316,8 @@ class AgentMailbox:
             if not self._inboxes[agent_id]:
                 return None
             message = self._inboxes[agent_id].popleft()
+            self._message_enqueue_seq.pop(message.message_id, None)
+            self._delivery_attempts.pop(message.message_id, None)
             queue_size = len(self._inboxes[agent_id])
             self._record_event_locked(
                 pending_delivery,
@@ -254,6 +378,9 @@ class AgentMailbox:
             for message in messages:
                 stored = message.model_copy(deep=True)
                 self._inboxes[stored.recipient_id].append(stored)
+                self._message_enqueue_seq[stored.message_id] = self._next_enqueue_seq
+                self._delivery_attempts[stored.message_id] = 0
+                self._next_enqueue_seq += 1
                 self._seen_message_ids.add(stored.message_id)
 
             for message in messages:
@@ -279,7 +406,11 @@ class AgentMailbox:
             raise DuplicateMessageError(message_id)
 
     def _require_capacity_locked(self, agent_id: str) -> None:
-        if len(self._inboxes[agent_id]) >= self._capacity_per_inbox:
+        inflight_count = sum(
+            item.message.recipient_id == agent_id
+            for item in self._inflight.values()
+        )
+        if len(self._inboxes[agent_id]) + inflight_count >= self._capacity_per_inbox:
             raise MailboxFullError(agent_id)
 
     def _record_event_locked(

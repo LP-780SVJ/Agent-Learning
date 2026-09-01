@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol
 
 from codeteam.events import AgentEventType
 from codeteam.session.errors import (
@@ -26,6 +26,7 @@ from codeteam.session.models import (
     Session,
     SessionManifest,
     SessionStatus,
+    TeamStateRef,
     WorktreeRef,
 )
 from codeteam.session.store import JsonSessionStore
@@ -75,6 +76,25 @@ class ResumeOutcome:
     runtime: Any | None
 
 
+@dataclass(frozen=True)
+class SessionRuntimeBuildRequest:
+    session: Session
+    session_dir: Path
+    current_repo: Path
+    expected_session_state_version: int
+
+
+@dataclass(frozen=True)
+class SessionRuntimeBuildResult:
+    runtime: object
+    team_state: TeamStateRef | None = None
+    event_payload: dict[str, object] | None = None
+
+
+class SessionRuntimeBuilder(Protocol):
+    def build(self, request: SessionRuntimeBuildRequest) -> SessionRuntimeBuildResult: ...
+
+
 class SessionService:
     """Session lifecycle service: create, pause, resume."""
 
@@ -86,12 +106,14 @@ class SessionService:
         refresher: SessionRefresher | None = None,
         reconciler: SessionReconciler | None = None,
         runtime_factory: RuntimeFactory | None = None,
+        runtime_builder: SessionRuntimeBuilder | None = None,
     ) -> None:
         self._store = store
         self._stop_operation = stop_operation
         self._refresher = refresher
         self._reconciler = reconciler or SessionReconciler()
         self._runtime_factory = runtime_factory
+        self._runtime_builder = runtime_builder
         self._locks: dict[str, SessionWriterLock] = {}
 
     def create_session(
@@ -247,13 +269,53 @@ class SessionService:
                 )
                 raise SessionRecoveryRequiredError(report.issues)
 
-            runtime = (
-                self._runtime_factory(report.session)
-                if self._runtime_factory is not None
-                else None
-            )
+            team_state = report.session.team_state
+            event_payload: dict[str, object] = {}
+            if team_state is not None:
+                try:
+                    if self._runtime_builder is None:
+                        raise SessionRecoveryRequiredError(
+                            ("team_runtime_builder_not_configured",)
+                        )
+                    built = self._runtime_builder.build(
+                        SessionRuntimeBuildRequest(
+                            session=report.session.model_copy(deep=True),
+                            session_dir=self._store.session_dir(session_id),
+                            current_repo=current_repo,
+                            expected_session_state_version=(
+                                report.session.manifest.state_version
+                            ),
+                        )
+                    )
+                except SessionRecoveryRequiredError as exc:
+                    flagged = self._store.save(
+                        report.session.model_copy(
+                            update={"status": SessionStatus.RECOVERY_REQUIRED}
+                        )
+                    )
+                    self._store.append_event(
+                        session_id,
+                        event_type=AgentEventType.SESSION_RECOVERY_REQUIRED,
+                        state_version=flagged.manifest.state_version,
+                        payload={"issues": list(exc.issues), "source": "team"},
+                    )
+                    raise
+                runtime = built.runtime
+                team_state = built.team_state
+                event_payload = dict(built.event_payload or {})
+            else:
+                runtime = (
+                    self._runtime_factory(report.session)
+                    if self._runtime_factory is not None
+                    else None
+                )
             persisted = self._store.save(
-                report.session.model_copy(update={"status": SessionStatus.RUNNING})
+                report.session.model_copy(
+                    update={
+                        "status": SessionStatus.RUNNING,
+                        "team_state": team_state,
+                    }
+                )
             )
             event = self._store.append_event(
                 session_id,
@@ -262,6 +324,7 @@ class SessionService:
                 payload={
                     "verdict": report.verdict.value,
                     "task_status": persisted.task_status.value,
+                    **event_payload,
                 },
             )
         except BaseException:
@@ -510,6 +573,11 @@ class SessionReconciler:
         issues: list[tuple[str, ReconciliationVerdict]],
     ) -> Session:
         if session.status is not SessionStatus.RUNNING:
+            return session
+        if session.team_state is not None:
+            # Day6's Team runtime owns finer-grained CLAIMED/RUNNING recovery.
+            # The runtime builder will compare Team state with Git before it can
+            # publish a new runtime epoch; do not short-circuit that reconciliation.
             return session
 
         issues.append(

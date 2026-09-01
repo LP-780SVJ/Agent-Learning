@@ -5,6 +5,7 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from types import MappingProxyType
+from typing import TypedDict
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -43,6 +44,16 @@ _TASK_TRANSITIONS: dict[TaskStatus, tuple[TaskStatus, ...]] = {
 TASK_TRANSITIONS: Mapping[TaskStatus, tuple[TaskStatus, ...]] = MappingProxyType(
     _TASK_TRANSITIONS
 )
+
+
+class DurableSchedulerState(TypedDict):
+    dag_nodes: tuple[TaskNode, ...]
+    dependencies: dict[str, frozenset[str]]
+    tasks: dict[str, TaskRuntimeRecord]
+    ready_queue: tuple[str, ...]
+    waiting_for_worker: frozenset[str]
+    worker_ownership: dict[str, str | None]
+    max_attempts: int
 
 
 class SchedulerError(Exception):
@@ -84,7 +95,7 @@ class TaskRuntimeRecord(BaseModel):
     owner_generation: int | None = Field(default=None, ge=1, strict=True)
     attempt: int = Field(default=0, ge=0)
     failure_reason: str | None = None
-    claimed_at: float | None = None
+    claimed_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
     @field_validator("node_id")
     @classmethod
@@ -182,9 +193,81 @@ class TaskScheduler:
                 raise SchedulerInitializationError("Registry already has a Scheduler")
             self._coordinator.scheduler = self
 
+    @classmethod
+    def from_durable_state(
+        cls,
+        dag: TaskDAG,
+        registry: WorkerRegistry,
+        *,
+        tasks: dict[str, TaskRuntimeRecord],
+        ready_queue: tuple[str, ...],
+        waiting_for_worker: frozenset[str],
+        worker_ownership: dict[str, str | None],
+        max_attempts: int,
+        event_sink: EventSink | None = None,
+    ) -> TaskScheduler:
+        """Hydrate Scheduler state through one validated package-owned boundary."""
+        scheduler = cls(
+            dag,
+            registry,
+            max_attempts=max_attempts,
+            event_sink=event_sink,
+        )
+        node_ids = {node.node_id for node in dag.nodes}
+        if set(tasks) != node_ids:
+            raise SchedulerInitializationError("durable tasks do not match DAG nodes")
+        if set(worker_ownership) != set(registry.runtime_records):
+            raise SchedulerInitializationError(
+                "durable ownership does not match Registry workers"
+            )
+        with scheduler._lock:
+            scheduler._records = {
+                node_id: TaskRuntimeRecord.model_validate(record.model_dump())
+                for node_id, record in tasks.items()
+            }
+            scheduler._queue = deque(ready_queue)
+            scheduler._queued_node_ids = set(ready_queue)
+            scheduler._waiting_for_worker_node_ids = set(waiting_for_worker)
+            scheduler._worker_current_task = dict(worker_ownership)
+            if len(scheduler._queue) != len(scheduler._queued_node_ids):
+                raise SchedulerInitializationError("durable ready queue has duplicates")
+            for worker_id, node_id in scheduler._worker_current_task.items():
+                if node_id is not None:
+                    scheduler._owned_token_locked(worker_id)
+        return scheduler
+
     @property
     def registry(self) -> WorkerRegistry:
         return self._registry
+
+    @property
+    def max_attempts(self) -> int:
+        return self._max_attempts
+
+    def export_durable_scheduler_state(self) -> DurableSchedulerState:
+        """Return a same-lock snapshot including topology and queue membership."""
+        with self._lock:
+            return {
+                "dag_nodes": tuple(
+                    self._nodes[node_id].model_copy(deep=True)
+                    for node_id in sorted(self._nodes)
+                ),
+                "dependencies": {
+                    node_id: frozenset(self._dependencies[node_id])
+                    for node_id in sorted(self._dependencies)
+                },
+                "tasks": {
+                    node_id: record.model_copy(deep=True)
+                    for node_id, record in sorted(self._records.items())
+                },
+                "ready_queue": tuple(self._queue),
+                "waiting_for_worker": frozenset(self._waiting_for_worker_node_ids),
+                "worker_ownership": {
+                    worker_id: self._worker_current_task.get(worker_id)
+                    for worker_id in self._registry.runtime_records
+                },
+                "max_attempts": self._max_attempts,
+            }
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:

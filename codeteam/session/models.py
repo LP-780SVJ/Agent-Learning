@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
 
@@ -31,10 +31,10 @@ from codeteam.schemas.messages import Message
 from codeteam.task.models import TaskSpec
 from codeteam.task.state import TaskStatus
 
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4, 5})
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4, 5, 6})
 """Loader 允许加载的 schema 代数。旧版本 ≠ 损坏（未来走 Migration）。"""
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 _SENSITIVE_METADATA_KEY_MARKERS = frozenset(
     {
@@ -248,6 +248,14 @@ class AgentRuntimeState(BaseModel):
     finalization_reserve_entry_step: int | None = None
 
 
+class TeamStateRef(BaseModel):
+    """Non-authoritative Session pointer to the Team SQLite authority."""
+
+    db_filename: Literal["team_state.sqlite3"] = "team_state.sqlite3"
+    schema_version: int = Field(ge=1, strict=True)
+    acknowledged_revision: int = Field(ge=1, strict=True)
+
+
 class SessionEvent(BaseModel):
     """events.jsonl 的一行：append-only 审计事实。
 
@@ -306,6 +314,7 @@ class Session(BaseModel):
     active_operation: ActiveOperation | None = None
     last_failure: AgentFailure | None = None
     runtime_state: AgentRuntimeState = Field(default_factory=AgentRuntimeState)
+    team_state: TeamStateRef | None = None
 
     @field_validator("provider_id", "model_id")
     @classmethod

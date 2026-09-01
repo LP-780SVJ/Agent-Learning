@@ -94,6 +94,24 @@ class TaskDAG:
         dag.validate()
         return dag
 
+    @classmethod
+    def from_durable_definition(
+        cls,
+        nodes: tuple[TaskNode, ...],
+        dependencies: dict[str, frozenset[str]],
+    ) -> TaskDAG:
+        """Rebuild validated topology without treating TaskNode.status as live state."""
+        dag = cls()
+        for node in nodes:
+            dag.add_task(node.model_copy(update={"status": TaskStatus.PENDING}, deep=True))
+        if set(dependencies) != {node.node_id for node in nodes}:
+            raise UnknownTaskNodeError("durable dependencies do not match DAG nodes")
+        for dependent_id in sorted(dependencies):
+            for prerequisite_id in sorted(dependencies[dependent_id]):
+                dag.add_dependency(prerequisite_id, dependent_id)
+        dag.validate()
+        return dag
+
     @property
     def nodes(self) -> tuple[TaskNode, ...]:
         return tuple(
@@ -194,7 +212,9 @@ class TaskDAG:
         return node.model_copy(deep=True)
 
     def _dependents(self) -> dict[str, set[str]]:
-        dependents = {node_id: set() for node_id in self._nodes}
+        dependents: dict[str, set[str]] = {
+            node_id: set() for node_id in self._nodes
+        }
         for dependent_id, prerequisite_ids in self._dependencies.items():
             for prerequisite_id in prerequisite_ids:
                 self._require_node(prerequisite_id)

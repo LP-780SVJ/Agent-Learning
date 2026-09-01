@@ -18,7 +18,7 @@ from codeteam.session.errors import (
     SessionNotFoundError,
     SessionSchemaUnsupportedError,
 )
-from codeteam.session.models import SessionEvent
+from codeteam.session.models import CURRENT_SCHEMA_VERSION, SessionEvent
 from codeteam.session.store import JsonSessionStore, find_timeline_anomalies
 
 from .conftest import make_session
@@ -122,7 +122,7 @@ def test_store_migrates_schema_v1_with_runtime_defaults(
 
     migrated = store.load(session.manifest.session_id)
 
-    assert migrated.manifest.schema_version == 5
+    assert migrated.manifest.schema_version == CURRENT_SCHEMA_VERSION
     assert migrated.runtime_state.step_count == 0
     assert migrated.runtime_state.recent_messages == ()
     assert migrated.runtime_state.progress_metrics == {}

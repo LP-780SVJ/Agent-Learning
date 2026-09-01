@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -146,7 +146,7 @@ def make_session(
     model_id: str = "model-a",
     **overrides: Any,
 ) -> Session:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     repository = repo if repo is not None else make_repo_ref(repo_path)
     data: dict[str, Any] = {
         "manifest": SessionManifest(

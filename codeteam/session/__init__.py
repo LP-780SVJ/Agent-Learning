@@ -26,6 +26,7 @@ from codeteam.session.models import (
     SessionManifest,
     SessionStatus,
     SessionUsage,
+    TeamStateRef,
     WorktreeRef,
 )
 from codeteam.session.store import (
@@ -59,6 +60,7 @@ __all__ = [
     "SessionStatus",
     "SessionTerminalError",
     "SessionUsage",
+    "TeamStateRef",
     "WorktreeMissingError",
     "WorktreeRef",
 ]

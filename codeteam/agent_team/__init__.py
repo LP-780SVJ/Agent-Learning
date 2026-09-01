@@ -57,7 +57,39 @@ from codeteam.agent_team.models import (
     LeadPlanningResult,
     WorkerAssignment,
 )
+from codeteam.agent_team.persistence_errors import (
+    StaleMessageClaimError,
+    TeamRuntimePoisonedError,
+    TeamStateAlreadyExistsError,
+    TeamStateConflictError,
+    TeamStateCorruptedError,
+    TeamStateError,
+    TeamStateNotFoundError,
+    TeamStatePathError,
+    TeamStateRecoveryRequiredError,
+    TeamStateSchemaUnsupportedError,
+)
+from codeteam.agent_team.persistence_models import (
+    TEAM_STATE_SCHEMA_VERSION,
+    DurableEvent,
+    DurableEventDraft,
+    DurableMessage,
+    DurableMessageState,
+    DurableWorkerState,
+    MessageClaim,
+    TeamStateSnapshot,
+)
+from codeteam.agent_team.reconciliation import (
+    TeamReconciliationReport,
+    TeamReconciliationVerdict,
+    TeamStateReconciler,
+)
 from codeteam.agent_team.registry import AgentRegistry
+from codeteam.agent_team.runtime_factory import (
+    DurableTeamRuntime,
+    TeamRuntimeFactory,
+    capture_team_snapshot,
+)
 from codeteam.agent_team.scheduler import (
     TASK_TRANSITIONS,
     InvalidSchedulerTransitionError,
@@ -75,6 +107,11 @@ from codeteam.agent_team.scheduler import (
     WorkerRoleMismatchError,
     WorkerUnavailableError,
 )
+from codeteam.agent_team.team_store import (
+    TEAM_STATE_DB_FILENAME,
+    SQLiteTeamStateStore,
+    TeamStateStore,
+)
 from codeteam.agent_team.worker import (
     DuplicateWorkerError,
     WorkerAgent,
@@ -84,6 +121,8 @@ from codeteam.agent_team.worker import (
 
 __all__ = [
     "TASK_TRANSITIONS",
+    "TEAM_STATE_DB_FILENAME",
+    "TEAM_STATE_SCHEMA_VERSION",
     "AgentIdentity",
     "AgentInfo",
     "AgentLifecycleManager",
@@ -101,6 +140,12 @@ __all__ = [
     "DuplicateMessageError",
     "DuplicateTaskNodeError",
     "DuplicateWorkerError",
+    "DurableEvent",
+    "DurableEventDraft",
+    "DurableMessage",
+    "DurableMessageState",
+    "DurableTeamRuntime",
+    "DurableWorkerState",
     "InvalidClockError",
     "InvalidDependencyError",
     "InvalidMessageError",
@@ -111,15 +156,18 @@ __all__ = [
     "LifecyclePolicy",
     "MailboxError",
     "MailboxFullError",
+    "MessageClaim",
     "OwnedTaskToken",
     "RecoveryOutcome",
     "RestartOutcome",
     "RestartResult",
     "RestartTicket",
     "RoleAssigner",
+    "SQLiteTeamStateStore",
     "SchedulerError",
     "SchedulerInitializationError",
     "SchedulerResult",
+    "StaleMessageClaimError",
     "StaleTaskClaimError",
     "StaleTaskStateError",
     "StaleWorkerGenerationError",
@@ -133,8 +181,23 @@ __all__ = [
     "TaskScheduler",
     "TaskStatus",
     "TeamConsistencyError",
+    "TeamReconciliationReport",
+    "TeamReconciliationVerdict",
+    "TeamRuntimeFactory",
+    "TeamRuntimePoisonedError",
     "TeamSnapshot",
+    "TeamStateAlreadyExistsError",
+    "TeamStateConflictError",
     "TeamStateCoordinator",
+    "TeamStateCorruptedError",
+    "TeamStateError",
+    "TeamStateNotFoundError",
+    "TeamStatePathError",
+    "TeamStateReconciler",
+    "TeamStateRecoveryRequiredError",
+    "TeamStateSchemaUnsupportedError",
+    "TeamStateSnapshot",
+    "TeamStateStore",
     "UndeclaredDependenciesError",
     "UnknownAgentError",
     "UnknownTaskNodeError",
@@ -150,4 +213,5 @@ __all__ = [
     "WorkerStateError",
     "WorkerTimeoutCandidate",
     "WorkerUnavailableError",
+    "capture_team_snapshot",
 ]
