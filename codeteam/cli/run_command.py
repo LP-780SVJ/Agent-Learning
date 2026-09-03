@@ -153,12 +153,16 @@ def run_agent_task(request: RunRequest) -> None:
         )
     )
     persisted_model_output_count = 0
+    persisted_model_request_count = 0
 
     def persist_state(state, evidence) -> None:
-        nonlocal persisted_model_output_count, session
+        nonlocal persisted_model_output_count, persisted_model_request_count, session
         for output in state.model_outputs[persisted_model_output_count:]:
             store.append_model_output(session.manifest.session_id, output)
         persisted_model_output_count = len(state.model_outputs)
+        for request_evidence in state.model_requests[persisted_model_request_count:]:
+            store.append_model_request(session.manifest.session_id, request_evidence)
+        persisted_model_request_count = len(state.model_requests)
         last_verification = (
             evidence.verification[-1].model_dump(mode="json")
             if evidence.verification
@@ -541,12 +545,20 @@ def resume_agent_session(request: ResumeRequest) -> None:
         )
     )
     persisted_model_output_count = 0
+    persisted_model_request_count = 0
 
     def persist_state(loop_state, evidence) -> None:
-        nonlocal persisted_model_output_count, session
+        nonlocal persisted_model_output_count, persisted_model_request_count, session
         for output in loop_state.model_outputs[persisted_model_output_count:]:
             store.append_model_output(session.manifest.session_id, output)
         persisted_model_output_count = len(loop_state.model_outputs)
+        for request_evidence in loop_state.model_requests[
+            persisted_model_request_count:
+        ]:
+            store.append_model_request(
+                session.manifest.session_id, request_evidence
+            )
+        persisted_model_request_count = len(loop_state.model_requests)
         session = store.save(
             session.model_copy(
                 update={

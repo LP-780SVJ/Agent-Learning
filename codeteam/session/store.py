@@ -24,7 +24,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from codeteam.agent.runtime_models import ModelOutputEvidence
+from codeteam.agent.runtime_models import ModelOutputEvidence, ModelRequestEvidence
 from codeteam.events import AgentEventType
 from codeteam.session.errors import (
     SessionAlreadyExistsError,
@@ -50,6 +50,7 @@ _SNAPSHOT_NAME = "session.json"
 _EVENTS_NAME = "events.jsonl"
 _CONTEXT_NAME = "context.json"
 _MODEL_OUTPUTS_NAME = "model_outputs.jsonl"
+_MODEL_REQUESTS_NAME = "model_requests.jsonl"
 
 
 def _utc_now() -> datetime:
@@ -240,6 +241,31 @@ class JsonSessionStore:
         if not root.is_dir():
             raise SessionNotFoundError(f"session 不存在: {session_id}")
         path = root / _MODEL_OUTPUTS_NAME
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o600,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "ab", closefd=False) as handle:
+                handle.write((evidence.model_dump_json() + "\n").encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            os.close(descriptor)
+
+    def append_model_request(
+        self,
+        session_id: str,
+        evidence: ModelRequestEvidence,
+    ) -> None:
+        """Append bounded provider-request metadata without message contents."""
+
+        root = self._session_dir(session_id)
+        if not root.is_dir():
+            raise SessionNotFoundError(f"session 不存在: {session_id}")
+        path = root / _MODEL_REQUESTS_NAME
         descriptor = os.open(
             path,
             os.O_WRONLY | os.O_CREAT | os.O_APPEND,

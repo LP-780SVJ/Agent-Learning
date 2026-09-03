@@ -12,7 +12,8 @@ Do not use the system `python3` for tests, CLI commands, or evaluation runs.
 
 ## Current Status
 
-The first four weeks are now at a closeout baseline.
+The first four weeks are at a closeout baseline, and Week5 now provides a durable
+local Team control plane plus a Team-to-single-Runtime execution adapter.
 
 | Area | Status | Evidence |
 |---|---|---|
@@ -29,13 +30,15 @@ The first four weeks are now at a closeout baseline.
 | Provider action normalization | Native-first + fallback | OpenAI-compatible native tools; JSON, fenced JSON, DSML fallback |
 | Agent EvalRunner / Grader | Implemented V2 | Same Runtime as `run`; hidden oracle remains grader-only |
 | Runtime-owned completion | Implemented offline | Versioned gate + native `submit_result`; real Provider smoke pending |
+| Durable Team state | Implemented | SQLite revision CAS, durable Mailbox, restart/reconciliation tests |
+| Team Coding Runtime | Implemented offline | Reuses `CodingAgentRuntime`; coordinator-owned Git evidence |
 | 11-task coding development benchmark | Historical pre-fix run inspected; post-fix NOT_RUN | Wait for user B01 smoke, then rerun |
 
 Latest closeout evidence:
 
 ```text
-normal sandbox:      1368 passed, 9 skipped
-Docker integration:  60 passed with the project-owned image
+full regression:     1918 passed, 9 Docker-permission skips
+Docker integration:  71 passed after authorized Colima access
 ```
 
 `codeteam run` now uses the real provider-neutral `CodingAgentRuntime`. Its
@@ -124,7 +127,9 @@ provider-neutral extension points.
   `git_status`, and `git_diff` within the task worktree.
 - Production prefers provider-native tool calls. Exact text and structured turn
   evidence are retained in `model_outputs.jsonl`; Model-visible history stores
-  structured assistant calls and real `role=tool` results. Runtime-owned
+  structured assistant calls and real `role=tool` results. Exact native schemas
+  live only in `ModelRequest.tools`; the system message carries a compact catalog
+  so duplicate schemas do not evict the initial source snapshot. Runtime-owned
   `step-n-call-m` and opaque provider call IDs remain separate and durable.
   Bare JSON, a complete Markdown JSON fence, and validated DeepSeek DSML remain
   accepted only as fallback, and the Runtime still assigns its own call IDs.
@@ -158,8 +163,16 @@ provider-neutral extension points.
   Runtime canonicalizes legacy `/workspace/...` inputs before policy checks,
   while Docker alone owns the host-worktree to `/workspace` mapping.
 - Read-only exploration uses `(tool, canonical arguments, workspace version)`
-  caching. One repeat receives cached evidence; a second unchanged repeat stops
-  as `NO_PROGRESS`. A patch increments the version and permits a fresh read.
+  caching. Structured compaction keeps a bounded working set containing exact
+  recent read/search observations, not just their paths. A cache hit is treated
+  as a duplicate only when that evidence is already visible in the current
+  provider request; otherwise it is returned as explicit memory restoration.
+  Two genuinely unchanged visible repeats stop as `NO_PROGRESS`. A patch
+  increments the version and permits a fresh read.
+- Each provider request records bounded metadata in `model_requests.jsonl`:
+  source/sent message counts, estimated tokens, compaction, visible observations,
+  read paths, and retained provider call IDs. Raw prompts are not duplicated in
+  this stream, while raw responses remain in `model_outputs.jsonl`.
 - Runtime separately tracks source, diagnostic, and completion progress. At
   proportional model-turn checkpoints it adds an advisory to the next normal
   request without another Provider call; sustained no-source progress pauses as
@@ -185,6 +198,29 @@ provider-neutral extension points.
 - CLI exit codes are `0` for completed, `1` for runtime failure, `2` for an
   invalid request, and `130` for pause, approval wait, or interruption.
 
+### Team Runtime contract
+
+- `TeamCodingRuntime` does not own a second Agent Loop. `WorkerExecutor` converts
+  a fenced node claim into a bounded `CodingAgentRunRequest` and invokes the same
+  production Runtime used by `codeteam run` and `agent-eval`.
+- Child task IDs use a legal readable prefix plus a hash of parent task, node and
+  attempt. They satisfy the shared Worktree/Checkpoint path contract and do not
+  collide when different raw IDs normalize to the same text.
+- Worker-reported diff, changed files and verification are diagnostic claims.
+  The coordinator derives public changed-files/diff from the real Git workspace;
+  the independent Grader remains the correctness authority.
+- Terminal Worker budget, Provider, environment and protocol failures retain
+  their root category in the Team result instead of collapsing into a generic
+  Worker failure.
+- Three historical real B01 Team smokes failed for deterministic control-plane
+  reasons now covered by regressions. The third exposed a visibility mismatch:
+  compaction remembered file names but discarded the source observations, while
+  the cache guard interpreted repeated reads as already visible and stopped the
+  alternating exploration loop. A low-budget scripted B01 now retains evidence
+  across two exploration turns and completes the full Team/Single/Patch/
+  Checkpoint/verification/diff chain. Post-fix real Provider evidence is still
+  pending and is not reported as a pass.
+
 ## Architecture
 
 ```text
@@ -198,6 +234,10 @@ CLI
        -> sandbox infrastructure preflight -> verification environment preflight
        -> list/read/search/apply_patch/run_tests/git_status/git_diff
        -> final diff + visible verification gate
+  -> TeamCodingRuntime (optional evaluation/runtime adapter)
+       -> durable DAG/Scheduler/Mailbox/Worker lifecycle
+       -> WorkerExecutor -> the same CodingAgentRuntime
+       -> coordinator-owned Git evidence -> independent Grader
   -> Domain modules
        Task / Plan / Context / Git / Execution / Sandbox / Session / LLM
   -> Infrastructure
@@ -238,6 +278,8 @@ codeteam/
 │   ├── runtime_tools.py           # seven worktree-scoped coding tools
 │   ├── verification.py            # visible-command path canonicalization
 │   └── editing.py                 # structured file edits -> local unified diff
+├── agent_team/                    # Lead DAG, durable scheduler/mailbox, Team runtime
+├── redaction.py                   # durable/audit credential sanitization boundaries
 ├── cli/                           # Typer CLI and commands
 └── evaluation/                    # retrieval eval + task-level agent eval
 ```
@@ -600,12 +642,17 @@ When running inside a restricted terminal sandbox, Docker tests may skip. In a u
 
 - Full-project mypy still has historical import-chain/stub/type debt.
 - Full-project ruff has historical style/lint findings; touched-module ruff gates pass, but repo-wide cleanup should be a separate maintenance branch.
-- Earlier real LLM runs predate canonical evidence and discriminative public
-  tests; the V3 suite needs the user-run native B01 smoke. B01 is
-  `NOT_RUN_BY_CODER`; benchmark and ablation are `NOT_RUN`.
+- Three historical real B01 Team smokes are retained as failures. Run 1 exposed an
+  illegal Team child ID at Checkpoint; run 2 exhausted child tools after duplicated
+  schemas compacted the initial source and cached reads were repeatedly exempted;
+  run 3 alternated between two read sets because compaction retained paths without
+  their source content and the cache stall policy could not distinguish visible
+  duplication from restoring compacted evidence. These deterministic causes now
+  have regression coverage, but the next post-fix real Provider B01 is not run;
+  benchmark and ablation remain `NOT_RUN`.
 - Completion ownership is now Runtime-gated through versioned evidence and
-  `submit_result`. Real-Provider confirmation remains user-run; this coder did
-  not run B01, the 11-task benchmark, or an ablation.
+  `submit_result`. Post-fix Real-Provider confirmation remains user-run; this
+  repair did not call B01, the 11-task benchmark, or an ablation.
 - Native tool calling is implemented for the OpenAI-compatible adapter and
   falls back explicitly when unsupported. New Provider wire protocols still
   require adapters; full reasoning-content continuation is not implemented.
@@ -657,10 +704,11 @@ Important directories:
 
 Recommended order:
 
-1. User builds the documented image and runs the B01 smoke to confirm isolated
-   scratch plus native `submit_result` on the real Provider path.
-2. Fix any real Provider adapter issue exposed by B01 without weakening
-   SafeExecution, checkpoint, hygiene, or dual-ID boundaries.
+1. User reruns the documented one-Worker B01 Team smoke to confirm child checkpoint,
+   cross-turn working-set visibility, patch, verification and native
+   `submit_result` on the real Provider path.
+2. Independently re-accept Day7 without weakening SafeExecution, checkpoint,
+   hygiene or evidence boundaries.
 3. After repeatable B01 evidence, run the 11-task dev baseline and compare the
    completion-ready and workspace-mutation metrics with the historical run.
 4. Only after two repeatable B01 runs, run the controlled native-vs-text

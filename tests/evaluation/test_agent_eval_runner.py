@@ -350,7 +350,7 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
 
     results = runner.run_suite(
         tasks=load_agent_eval_tasks(suite),
-        config=EvalRunConfig(run_id="test-run"),
+        config=EvalRunConfig(run_id="test-run", max_tool_calls=17),
         output_dir=tmp_path / "out",
     )
 
@@ -358,11 +358,13 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
     assert results[0].success is True
     assert results[0].pristine_acceptance_passed is False
     assert results[0].changed_files == ("app.py",)
+    assert runtime.requests[0].max_tool_calls == 17
     assert results[0].artifact_paths == (
         "_artifacts/T01/runtime_messages.json",
         "_artifacts/T01/final.diff",
         "_artifacts/T01/verification.json",
         "_artifacts/T01/model_outputs.jsonl",
+        "_artifacts/T01/model_requests.jsonl",
     )
     summary = json.loads((tmp_path / "out" / "summary.json").read_text())
     assert summary["success_count"] == 1
@@ -377,6 +379,7 @@ def test_agent_eval_runner_applies_patch_and_grades_hidden_oracle(
     assert manifest["grader_execution"] == "trusted_host_subprocess"
     assert manifest["max_protocol_repairs"] == 2
     assert manifest["run_max_steps_cap"] == 20
+    assert manifest["run_max_tool_calls_cap"] == 17
     assert manifest["configured_finalization_reserve_steps"] is None
     assert manifest["tasks"] == [
         {

@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from codeteam.agent.runtime_models import ModelOutputEvidence
+from codeteam.agent.runtime_models import ModelOutputEvidence, ModelRequestEvidence
 from codeteam.schemas.messages import Message
 from codeteam.schemas.tool_calls import ToolResult
 
@@ -50,6 +50,7 @@ class AgentLoopState:
     protocol_repair_count: int = 0
     protocol_repair_streak: int = 0
     model_outputs: list[ModelOutputEvidence] = field(default_factory=list)
+    model_requests: list[ModelRequestEvidence] = field(default_factory=list)
     last_action: ActionFingerprint | None = None
     action_history: set[ActionFingerprint] = field(default_factory=set)
     tool_result_cache: dict[ActionFingerprint, ToolResult] = field(default_factory=dict)

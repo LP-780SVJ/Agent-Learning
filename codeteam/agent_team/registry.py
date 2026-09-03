@@ -22,7 +22,13 @@ from codeteam.agent_team.contracts import (
     WorkerStateError,
 )
 from codeteam.agent_team.coordination import TeamStateCoordinator
-from codeteam.agent_team.models import AgentInfo, AgentRole, AgentStatus
+from codeteam.agent_team.models import (
+    AgentInfo,
+    AgentRole,
+    AgentStatus,
+    WorkerAssignment,
+)
+from codeteam.agent_team.worker_pool import assignment_compatibility_rank
 from codeteam.events import AgentEvent, AgentEventType, make_event
 
 if TYPE_CHECKING:
@@ -232,6 +238,19 @@ class AgentRegistry:
                 for key, info in self._infos.items()
                 if info.role is role
             )
+
+    def compatible_assignment(
+        self, assignment: WorkerAssignment
+    ) -> tuple[WorkerAgent, ...]:
+        with self.coordinator.lock:
+            ranked = [
+                (rank, worker_id, self._workers[worker_id])
+                for worker_id, info in self._infos.items()
+                if (rank := assignment_compatibility_rank(assignment, info))
+                is not None
+            ]
+            ranked.sort(key=lambda item: (item[0], item[1]))
+            return tuple(item[2] for item in ranked)
 
     def lease(self, worker_id: str) -> WorkerLease:
         """Trusted control-plane discovery; never infer a token for a delayed callback."""

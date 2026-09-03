@@ -169,6 +169,7 @@ def create_runtime_tools(
     environment_inspector: EnvironmentInspector | None = None,
     initial_context_snapshot: InitialContextSnapshot | None = None,
     max_repairs: int = 3,
+    workspace_write_allowed: bool = True,
 ) -> ToolRegistry:
     root = workspace_root.resolve(strict=True)
     canonical_allowed_commands = normalize_allowed_verification_commands(
@@ -436,14 +437,17 @@ def create_runtime_tools(
             func=inspect_environment,
         )
     )
-    registry.register(
-        RegisteredTool(
-            name="apply_patch",
-            description="Apply a unified diff or complete structured file edits safely.",
-            args_schema=ApplyPatchArgs,
-            func=apply_patch,
+    if workspace_write_allowed:
+        registry.register(
+            RegisteredTool(
+                name="apply_patch",
+                description=(
+                    "Apply a unified diff or complete structured file edits safely."
+                ),
+                args_schema=ApplyPatchArgs,
+                func=apply_patch,
+            )
         )
-    )
     registry.register(
         RegisteredTool(
             name="run_tests",

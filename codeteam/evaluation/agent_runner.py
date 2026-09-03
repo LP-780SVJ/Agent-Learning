@@ -23,6 +23,7 @@ from codeteam.agent.runtime_models import (
     RuntimeStatus,
 )
 from codeteam.agent.verification import normalize_verification_argv
+from codeteam.agent_team.team_runtime import TeamRuntimeError
 from codeteam.evaluation.agent_grader import AgentGrader
 from codeteam.evaluation.agent_models import (
     AgentEvalRunSummary,
@@ -122,40 +123,39 @@ class AgentEvalRunner:
                 worktree_root=task_workspace.parent,
             ).create(_safe_name(task.task_id), base_ref="HEAD")
             started = time.monotonic()
-            runtime_result = self.runtime.run(
-                CodingAgentRunRequest(
-                    task_id=task.task_id,
-                    task=task.prompt,
-                    workspace_root=worktree.path,
-                    provider_id=config.provider_id,
-                    model_id=config.model_id,
-                    context_budget=config.context_budget,
-                    max_output_tokens=config.max_output_tokens,
-                    model_context_window=config.model_context_window,
-                    safety_headroom_tokens=config.safety_headroom_tokens,
-                    native_tools=config.native_tools,
-                    reasoning_enabled=config.reasoning_enabled,
-                    max_steps=effective_max_steps,
-                    effective_max_steps=effective_max_steps,
-                    finalization_reserve_steps=config.finalization_reserve_steps,
-                    max_tool_calls=max(
-                        1, effective_max_steps * 3
-                    ),
-                    max_repairs=min(task.budget.max_repairs, config.max_repairs),
-                    max_protocol_repairs=config.max_protocol_repairs,
-                    compaction_mode=CompactionMode(config.compaction_mode),
-                    planning_enabled=config.planning_enabled,
-                    verification_commands=_verification_argv(
-                        task.verification_commands
-                    ),
-                    task_verification_commands=_verification_argv(
-                        task.task_verification_commands
-                    ),
-                    checkpoint_state_root=(
-                        task_repo.parent / "checkpoints" / _safe_name(task.task_id)
-                    ),
-                )
+            runtime_request = CodingAgentRunRequest(
+                task_id=task.task_id,
+                task=task.prompt,
+                workspace_root=worktree.path,
+                provider_id=config.provider_id,
+                model_id=config.model_id,
+                context_budget=config.context_budget,
+                max_output_tokens=config.max_output_tokens,
+                model_context_window=config.model_context_window,
+                safety_headroom_tokens=config.safety_headroom_tokens,
+                native_tools=config.native_tools,
+                reasoning_enabled=config.reasoning_enabled,
+                max_steps=effective_max_steps,
+                effective_max_steps=effective_max_steps,
+                finalization_reserve_steps=config.finalization_reserve_steps,
+                max_tool_calls=(
+                    config.max_tool_calls
+                    if config.max_tool_calls is not None
+                    else max(1, effective_max_steps * 3)
+                ),
+                max_repairs=min(task.budget.max_repairs, config.max_repairs),
+                max_protocol_repairs=config.max_protocol_repairs,
+                compaction_mode=CompactionMode(config.compaction_mode),
+                planning_enabled=config.planning_enabled,
+                verification_commands=_verification_argv(task.verification_commands),
+                task_verification_commands=_verification_argv(
+                    task.task_verification_commands
+                ),
+                checkpoint_state_root=(
+                    task_repo.parent / "checkpoints" / _safe_name(task.task_id)
+                ),
             )
+            runtime_result = _invoke_runtime(self.runtime, runtime_request)
             actor_result = _runtime_to_actor_result(runtime_result, config)
             actor_result = actor_result.model_copy(
                 update={
@@ -342,6 +342,7 @@ class AgentEvalRunner:
                     "context_budget": config.context_budget,
                     "max_protocol_repairs": config.max_protocol_repairs,
                     "run_max_steps_cap": config.max_steps,
+                    "run_max_tool_calls_cap": config.max_tool_calls,
                     "configured_finalization_reserve_steps": (
                         config.finalization_reserve_steps
                     ),
@@ -1099,6 +1100,26 @@ def _runtime_to_actor_result(
     )
 
 
+def _invoke_runtime(
+    runtime: CodingRuntime,
+    request: CodingAgentRunRequest,
+) -> CodingAgentRunResult:
+    try:
+        return runtime.run(request)
+    except TeamRuntimeError as error:
+        return CodingAgentRunResult(
+            task_id=request.task_id,
+            status=RuntimeStatus.FAILED,
+            summary="Team Runtime rejected an unsafe or stale result.",
+            workspace_root=request.workspace_root,
+            failure_category="team_runtime_protocol_failure",
+            failure_origin="team_runtime",
+            error=f"{type(error).__name__}: {error}",
+            effective_max_steps=request.effective_max_steps or request.max_steps,
+            finalization_reserve_steps=request.finalization_reserve_steps or 1,
+        )
+
+
 def _save_runtime_artifacts(
     *,
     output_dir: Path,
@@ -1137,15 +1158,33 @@ def _save_runtime_artifacts(
         ),
         encoding="utf-8",
     )
-    return tuple(
+    model_requests_path = root / "model_requests.jsonl"
+    model_requests_path.write_text(
+        "".join(
+            json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n"
+            for item in result.model_requests
+        ),
+        encoding="utf-8",
+    )
+    local_artifacts = tuple(
         path.as_posix()
         for path in (
             relative_root / messages_path.name,
             relative_root / diff_path.name,
             relative_root / verification_path.name,
             relative_root / model_outputs_path.name,
+            relative_root / model_requests_path.name,
         )
     )
+    referenced_artifacts = tuple(
+        "/".join(
+            part
+            for part in (reference.session_id, reference.path.as_posix())
+            if part
+        )
+        for reference in result.artifacts
+    )
+    return (*local_artifacts, *referenced_artifacts)
 
 
 def _resolve_fixture_root(project_root: Path, fixture: Path) -> Path:

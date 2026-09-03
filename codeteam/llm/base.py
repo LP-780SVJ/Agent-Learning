@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
@@ -9,6 +10,9 @@ from pydantic import BaseModel, Field, model_validator
 from codeteam.schemas.messages import Message
 from codeteam.schemas.tool_calls import ToolCall
 from codeteam.usage.token_counter import ApproximateTokenCounter
+
+INPUT_TOKEN_ESTIMATE_MULTIPLIER = 1.15
+INPUT_TOKEN_ESTIMATE_FIXED_OVERHEAD = 16
 
 
 class ModelFinishState(str, Enum):
@@ -94,12 +98,29 @@ class InputBudgetExceededError(ValueError):
 def estimate_model_request_tokens(request: ModelRequest) -> int:
     """Estimate complete structured input, including message/tool overhead."""
 
+    return estimate_structured_input_tokens(request.messages, request.tools)
+
+
+def estimate_structured_input_tokens(
+    messages: tuple[Message, ...] | list[Message],
+    tools: tuple[dict[str, object], ...] | list[dict[str, object]],
+) -> int:
+    """Conservatively estimate provider input across tokenizer implementations.
+
+    The local counter intentionally remains provider-neutral. The multiplier and
+    fixed overhead cover chat/tool framing and the observed gap between the local
+    approximation and provider-reported prompt usage.
+    """
+
     payload = {
-        "messages": [message.model_dump(mode="json") for message in request.messages],
-        "tools": list(request.tools),
+        "messages": [message.model_dump(mode="json") for message in messages],
+        "tools": list(tools),
     }
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    return ApproximateTokenCounter().count_text(serialized)
+    raw_estimate = ApproximateTokenCounter().count_text(serialized)
+    return math.ceil(raw_estimate * INPUT_TOKEN_ESTIMATE_MULTIPLIER) + (
+        INPUT_TOKEN_ESTIMATE_FIXED_OVERHEAD
+    )
 
 
 def validate_model_request_input(request: ModelRequest) -> int:

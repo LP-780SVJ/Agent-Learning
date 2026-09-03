@@ -19,6 +19,7 @@ class RuntimeStatus(str, Enum):
 
 class CompletionMode(str, Enum):
     MODEL_SUBMITTED = "model_submitted"
+    RUNTIME_COMPLETION_GATE_SETTLEMENT = "runtime_completion_gate_settlement"
     RUNTIME_BUDGET_BOUNDARY_SETTLEMENT = "runtime_budget_boundary_settlement"
 
 
@@ -33,6 +34,26 @@ class VerificationOutcomeCategory(str, Enum):
     TEST_FAILED = "test_failed"
     ENVIRONMENT_FAILED = "verification_environment_failed"
     WORKSPACE_HYGIENE_FAILED = "workspace_hygiene_failed"
+
+
+class RuntimeArtifactRef(BaseModel):
+    """Runtime-neutral reference to a separately persisted result artifact."""
+
+    kind: str = Field(min_length=1)
+    session_id: str | None = Field(default=None, min_length=1)
+    path: Path
+    schema_version: int = Field(default=1, ge=1)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _relative_safe_path(self) -> RuntimeArtifactRef:
+        if (
+            self.path.is_absolute()
+            or self.path == Path(".")
+            or ".." in self.path.parts
+        ):
+            raise ValueError("artifact path must be relative and cannot contain '..'")
+        return self
 
 
 class VerificationEvidence(BaseModel):
@@ -63,6 +84,7 @@ class CodingAgentRunRequest(BaseModel):
     model_context_window: int = Field(default=32768, gt=0)
     safety_headroom_tokens: int = Field(default=1024, ge=0)
     native_tools: bool = True
+    workspace_write_allowed: bool = True
     reasoning_enabled: bool | None = False
     max_steps: int = Field(default=20, gt=0)
     effective_max_steps: int | None = Field(default=None, gt=0)
@@ -133,6 +155,21 @@ class ModelOutputEvidence(BaseModel):
     output_tokens: int = Field(default=0, ge=0)
 
 
+class ModelRequestEvidence(BaseModel):
+    """Bounded audit metadata for the request actually sent to a provider."""
+
+    step: int = Field(gt=0)
+    source_message_count: int = Field(ge=0)
+    sent_message_count: int = Field(ge=0)
+    dropped_message_count: int = Field(ge=0)
+    estimated_input_tokens: int = Field(ge=0)
+    context_budget: int = Field(gt=0)
+    compaction_applied: bool = False
+    visible_tool_observation_count: int = Field(ge=0)
+    visible_read_paths: tuple[str, ...] = ()
+    retained_provider_call_ids: tuple[str, ...] = ()
+
+
 class CodingAgentRunResult(BaseModel):
     task_id: str
     status: RuntimeStatus
@@ -142,6 +179,7 @@ class CodingAgentRunResult(BaseModel):
     changed_files: tuple[str, ...] = ()
     checkpoint_ids: tuple[str, ...] = ()
     verification: tuple[VerificationEvidence, ...] = ()
+    artifacts: tuple[RuntimeArtifactRef, ...] = ()
     patch_attempts: int = 0
     steps_used: int = 0
     tool_calls_used: int = 0
@@ -173,6 +211,7 @@ class CodingAgentRunResult(BaseModel):
     verification_environment: VerificationEnvironmentMetadata | None = None
     messages: tuple[Message, ...] = ()
     model_outputs: tuple[ModelOutputEvidence, ...] = ()
+    model_requests: tuple[ModelRequestEvidence, ...] = ()
     events: tuple[str, ...] = ()
     workspace_version: int = 0
     workspace_fingerprint: str | None = None

@@ -32,7 +32,11 @@ from codeteam.events import AgentEventType
 from codeteam.execution.safe_execution_service import SafeExecutionService
 from codeteam.git.workspace import GitWorkspace
 from codeteam.limits import AgentLoopLimits
-from codeteam.llm.base import LegacyModelClient, ModelClient
+from codeteam.llm.base import (
+    LegacyModelClient,
+    ModelClient,
+    estimate_structured_input_tokens,
+)
 from codeteam.sandbox.environment_inspection import (
     DockerEnvironmentInspector,
     EnvironmentInspector,
@@ -47,7 +51,6 @@ from codeteam.sandbox.verification_preflight import (
 from codeteam.schemas.final_output import CompletionStatus
 from codeteam.schemas.messages import Message
 from codeteam.state import AgentLoopState, FailureOrigin, StopReason
-from codeteam.usage.token_counter import ApproximateTokenCounter
 
 StateCallback = Callable[[AgentLoopState, RuntimeEvidence], None]
 OperationCallback = Callable[
@@ -242,9 +245,14 @@ class CodingAgentRuntime:
             environment_inspector=self._environment_inspector,
             initial_context_snapshot=initial_snapshot,
             max_repairs=request.max_repairs,
+            workspace_write_allowed=request.workspace_write_allowed,
         )
         if not restored_messages:
-            messages = _with_tool_schemas(messages, tools.describe())
+            messages = _with_tool_schemas(
+                messages,
+                tools.describe(),
+                native_tools=request.native_tools,
+            )
 
         def persist(state: AgentLoopState) -> None:
             if self._state_callback is not None:
@@ -430,8 +438,25 @@ class CodingAgentRuntime:
                 evidence.post_ready_reopen_patch_count += 1
             elif kind == "skipped_optional":
                 evidence.post_ready_skipped_optional_tool_count += 1
+                evidence.completion_mode = (
+                    CompletionMode.RUNTIME_COMPLETION_GATE_SETTLEMENT
+                )
             elif kind == "nonfinalization":
                 evidence.post_ready_nonfinalization_tool_count += 1
+
+        def terminal_completion_summary() -> str | None:
+            if evidence.accepted_submission_summary is not None:
+                return evidence.accepted_submission_summary
+            if (
+                evidence.completion_mode
+                is CompletionMode.RUNTIME_COMPLETION_GATE_SETTLEMENT
+            ):
+                workspace = GitWorkspace(root)
+                changed_files = tuple(
+                    change.path for change in workspace.changed_files()
+                )
+                return _runtime_settlement_summary(changed_files)
+            return None
 
         def fingerprint_action(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             normalized = normalize_runtime_action(name, arguments)
@@ -447,6 +472,20 @@ class CodingAgentRuntime:
                     else "compacted"
                 )
             return normalized
+
+        request_visibility = _RequestVisibility()
+        compact_messages = _message_transform(
+            request.compaction_mode,
+            request.context_budget,
+            evidence,
+            tool_schemas=(tuple(tools.describe()) if request.native_tools else ()),
+            initial_context_snapshot=initial_snapshot,
+        )
+
+        def transform_messages(items: list[Message]) -> list[Message]:
+            transformed = compact_messages(items)
+            request_visibility.update(transformed, evidence.workspace_version)
+            return transformed
 
         persist(
             AgentLoopState(
@@ -465,13 +504,7 @@ class CodingAgentRuntime:
                 max_protocol_repairs=request.max_protocol_repairs,
             ),
             actual_tests_passed=lambda: evidence.tests_passed,
-            message_transform=_message_transform(
-                request.compaction_mode,
-                request.context_budget,
-                evidence,
-                tool_schemas=tuple(tools.describe()),
-                initial_context_snapshot=initial_snapshot,
-            ),
+            message_transform=transform_messages,
             state_version_provider=lambda: evidence.workspace_version,
             action_fingerprint_normalizer=fingerprint_action,
             semantic_repeat_tools=frozenset({"run_tests"}),
@@ -489,7 +522,7 @@ class CodingAgentRuntime:
                 )
             ),
             completion_gate_provider=completion_decision,
-            terminal_completion_provider=(lambda: evidence.accepted_submission_summary),
+            terminal_completion_provider=terminal_completion_summary,
             terminal_settlement_provider=terminal_settlement,
             post_ready_tool_call_callback=(
                 lambda: setattr(
@@ -502,10 +535,11 @@ class CodingAgentRuntime:
             request_advisory_provider=request_advisory,
             tool_result_observer=observe_tool_result,
             cached_no_progress_exempt_provider=(
-                lambda call, workspace_version: _initial_context_reuse_for_call(
-                    initial_snapshot, call, workspace_version
+                lambda call, workspace_version: not request_visibility.contains(
+                    call.name, call.arguments, workspace_version
                 )
             ),
+            max_parallel_exploration_calls=4,
             max_output_tokens=request.max_output_tokens,
             max_input_tokens=request.context_budget,
             model_context_window=request.model_context_window,
@@ -591,6 +625,7 @@ class CodingAgentRuntime:
             verification_environment=verification_preflight.metadata,
             messages=tuple(loop.messages),
             model_outputs=tuple(loop.model_outputs),
+            model_requests=tuple(loop.model_requests),
             events=(
                 AgentEventType.SANDBOX_PREFLIGHT_STARTED.value,
                 AgentEventType.SANDBOX_PREFLIGHT_PASSED.value,
@@ -754,6 +789,11 @@ class CodingAgentRuntime:
                     "The initial context is a current snapshot. Do not reread the same "
                     "file unless it was truncated or the workspace changed."
                 ),
+                (
+                    "Use at most four list/read/search calls in one turn. Once the "
+                    "relevant implementation, contract, and test are visible, make the "
+                    "smallest justified edit instead of broadening exploration."
+                ),
             ],
             "execution_boundary": (
                 "run_tests argv paths and cwd are relative to the workspace; use '.' for "
@@ -905,7 +945,10 @@ def _message_transform(
 
 
 def _with_tool_schemas(
-    messages: list[Message], schemas: list[dict[str, object]]
+    messages: list[Message],
+    schemas: list[dict[str, object]],
+    *,
+    native_tools: bool,
 ) -> list[Message]:
     if not messages:
         return messages
@@ -915,13 +958,46 @@ def _with_tool_schemas(
         return messages
     if not isinstance(payload, dict):
         return messages
-    payload["tools"] = schemas
+    if native_tools:
+        payload.pop("tools", None)
+        payload["tool_catalog"] = _compact_tool_catalog(schemas)
+    else:
+        payload["tools"] = schemas
+        payload.pop("tool_catalog", None)
     return [
         messages[0].model_copy(
             update={"content": json.dumps(payload, ensure_ascii=False)}
         ),
         *messages[1:],
     ]
+
+
+def _compact_tool_catalog(
+    schemas: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Describe native tools without duplicating their full JSON schemas."""
+
+    catalog: list[dict[str, object]] = []
+    for schema in schemas:
+        arguments = schema.get("arguments")
+        properties: dict[str, object] = {}
+        required: list[str] = []
+        if isinstance(arguments, dict):
+            raw_properties = arguments.get("properties")
+            if isinstance(raw_properties, dict):
+                properties = raw_properties
+            raw_required = arguments.get("required")
+            if isinstance(raw_required, list):
+                required = [item for item in raw_required if isinstance(item, str)]
+        catalog.append(
+            {
+                "name": schema.get("name"),
+                "description": schema.get("description"),
+                "argument_names": sorted(properties),
+                "required": required,
+            }
+        )
+    return catalog
 
 
 def _progress_tracker_from_request(
@@ -1025,15 +1101,7 @@ def _conversation_tokens(
     messages: list[Message],
     tool_schemas: tuple[dict[str, object], ...],
 ) -> int:
-    serialized = json.dumps(
-        {
-            "messages": [message.model_dump(mode="json") for message in messages],
-            "tools": list(tool_schemas),
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return ApproximateTokenCounter().count_text(serialized)
+    return estimate_structured_input_tokens(messages, list(tool_schemas))
 
 
 def _compact_initial_message(message: Message) -> Message:
@@ -1257,12 +1325,435 @@ def _structured_context_message(
                 evidence.git_diff_checked_version if evidence is not None else None
             ),
             "remaining_completion_gate": completion_gate,
+            "latest_agent_intent": _latest_agent_intent(
+                messages,
+                workspace_changed=bool(evidence and evidence.changed_files),
+            ),
+            "control_state": _latest_control_state(messages),
+            "workspace_change": _workspace_change_state(evidence),
+            "last_patch_attempt": _latest_patch_attempt(messages),
+            "verification_progress": _verification_progress(evidence),
+            "next_required_action": _next_required_action(evidence),
+            "working_set": _bounded_working_set(messages),
         }
     }
     return Message(
         role="user",
         content=json.dumps(summary, ensure_ascii=False, separators=(",", ":")),
     )
+
+
+class _RequestVisibility:
+    """Track evidence visible to the model in the current provider request."""
+
+    def __init__(self) -> None:
+        self._keys: set[str] = set()
+
+    def update(self, messages: list[Message], workspace_version: int) -> None:
+        keys: set[str] = set()
+        for message in messages:
+            for name, arguments in _message_tool_calls(message):
+                keys.add(_visibility_key(name, arguments, workspace_version))
+            if message.role != "user" or not message.content:
+                continue
+            try:
+                payload = json.loads(message.content)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            initial_context = payload.get("initial_context")
+            if isinstance(initial_context, dict):
+                files = initial_context.get("files")
+                if isinstance(files, list):
+                    for item in files:
+                        if isinstance(item, dict) and isinstance(item.get("path"), str):
+                            keys.add(
+                                _visibility_key(
+                                    "read_file",
+                                    {"path": item["path"]},
+                                    workspace_version,
+                                )
+                            )
+            structured = payload.get("structured_context_summary")
+            if not isinstance(structured, dict):
+                continue
+            working_set = structured.get("working_set")
+            if not isinstance(working_set, list):
+                continue
+            for item in working_set:
+                if not isinstance(item, dict):
+                    continue
+                visible_tool = item.get("tool")
+                visible_arguments = item.get("arguments")
+                if isinstance(visible_tool, str) and isinstance(
+                    visible_arguments, dict
+                ):
+                    keys.add(
+                        _visibility_key(
+                            visible_tool,
+                            visible_arguments,
+                            workspace_version,
+                        )
+                    )
+        self._keys = keys
+
+    def contains(
+        self, name: str, arguments: dict[str, Any], workspace_version: int
+    ) -> bool:
+        return _visibility_key(name, arguments, workspace_version) in self._keys
+
+
+def _visibility_key(
+    name: str, arguments: dict[str, Any], workspace_version: int
+) -> str:
+    return json.dumps(
+        {
+            "name": name,
+            "arguments": normalize_runtime_action(name, arguments),
+            "workspace_version": workspace_version,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _message_tool_calls(message: Message) -> list[tuple[str, dict[str, Any]]]:
+    if message.role != "assistant":
+        return []
+    if message.tool_calls:
+        return [(call.name, call.arguments) for call in message.tool_calls]
+    try:
+        payload = json.loads(message.content or "{}")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict) or not isinstance(payload.get("tool_calls"), list):
+        return []
+    calls: list[tuple[str, dict[str, Any]]] = []
+    for item in payload["tool_calls"]:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        arguments = item.get("arguments")
+        if isinstance(name, str) and isinstance(arguments, dict):
+            calls.append((name, arguments))
+    return calls
+
+
+def _bounded_working_set(messages: list[Message]) -> list[dict[str, object]]:
+    """Retain bounded exact observations instead of remembering paths alone."""
+
+    pending: dict[str, tuple[int, str, dict[str, Any]]] = {}
+    observations: dict[
+        str,
+        tuple[int, str, dict[str, Any], str, dict[str, object] | None],
+    ] = {}
+    sequence = 0
+    for message in messages:
+        sequence += 1
+        if message.role == "assistant":
+            if message.tool_calls:
+                for call in message.tool_calls:
+                    identifiers = (call.provider_call_id, call.call_id)
+                    for identifier in identifiers:
+                        if identifier:
+                            pending[identifier] = (
+                                sequence,
+                                call.name,
+                                call.arguments,
+                            )
+            else:
+                try:
+                    payload = json.loads(message.content or "{}")
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                calls = payload.get("tool_calls")
+                if not isinstance(calls, list):
+                    continue
+                for item in calls:
+                    if not isinstance(item, dict):
+                        continue
+                    name = item.get("name")
+                    arguments = item.get("arguments")
+                    identifier = item.get("runtime_call_id") or item.get("call_id")
+                    if (
+                        isinstance(name, str)
+                        and isinstance(arguments, dict)
+                        and isinstance(identifier, str)
+                    ):
+                        pending[identifier] = (sequence, name, arguments)
+            continue
+        if message.role != "tool":
+            continue
+        identifier = message.provider_call_id or message.tool_call_id
+        pending_call = pending.get(identifier or "")
+        if pending_call is None:
+            continue
+        call_sequence, tool_name, tool_arguments = pending_call
+        if tool_name not in {"read_file", "search_code"}:
+            continue
+        content, observation_state = _unwrap_cached_content(message.content or "")
+        key = _visibility_key(tool_name, tool_arguments, 0)
+        observations[key] = (
+            call_sequence,
+            tool_name,
+            tool_arguments,
+            content,
+            observation_state,
+        )
+
+    ranked = sorted(
+        observations.values(),
+        key=lambda item: (_working_set_priority(item[1], item[2]), -item[0]),
+    )
+    remaining_characters = 5200
+    selected: list[dict[str, object]] = []
+    for _, name, arguments, content, observation_state in ranked:
+        if len(selected) >= 8 or remaining_characters <= 0:
+            break
+        visible = content[: min(1600, remaining_characters)]
+        if not visible:
+            continue
+        selected_item: dict[str, object] = {
+            "tool": name,
+            "arguments": normalize_runtime_action(name, arguments),
+            "content": visible,
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "truncated": len(visible) < len(content),
+        }
+        if observation_state is not None:
+            selected_item["observation_state"] = observation_state
+        selected.append(selected_item)
+        remaining_characters -= len(visible)
+    return selected
+
+
+def _unwrap_cached_content(
+    content: str,
+) -> tuple[str, dict[str, object] | None]:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return content, None
+    if (
+        isinstance(payload, dict)
+        and (payload.get("cached") is True or payload.get("duplicate") is True)
+        and isinstance(payload.get("previous_content"), str)
+    ):
+        control = {
+            key: payload[key]
+            for key in (
+                "cached",
+                "duplicate",
+                "memory_restoration",
+                "workspace_version",
+                "previous_success",
+                "guidance",
+                "message",
+            )
+            if key in payload
+        }
+        return payload["previous_content"], control
+    return content, None
+
+
+def _latest_agent_intent(
+    messages: list[Message],
+    *,
+    workspace_changed: bool,
+) -> str | None:
+    """Retain the latest native assistant rationale when its turn is compacted."""
+
+    if workspace_changed:
+        # Pre-edit intent becomes actively misleading after a successful patch.
+        # The deterministic workspace_change/next_required_action fields below
+        # are the authority for the next turn.
+        return None
+    for message in reversed(messages):
+        if message.role != "assistant" or not message.tool_calls:
+            continue
+        content = " ".join((message.content or "").split())
+        if content:
+            return content[:800]
+    return None
+
+
+def _workspace_change_state(
+    evidence: RuntimeEvidence | None,
+) -> dict[str, object] | None:
+    if evidence is None or not evidence.changed_files:
+        return None
+    return {
+        "status": "patch_applied",
+        "workspace_version": evidence.workspace_version,
+        "changed_files": list(evidence.changed_files),
+        "working_set_warning": (
+            "Snapshots of changed files may predate the current workspace version."
+        ),
+        "guidance": (
+            "Do not reapply the previous patch. Run the required task verification "
+            "against the current workspace before considering another edit."
+        ),
+    }
+
+
+def _next_required_action(evidence: RuntimeEvidence | None) -> str:
+    if evidence is None or not evidence.changed_files:
+        return "diagnose_then_apply_patch"
+    progress = _verification_progress(evidence)
+    if progress["missing_task_verification_commands"]:
+        return "run_task_verification"
+    if progress["missing_regression_verification_commands"]:
+        return "run_regression_verification"
+    if progress["missing_required_verification_commands"]:
+        return "run_required_verification"
+    if evidence.git_diff_checked_version != evidence.workspace_version:
+        return "inspect_git_diff"
+    return "submit_result"
+
+
+def _verification_progress(
+    evidence: RuntimeEvidence | None,
+) -> dict[str, object]:
+    if evidence is None:
+        return {
+            "passed_commands": [],
+            "missing_task_verification_commands": [],
+            "missing_regression_verification_commands": [],
+            "missing_required_verification_commands": [],
+        }
+    latest: dict[tuple[str, ...], bool] = {}
+    for item in evidence.verification:
+        if (
+            item.completion_required
+            and item.workspace_version == evidence.workspace_version
+        ):
+            latest[item.argv] = item.passed
+
+    def missing(commands: tuple[tuple[str, ...], ...]) -> list[list[str]]:
+        return [list(command) for command in commands if not latest.get(command, False)]
+
+    task_commands = tuple(dict.fromkeys(evidence.task_verification_commands))
+    regression_commands = tuple(
+        dict.fromkeys(evidence.regression_verification_commands)
+    )
+    covered = set(task_commands) | set(regression_commands)
+    required_commands = tuple(
+        command
+        for command in dict.fromkeys(evidence.required_verification_commands)
+        if command not in covered
+    )
+    return {
+        "passed_commands": [
+            list(command) for command, passed in latest.items() if passed
+        ],
+        "missing_task_verification_commands": missing(task_commands),
+        "missing_regression_verification_commands": missing(regression_commands),
+        "missing_required_verification_commands": missing(required_commands),
+    }
+
+
+def _latest_patch_attempt(messages: list[Message]) -> dict[str, object] | None:
+    pending: dict[str, tuple[dict[str, Any], int]] = {}
+    outcomes: list[tuple[int, dict[str, object]]] = []
+    for sequence, message in enumerate(messages):
+        if message.role == "assistant" and message.tool_calls:
+            for call in message.tool_calls:
+                if call.name != "apply_patch":
+                    continue
+                identifier = call.provider_call_id or call.call_id
+                if identifier:
+                    pending[identifier] = (call.arguments, sequence)
+            continue
+        if message.role != "tool":
+            continue
+        identifier = message.provider_call_id or message.tool_call_id
+        match = pending.get(identifier or "")
+        if match is None:
+            continue
+        arguments, call_sequence = match
+        paths = _patch_argument_paths(arguments)
+        content = message.content or ""
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            payload = None
+        applied = isinstance(payload, dict) and payload.get("applied") is True
+        outcome: dict[str, object] = {
+            "status": "applied" if applied else "failed",
+            "paths": paths,
+        }
+        if applied and isinstance(payload, dict):
+            changed_files = payload.get("changed_files")
+            if isinstance(changed_files, list):
+                outcome["changed_files"] = changed_files
+            outcome["guidance"] = "Run task verification; do not repeat this patch."
+        elif content:
+            outcome["error"] = " ".join(content.split())[:400]
+            outcome["guidance"] = (
+                "Inspect current workspace state and the failure before changing the "
+                "patch; never repeat identical patch arguments."
+            )
+        outcomes.append((call_sequence, outcome))
+    return max(outcomes, key=lambda item: item[0])[1] if outcomes else None
+
+
+def _patch_argument_paths(arguments: dict[str, Any]) -> list[str]:
+    paths: list[str] = []
+    for key in ("replacements", "edits"):
+        entries = arguments.get(key)
+        if not isinstance(entries, list):
+            continue
+        for item in entries:
+            if isinstance(item, dict) and isinstance(item.get("path"), str):
+                paths.append(item["path"])
+    return list(dict.fromkeys(paths))
+
+
+def _latest_control_state(messages: list[Message]) -> dict[str, object]:
+    """Keep Runtime advisories authoritative even when recent turns do not fit."""
+
+    retained: dict[str, object] = {}
+    control_keys = (
+        "no_progress_advisory",
+        "progress_advisory",
+        "finalization_budget",
+        "completion_ready",
+        "protocol_repair",
+    )
+    for message in messages:
+        if message.role != "user" or not message.content:
+            continue
+        try:
+            payload = json.loads(message.content)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for key in control_keys:
+            value = payload.get(key)
+            if isinstance(value, dict):
+                retained[key] = value
+    return retained
+
+
+def _working_set_priority(name: str, arguments: dict[str, Any]) -> int:
+    if name == "search_code":
+        return 4
+    path = arguments.get("path")
+    if not isinstance(path, str):
+        return 3
+    normalized = path.lower()
+    if normalized.startswith("src/") and not normalized.endswith("agents.md"):
+        return 0
+    if "tests/task_verification/" in normalized:
+        return 1
+    if normalized.startswith("tests/"):
+        return 2
+    return 3
 
 
 def _paired_event_duration_ms(events, start_type, end_type) -> int:

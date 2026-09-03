@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from argparse import Namespace
 import json
+from argparse import Namespace
 from pathlib import Path
 
 from codeteam.application.repository_index import IndexDiagnostics, RepositoryIndexes

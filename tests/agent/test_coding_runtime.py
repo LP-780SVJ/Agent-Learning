@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -693,6 +694,11 @@ def test_completion_ready_duplicate_is_advisory_then_submit_can_finish(
     assert json.loads(advisory.content or "{}")["completion_ready"] is True
     assert result.post_ready_tool_calls == 1
     assert result.status is RuntimeStatus.COMPLETED
+    assert (
+        result.completion_mode
+        is CompletionMode.RUNTIME_COMPLETION_GATE_SETTLEMENT
+    )
+    assert len(model.requests) == 4
 
 
 def test_finalization_reserve_recovers_after_late_patch(tmp_path: Path) -> None:
@@ -806,6 +812,11 @@ def test_ready_optional_test_is_skipped_without_backend_execution(
     assert result.post_ready_tool_calls == 1
     assert result.post_ready_skipped_optional_tool_count == 1
     assert result.status is RuntimeStatus.COMPLETED
+    assert (
+        result.completion_mode
+        is CompletionMode.RUNTIME_COMPLETION_GATE_SETTLEMENT
+    )
+    assert len(model.requests) == 4
 
 
 def test_ready_targeted_read_executes_once_then_uses_advisory_cache(
@@ -1513,7 +1524,11 @@ def test_structured_compaction_keeps_deterministic_runtime_facts() -> None:
             content=json.dumps(
                 {
                     "tool_calls": [
-                        {"name": "read_file", "arguments": {"path": "app.py"}},
+                        {
+                            "name": "read_file",
+                            "arguments": {"path": "app.py"},
+                            "runtime_call_id": "call-1",
+                        },
                         {"name": "search_code", "arguments": {"query": "VALUE"}},
                         {"name": "git_diff", "arguments": {}},
                     ]
@@ -1526,7 +1541,7 @@ def test_structured_compaction_keeps_deterministic_runtime_facts() -> None:
 
     compacted = _message_transform(CompactionMode.STRUCTURED, 20, evidence)(messages)
     summary = next(
-        json.loads(item.content)["structured_context_summary"]
+        json.loads(item.content or "{}")["structured_context_summary"]
         for item in compacted
         if "structured_context_summary" in (item.content or "")
     )
@@ -1536,7 +1551,197 @@ def test_structured_compaction_keeps_deterministic_runtime_facts() -> None:
     assert summary["changed_files"] == ["app.py"]
     assert summary["git_diff_checked"] is True
     assert summary["remaining_completion_gate"] == "task_verification_passed"
+    assert summary["working_set"] == [
+        {
+            "tool": "read_file",
+            "arguments": {"path": "app.py", "start_line": None, "end_line": None},
+            "content": "x" * 200,
+            "content_sha256": hashlib.sha256(("x" * 200).encode()).hexdigest(),
+            "truncated": False,
+        }
+    ]
     assert all("DSML" not in (item.content or "") for item in compacted)
+
+
+def test_structured_compaction_keeps_intent_and_no_progress_control_state() -> None:
+    call = ToolCall(
+        provider_call_id="provider-read-api",
+        name="read_file",
+        arguments={"path": "src/auth/api.py"},
+    )
+    cached_observation = {
+        "cached": True,
+        "duplicate": True,
+        "memory_restoration": False,
+        "workspace_version": 0,
+        "previous_success": True,
+        "previous_content": "return internal_error",
+        "guidance": "Consolidate the evidence and edit instead of rereading.",
+    }
+    messages = [
+        Message(role="system", content=json.dumps({"role": "coding_agent"})),
+        Message(role="user", content=json.dumps({"task": "fix auth"})),
+        Message(
+            role="assistant",
+            content=(
+                "The bug is clear in src/auth/api.py; replace the generic error "
+                "with the expired-token contract next."
+            ),
+            tool_calls=[call],
+        ),
+        Message(
+            role="tool",
+            content=json.dumps(cached_observation),
+            provider_call_id="provider-read-api",
+            tool_call_id="runtime-read-api",
+        ),
+        Message(
+            role="user",
+            content=json.dumps(
+                {
+                    "no_progress_advisory": {
+                        "reason": ["cached_batch_stall"],
+                        "message": "Repeating another unchanged batch will stop the run.",
+                    }
+                }
+            ),
+        ),
+    ]
+
+    compacted = _message_transform(CompactionMode.STRUCTURED, 20)(messages)
+    summary = next(
+        json.loads(item.content or "{}")["structured_context_summary"]
+        for item in compacted
+        if "structured_context_summary" in (item.content or "")
+    )
+
+    assert "replace the generic error" in summary["latest_agent_intent"]
+    assert summary["control_state"]["no_progress_advisory"]["reason"] == [
+        "cached_batch_stall"
+    ]
+    assert summary["working_set"][0]["content"] == "return internal_error"
+    assert summary["working_set"][0]["observation_state"] == {
+        key: cached_observation[key]
+        for key in (
+            "cached",
+            "duplicate",
+            "memory_restoration",
+            "workspace_version",
+            "previous_success",
+            "guidance",
+        )
+    }
+    assert summary["next_required_action"] == "diagnose_then_apply_patch"
+
+
+def test_structured_compaction_marks_successful_patch_and_next_gate() -> None:
+    call = ToolCall(
+        provider_call_id="provider-patch",
+        name="apply_patch",
+        arguments={
+            "replacements": [
+                {
+                    "path": "src/auth/api.py",
+                    "old_text": "old",
+                    "new_text": "new",
+                }
+            ]
+        },
+    )
+    evidence = RuntimeEvidence(
+        workspace_version=1,
+        changed_files=("src/auth/api.py",),
+        task_verification_commands=(
+            ("python", "-m", "pytest", "tests/task_verification/test_b01.py", "-q"),
+        ),
+        regression_verification_commands=(
+            ("python", "-m", "pytest", "tests/auth", "-q"),
+        ),
+    )
+    messages = [
+        Message(role="system", content=json.dumps({"role": "coding_agent"})),
+        Message(role="user", content=json.dumps({"task": "fix auth"})),
+        Message(
+            role="assistant",
+            content="The bug is clear; let me apply the patch.",
+            tool_calls=[call],
+        ),
+        Message(
+            role="tool",
+            content=json.dumps(
+                {"applied": True, "changed_files": ["src/auth/api.py"]}
+            ),
+            provider_call_id="provider-patch",
+            tool_call_id="runtime-patch",
+        ),
+    ]
+
+    compacted = _message_transform(CompactionMode.STRUCTURED, 20, evidence)(messages)
+    summary = next(
+        json.loads(item.content or "{}")["structured_context_summary"]
+        for item in compacted
+        if "structured_context_summary" in (item.content or "")
+    )
+
+    assert summary["latest_agent_intent"] is None
+    assert summary["workspace_change"]["status"] == "patch_applied"
+    assert summary["next_required_action"] == "run_task_verification"
+    assert summary["verification_progress"][
+        "missing_task_verification_commands"
+    ] == [
+        ["python", "-m", "pytest", "tests/task_verification/test_b01.py", "-q"]
+    ]
+    assert summary["last_patch_attempt"] == {
+        "status": "applied",
+        "paths": ["src/auth/api.py"],
+        "changed_files": ["src/auth/api.py"],
+        "guidance": "Run task verification; do not repeat this patch.",
+    }
+
+
+def test_structured_compaction_advances_from_task_to_regression_verification() -> None:
+    task_command = (
+        "python",
+        "-m",
+        "pytest",
+        "tests/task_verification/test_b01.py",
+        "-q",
+    )
+    regression_command = ("python", "-m", "pytest", "tests/auth", "-q")
+    evidence = RuntimeEvidence(
+        workspace_version=1,
+        changed_files=("src/auth/api.py",),
+        task_verification_commands=(task_command,),
+        regression_verification_commands=(regression_command,),
+        required_verification_commands=(task_command, regression_command),
+        verification=[
+            VerificationEvidence(
+                argv=task_command,
+                passed=True,
+                completion_required=True,
+                workspace_version=1,
+            )
+        ],
+    )
+    messages = [
+        Message(role="system", content=json.dumps({"role": "coding_agent"})),
+        Message(role="user", content=json.dumps({"task": "fix auth"})),
+    ]
+
+    compacted = _message_transform(CompactionMode.STRUCTURED, 20, evidence)(messages)
+    summary = next(
+        json.loads(item.content or "{}")["structured_context_summary"]
+        for item in compacted
+        if "structured_context_summary" in (item.content or "")
+    )
+
+    assert summary["next_required_action"] == "run_regression_verification"
+    progress = summary["verification_progress"]
+    assert progress["passed_commands"] == [list(task_command)]
+    assert progress["missing_task_verification_commands"] == []
+    assert progress["missing_regression_verification_commands"] == [
+        list(regression_command)
+    ]
 
 
 def test_provider_failure_is_classified_without_escaping(tmp_path: Path) -> None:
@@ -2055,10 +2260,13 @@ def test_same_turn_initial_context_reads_are_references_not_no_progress(
     assert result.initial_context_reference_hit_count == 2
     tool_messages = [message for message in result.messages if message.role == "tool"]
     assert len(tool_messages) == 2
-    assert all(
-        json.loads(message.content or "{}")["initial_context_reference"]
-        for message in tool_messages
-    )
+    first = json.loads(tool_messages[0].content or "{}")
+    second = json.loads(tool_messages[1].content or "{}")
+    assert first["initial_context_reference"] is True
+    assert second["cached"] is True
+    assert second["duplicate"] is True
+    assert second["memory_restoration"] is False
+    assert json.loads(second["previous_content"])["initial_context_reference"] is True
 
 
 def test_compacted_initial_context_multi_read_returns_content_without_no_progress(
@@ -2117,7 +2325,98 @@ def test_compacted_initial_context_multi_read_returns_content_without_no_progres
     assert result.initial_context_cache_hit_count == 2
     assert result.initial_context_reference_hit_count == 0
     tool_messages = [message for message in result.messages if message.role == "tool"]
-    assert [message.content for message in tool_messages] == [
-        LongFullFileContext.content,
-        LongFullFileContext.content,
+    assert tool_messages[0].content == LongFullFileContext.content
+    cached = json.loads(tool_messages[1].content or "{}")
+    assert cached["cached"] is True
+    assert cached["duplicate"] is False
+    assert cached["memory_restoration"] is True
+    assert cached["previous_content"] == LongFullFileContext.content
+
+
+def test_native_tool_schema_is_not_duplicated_and_initial_context_stays_visible(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    model = NativeScriptedModel(
+        [
+            ModelTurn(
+                text=json.dumps(
+                    {
+                        "status": "failed",
+                        "summary": "inspection complete",
+                        "tests_passed": False,
+                        "error": "test stop",
+                    }
+                ),
+                finish_state=ModelFinishState.STOP,
+                model="mock-model",
+            )
+        ]
+    )
+
+    CodingAgentRuntime(
+        model_client=model,
+        context_service=LongFullFileContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="native-schema-budget",
+            task="inspect app",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+            context_budget=4096,
+        )
+    )
+
+    request = model.requests[0]
+    system = json.loads(request.messages[0].content or "{}")
+    user = json.loads(request.messages[1].content or "{}")
+    assert "tools" not in system
+    assert {item["name"] for item in system["tool_catalog"]} == {
+        item["name"] for item in request.tools
+    }
+    assert user["initial_context"]["files"][0]["content"] == (
+        LongFullFileContext.content
+    )
+    assert user["initial_context"].get("compacted") is not True
+
+
+def test_cross_turn_repeated_initial_context_reads_trigger_cached_stall(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    repeated_turns = [
+        ModelTurn(
+            text=None,
+            tool_calls=(
+                ToolCall(
+                    provider_call_id=f"read-{index}",
+                    name="read_file",
+                    arguments={"path": "app.py"},
+                ),
+            ),
+            finish_state=ModelFinishState.TOOL_CALLS,
+            model="mock-model",
+        )
+        for index in range(3)
     ]
+    model = NativeScriptedModel(repeated_turns)
+
+    result = CodingAgentRuntime(
+        model_client=model,
+        context_service=FullFileContext(),
+    ).run(
+        CodingAgentRunRequest(
+            task_id="initial-context-cross-turn-stall",
+            task="inspect app",
+            workspace_root=repo,
+            provider_id="scripted",
+            model_id="scripted",
+        )
+    )
+
+    assert result.status is RuntimeStatus.FAILED
+    assert result.failure_category == "no_progress"
+    assert result.failure_origin == "cached_batch_stall"
+    assert result.steps_used == 3
+    assert result.tool_calls_used == 3

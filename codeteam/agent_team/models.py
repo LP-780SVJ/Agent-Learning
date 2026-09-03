@@ -46,6 +46,16 @@ class AgentInfo(BaseModel):
     status: AgentStatus = AgentStatus.CREATED
     capabilities: tuple[str, ...] = ()
 
+    @field_validator("capabilities")
+    @classmethod
+    def _normalized_capabilities(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(item.strip().casefold() for item in value)
+        if any(not item for item in normalized):
+            raise ValueError("capabilities must not contain blank values")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("capabilities must be unique")
+        return normalized
+
 
 class WorkerAssignment(BaseModel):
     assignment_id: str
@@ -56,6 +66,9 @@ class WorkerAssignment(BaseModel):
     expected_output: str
     relevant_files: tuple[str, ...] = ()
     verification: str | None = None
+    required_capabilities: tuple[str, ...] = ()
+    allow_workspace_write: bool = True
+    budget_weight: int | None = None
 
     @field_validator(
         "assignment_id",
@@ -77,6 +90,34 @@ class WorkerAssignment(BaseModel):
         if value is AgentRole.LEAD:
             raise ValueError("WorkerAssignment cannot target the lead role")
         return value
+
+    @field_validator("required_capabilities")
+    @classmethod
+    def _normalized_required_capabilities(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        normalized = tuple(item.strip().casefold() for item in value)
+        if any(not item for item in normalized):
+            raise ValueError("required capabilities must not contain blank values")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("required capabilities must be unique")
+        return normalized
+
+    @field_validator("budget_weight", mode="before")
+    @classmethod
+    def _normalize_budget_weight(cls, value: object) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            parsed = value
+        elif isinstance(value, str):
+            try:
+                parsed = int(value)
+            except ValueError:
+                return None
+        else:
+            return None
+        return parsed if 1 <= parsed <= 5 else None
 
 
 class LeadPlanningResult(BaseModel):

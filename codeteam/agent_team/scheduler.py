@@ -376,9 +376,7 @@ class TaskScheduler:
                 if record.status is not TaskStatus.READY:
                     continue
 
-                if self._registry._infos[worker_id].role is not self._role_for_node(
-                    node_id
-                ):
+                if not self._worker_can_claim_locked(worker_id, node_id):
                     self._queue.append(node_id)
                     self._queued_node_ids.add(node_id)
                     saw_incompatible_ready_task = True
@@ -777,7 +775,9 @@ class TaskScheduler:
             if not self._prerequisites_completed_locked(node_id):
                 continue
 
-            if not self._registry.compatible(self._role_for_node(node_id)):
+            if not self._registry.compatible_assignment(
+                self._nodes[node_id].assignment
+            ):
                 waiting_for_worker.append(node_id)
                 if node_id not in self._waiting_for_worker_node_ids:
                     self._waiting_for_worker_node_ids.add(node_id)
@@ -789,7 +789,7 @@ class TaskScheduler:
                         from_status=TaskStatus.PENDING,
                         to_status=TaskStatus.PENDING,
                         attempt=record.attempt,
-                        reason_code="missing_worker_role",
+                        reason_code="no_compatible_worker",
                     )
                 continue
 
@@ -893,6 +893,13 @@ class TaskScheduler:
     def _role_for_node(self, node_id: str) -> AgentRole:
         self._require_record_locked(node_id)
         return self._nodes[node_id].assignment.role
+
+    def _worker_can_claim_locked(self, worker_id: str, node_id: str) -> bool:
+        assignment = self._nodes[node_id].assignment
+        return any(
+            worker.info.identity.agent_id == worker_id
+            for worker in self._registry.compatible_assignment(assignment)
+        )
 
     def _prerequisites_completed_locked(self, node_id: str) -> bool:
         return all(

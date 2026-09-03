@@ -108,6 +108,7 @@ class EvalRunConfig(BaseModel):
     reasoning_enabled: bool = False
     task_timeout_seconds: int = Field(default=900, gt=0)
     max_steps: int = Field(default=20, gt=0)
+    max_tool_calls: int | None = Field(default=None, gt=0)
     finalization_reserve_steps: int | None = Field(default=None, gt=0)
     max_repairs: int = Field(default=3, ge=0)
     max_protocol_repairs: int = Field(default=2, ge=0, le=2)

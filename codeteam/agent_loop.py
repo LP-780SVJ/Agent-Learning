@@ -13,7 +13,7 @@ from codeteam.agent.protocol import (
     ModelOutputNormalizationError,
     normalize_model_output,
 )
-from codeteam.agent.runtime_models import ModelOutputEvidence
+from codeteam.agent.runtime_models import ModelOutputEvidence, ModelRequestEvidence
 from codeteam.events import AgentEvent, AgentEventType, make_event
 from codeteam.limits import AgentLoopLimits, check_step_limit, check_tool_call_limit
 from codeteam.llm.base import (
@@ -25,6 +25,7 @@ from codeteam.llm.base import (
     ModelResponseMode,
     ModelTurn,
     ModelUsage,
+    estimate_model_request_tokens,
 )
 from codeteam.schemas.final_output import (
     AgentFinalOutput,
@@ -84,6 +85,7 @@ class AgentLoopResult:
     protocol_repairs_used: int = 0
     protocol_repair_streak: int = 0
     model_outputs: list[ModelOutputEvidence] = field(default_factory=list)
+    model_requests: list[ModelRequestEvidence] = field(default_factory=list)
     failure_origin: FailureOrigin | None = None
     declared_tool_calls: int = 0
     processed_tool_calls: int = 0
@@ -140,6 +142,7 @@ def run_agent_loop(
     ]
     | None = None,
     cached_no_progress_exempt_provider: Callable[[ToolCall, int], bool] | None = None,
+    max_parallel_exploration_calls: int | None = None,
     max_output_tokens: int = 4096,
     max_input_tokens: int = 4096,
     model_context_window: int = 32768,
@@ -285,13 +288,21 @@ def run_agent_loop(
         try:
             model_request = ModelRequest(
                 messages=tuple(request_messages),
-                tools=tuple(tool_registry.describe()),
+                tools=(tuple(tool_registry.describe()) if native_tools else ()),
                 max_output_tokens=max_output_tokens,
                 max_input_tokens=max_input_tokens,
                 model_context_window=model_context_window,
                 safety_headroom_tokens=safety_headroom_tokens,
                 native_tools=native_tools,
                 reasoning_enabled=reasoning_enabled,
+            )
+            state.model_requests.append(
+                _model_request_evidence(
+                    step=state.step_count,
+                    source_messages=request_base,
+                    request=model_request,
+                    context_budget=max_input_tokens,
+                )
             )
             model_turn = _request_model_turn(model_client, model_request)
         except Exception as error:  # noqa: BLE001
@@ -522,6 +533,7 @@ def run_agent_loop(
                 cached_no_progress_exempt_provider=(
                     cached_no_progress_exempt_provider
                 ),
+                max_parallel_exploration_calls=max_parallel_exploration_calls,
             )
             if stop_result is not None:
                 return stop_result
@@ -732,6 +744,7 @@ def _handle_tool_calls(
     ]
     | None = None,
     cached_no_progress_exempt_provider: Callable[[ToolCall, int], bool] | None = None,
+    max_parallel_exploration_calls: int | None = None,
 ) -> AgentLoopResult | None:
     state.declared_tool_call_count += len(tool_calls)
     if any(call.name == "submit_result" for call in tool_calls) and (
@@ -756,6 +769,9 @@ def _handle_tool_calls(
 
     batch_had_fresh_observation = False
     mechanical_origins: set[FailureOrigin] = set()
+    rejected_exploration_ids = _excess_exploration_call_ids(
+        tool_calls, maximum=max_parallel_exploration_calls
+    )
     for call_index, call in enumerate(tool_calls):
         batch_complete = call_index == len(tool_calls) - 1
         if call.call_id is None:
@@ -786,6 +802,23 @@ def _handle_tool_calls(
                 usage_tracker,
                 events,
             )
+
+        if call.call_id in rejected_exploration_ids:
+            _reject_tool_calls(
+                state,
+                [call],
+                tool_registry,
+                events,
+                reason=(
+                    "Exploration batch limit exceeded. Consolidate existing "
+                    "evidence before requesting more list/read/search calls."
+                ),
+                event_message="Excess parallel exploration call rejected.",
+                count_against_tool_budget=True,
+            )
+            if state_callback is not None:
+                state_callback(state)
+            continue
 
         workspace_version = (
             state_version_provider() if state_version_provider is not None else 0
@@ -926,16 +959,17 @@ def _handle_tool_calls(
             mechanical_origins.add(FailureOrigin.COMPLETION_GUIDANCE_IGNORED)
             continue
         if call.name in cacheable_tools and fingerprint in state.tool_result_cache:
-            cached = state.tool_result_cache[fingerprint].model_copy(
-                update={
-                    "call_id": call.call_id,
-                    "provider_call_id": call.provider_call_id,
-                }
-            )
+            previous = state.tool_result_cache[fingerprint]
             cache_exempt = (
                 cached_no_progress_exempt_provider(call, workspace_version)
                 if cached_no_progress_exempt_provider is not None
                 else False
+            )
+            cached = _cached_tool_result(
+                call,
+                previous,
+                workspace_version,
+                memory_restoration=cache_exempt,
             )
             if not cache_exempt:
                 mechanical_origins.add(FailureOrigin.CACHED_BATCH_STALL)
@@ -1252,11 +1286,42 @@ def _handle_tool_calls(
                 events,
             )
 
+    if FailureOrigin.COMPLETION_GUIDANCE_IGNORED in mechanical_origins:
+        terminal_summary = (
+            terminal_completion_provider()
+            if terminal_completion_provider is not None
+            else None
+        )
+        if terminal_summary is not None:
+            events.append(
+                make_event(
+                    AgentEventType.TERMINAL_SETTLEMENT_COMPLETED,
+                    "Runtime settled a completion-ready task after skipping optional work.",
+                    step_index=state.step_count,
+                    data={"mode": "runtime_completion_gate_settlement"},
+                )
+            )
+            return _build_loop_result(
+                state=state,
+                status=CompletionStatus.COMPLETED,
+                stop_reason=StopReason.COMPLETED,
+                start_time=start_time,
+                usage_tracker=usage_tracker,
+                events=events,
+                final_output=AgentFinalOutput(
+                    status=CompletionStatus.COMPLETED,
+                    summary=terminal_summary,
+                    tests_passed=True,
+                ),
+            )
+
     if batch_had_fresh_observation:
         state.cached_no_progress_count = 0
     elif mechanical_origins:
         state.cached_no_progress_count += 1
-        if state.cached_no_progress_count >= 2:
+        if state.cached_no_progress_count == 1:
+            state.messages.append(_cached_stall_advisory(mechanical_origins))
+        elif state.cached_no_progress_count >= 2:
             unprocessed = max(
                 0,
                 state.declared_tool_call_count - state.processed_tool_call_count,
@@ -1322,6 +1387,10 @@ def _duplicate_tool_result(
             "Equivalent non-destructive action was already processed for this "
             "workspace version."
         ),
+        "guidance": (
+            "This evidence was already visible. Consolidate it and edit, test, "
+            "or explain a concrete blocker instead of repeating exploration."
+        ),
     }
     if previous is not None:
         payload["previous_success"] = previous.success
@@ -1333,6 +1402,142 @@ def _duplicate_tool_result(
         name=call.name,
         content=json.dumps(payload, ensure_ascii=False),
         success=True,
+    )
+
+
+def _cached_tool_result(
+    call: ToolCall,
+    previous: ToolResult,
+    workspace_version: int,
+    *,
+    memory_restoration: bool,
+) -> ToolResult:
+    assert call.call_id is not None
+    payload = {
+        "cached": True,
+        "duplicate": not memory_restoration,
+        "memory_restoration": memory_restoration,
+        "workspace_version": workspace_version,
+        "previous_success": previous.success,
+        "previous_content": previous.content,
+        "previous_error": previous.error,
+        "guidance": (
+            "This observation had been compacted out of the current model request; "
+            "use the restored evidence now and avoid requesting it again."
+            if memory_restoration
+            else "This evidence was already visible. Consolidate it and edit, test, "
+            "or explain a concrete blocker instead of repeating exploration."
+        ),
+    }
+    return ToolResult(
+        call_id=call.call_id,
+        provider_call_id=call.provider_call_id,
+        name=call.name,
+        content=json.dumps(payload, ensure_ascii=False),
+        success=True,
+    )
+
+
+def _cached_stall_advisory(origins: set[FailureOrigin]) -> Message:
+    return Message(
+        role="user",
+        content=json.dumps(
+            {
+                "no_progress_advisory": {
+                    "reason": sorted(origin.value for origin in origins),
+                    "message": (
+                        "The previous complete tool batch contained no new model-visible "
+                        "evidence. Use the supplied observations to make the smallest "
+                        "justified edit, run a targeted verification, or state a concrete "
+                        "blocker. Repeating another unchanged batch will stop the run."
+                    ),
+                }
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+    )
+
+
+def _excess_exploration_call_ids(
+    calls: list[ToolCall], *, maximum: int | None
+) -> set[str]:
+    if maximum is None:
+        return set()
+    seen = 0
+    rejected: set[str] = set()
+    for call in calls:
+        if call.name not in {"list_files", "read_file", "search_code"}:
+            continue
+        seen += 1
+        if seen > maximum and call.call_id is not None:
+            rejected.add(call.call_id)
+    return rejected
+
+
+def _model_request_evidence(
+    *,
+    step: int,
+    source_messages: list[Message],
+    request: ModelRequest,
+    context_budget: int,
+) -> ModelRequestEvidence:
+    provider_call_ids: list[str] = []
+    visible_read_paths: set[str] = set()
+    visible_observations = 0
+    for message in request.messages:
+        if message.role == "assistant" and message.tool_calls:
+            for call in message.tool_calls:
+                if call.provider_call_id:
+                    provider_call_ids.append(call.provider_call_id)
+                if call.name == "read_file":
+                    path = call.arguments.get("path")
+                    if isinstance(path, str):
+                        visible_read_paths.add(path)
+        elif message.role == "tool":
+            visible_observations += 1
+        elif message.role == "user" and message.content:
+            try:
+                payload = json.loads(message.content)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            initial_context = payload.get("initial_context")
+            if isinstance(initial_context, dict):
+                files = initial_context.get("files")
+                if isinstance(files, list):
+                    for item in files:
+                        if not isinstance(item, dict):
+                            continue
+                        path = item.get("path")
+                        if isinstance(path, str):
+                            visible_read_paths.add(path)
+                            visible_observations += 1
+            summary = payload.get("structured_context_summary")
+            if not isinstance(summary, dict):
+                continue
+            working_set = summary.get("working_set")
+            if not isinstance(working_set, list):
+                continue
+            for item in working_set:
+                if not isinstance(item, dict) or item.get("tool") != "read_file":
+                    continue
+                arguments = item.get("arguments")
+                if isinstance(arguments, dict) and isinstance(arguments.get("path"), str):
+                    visible_read_paths.add(arguments["path"])
+                    visible_observations += 1
+    return ModelRequestEvidence(
+        step=step,
+        source_message_count=len(source_messages),
+        sent_message_count=len(request.messages),
+        dropped_message_count=max(0, len(source_messages) - len(request.messages)),
+        estimated_input_tokens=estimate_model_request_tokens(request),
+        context_budget=context_budget,
+        compaction_applied=list(request.messages) != source_messages,
+        visible_tool_observation_count=visible_observations,
+        visible_read_paths=tuple(sorted(visible_read_paths)),
+        retained_provider_call_ids=tuple(provider_call_ids),
     )
 
 
@@ -1564,6 +1769,7 @@ def _build_loop_result(
         protocol_repairs_used=state.protocol_repair_count,
         protocol_repair_streak=state.protocol_repair_streak,
         model_outputs=state.model_outputs,
+        model_requests=state.model_requests,
         failure_origin=failure_origin,
         declared_tool_calls=state.declared_tool_call_count,
         processed_tool_calls=state.processed_tool_call_count,

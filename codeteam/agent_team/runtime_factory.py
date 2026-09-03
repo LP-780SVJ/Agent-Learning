@@ -25,7 +25,12 @@ from codeteam.agent_team.mailbox import (
     AgentMessage,
     DurableMailboxState,
 )
-from codeteam.agent_team.models import AgentIdentity, AgentInfo, AgentRole
+from codeteam.agent_team.models import (
+    AgentIdentity,
+    AgentInfo,
+    AgentRole,
+    WorkerAssignment,
+)
 from codeteam.agent_team.persistence_errors import (
     StaleMessageClaimError,
     TeamRuntimePoisonedError,
@@ -46,6 +51,7 @@ from codeteam.agent_team.scheduler import (
 from codeteam.agent_team.team_store import SQLiteTeamStateStore
 from codeteam.agent_team.worker import WorkerAgent
 from codeteam.events import AgentEvent
+from codeteam.redaction import redact_sensitive_data, redact_sensitive_text
 
 T = TypeVar("T")
 
@@ -97,6 +103,11 @@ class DurableRegistryFacade:
 
     def compatible(self, role: AgentRole) -> tuple[WorkerAgent, ...]:
         return self._runtime._registry.compatible(role)
+
+    def compatible_assignment(
+        self, assignment: WorkerAssignment
+    ) -> tuple[WorkerAgent, ...]:
+        return self._runtime._registry.compatible_assignment(assignment)
 
     def lease(self, worker_id: str) -> WorkerLease:
         return self._runtime._registry.lease(worker_id)
@@ -268,8 +279,9 @@ class DurableTeamRuntime:
     def fail(
         self, claim: TaskClaim, reason: str, *, retryable: bool = True
     ) -> TaskRuntimeRecord:
+        safe_reason = redact_sensitive_text(reason)
         return self._mutate(
-            lambda: self._scheduler.fail(claim, reason, retryable=retryable)
+            lambda: self._scheduler.fail(claim, safe_reason, retryable=retryable)
         )
 
     def heartbeat(self, lease: WorkerLease) -> WorkerRuntimeRecord:
@@ -285,7 +297,10 @@ class DurableTeamRuntime:
         return self._mutate(self._lifecycle.sweep)
 
     def send_message(self, message: AgentMessage) -> AgentMessage:
-        return self._mutate(lambda: self._mailbox.send(message))
+        safe_message = AgentMessage.model_validate(
+            redact_sensitive_data(message.model_dump(mode="python"))
+        )
+        return self._mutate(lambda: self._mailbox.send(safe_message))
 
     def claim_message(self, recipient_id: str) -> MessageClaim | None:
         with self._durability_gate:
@@ -346,9 +361,12 @@ class DurableTeamRuntime:
             return committed.model_copy(deep=True)
 
     def persist(self, *, event_type: str, payload: dict[str, object]) -> None:
+        safe_payload = redact_sensitive_data(payload)
         self._mutate(
             lambda: None,
-            extra_events=(DurableEventDraft(event_type=event_type, payload=payload),),
+            extra_events=(
+                DurableEventDraft(event_type=event_type, payload=safe_payload),
+            ),
         )
 
     def _mutate(
@@ -411,7 +429,7 @@ class DurableTeamRuntime:
 
     def _draft_from_agent_event(self, event: AgentEvent) -> DurableEventDraft:
         # Round-trip rejects observer payloads that are not durable JSON facts.
-        payload = json.loads(json.dumps(event.data))
+        payload = redact_sensitive_data(json.loads(json.dumps(event.data)))
         return DurableEventDraft(event_type=event.event_type.value, payload=payload)
 
     def _current_event_lengths(self) -> tuple[int, int, int]:

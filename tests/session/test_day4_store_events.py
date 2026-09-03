@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import pytest
 
-from codeteam.agent.runtime_models import ModelOutputEvidence
+from codeteam.agent.runtime_models import ModelOutputEvidence, ModelRequestEvidence
 from codeteam.events import AgentEventType
 from codeteam.session import store as store_module
 from codeteam.session.errors import (
@@ -49,6 +49,29 @@ def test_store_appends_private_model_output_evidence(git_repo, tmp_path: Path) -
 
     path = store.session_dir(session.manifest.session_id) / "model_outputs.jsonl"
     assert ModelOutputEvidence.model_validate_json(path.read_text()) == evidence
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_store_appends_private_model_request_evidence(git_repo, tmp_path: Path) -> None:
+    store = JsonSessionStore(tmp_path / "sessions")
+    session = store.create(make_session(git_repo))
+    evidence = ModelRequestEvidence(
+        step=2,
+        source_message_count=12,
+        sent_message_count=5,
+        dropped_message_count=7,
+        estimated_input_tokens=3072,
+        context_budget=4096,
+        compaction_applied=True,
+        visible_tool_observation_count=4,
+        visible_read_paths=("src/auth/api.py", "src/auth/service.py"),
+        retained_provider_call_ids=("call-a", "call-b"),
+    )
+
+    store.append_model_request(session.manifest.session_id, evidence)
+
+    path = store.session_dir(session.manifest.session_id) / "model_requests.jsonl"
+    assert ModelRequestEvidence.model_validate_json(path.read_text()) == evidence
     assert path.stat().st_mode & 0o777 == 0o600
 
 

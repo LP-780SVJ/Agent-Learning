@@ -15,7 +15,6 @@ Durable（本文件模型）：
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
@@ -27,6 +26,7 @@ from codeteam.context.compaction import ContextSummary
 from codeteam.events import AgentEventType
 from codeteam.failures.models import AgentFailure
 from codeteam.planning.models import Plan
+from codeteam.redaction import redact_sensitive_data
 from codeteam.schemas.messages import Message
 from codeteam.task.models import TaskSpec
 from codeteam.task.state import TaskStatus
@@ -35,65 +35,6 @@ SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4, 5, 6})
 """Loader 允许加载的 schema 代数。旧版本 ≠ 损坏（未来走 Migration）。"""
 
 CURRENT_SCHEMA_VERSION = 6
-
-_SENSITIVE_METADATA_KEY_MARKERS = frozenset(
-    {
-        "api_key",
-        "apikey",
-        "authorization",
-        "bearer",
-        "credential",
-        "credentials",
-        "password",
-        "passwd",
-        "private_key",
-        "secret",
-        "token",
-    }
-)
-
-
-def _is_sensitive_metadata_key(key: object) -> bool:
-    if not isinstance(key, str):
-        return False
-    normalized = key.lower().replace("-", "_").replace(" ", "_")
-    if normalized in {
-        "max_output_tokens",
-        "safety_headroom_tokens",
-        "model_context_window",
-    }:
-        return False
-    return (
-        any(marker in normalized for marker in _SENSITIVE_METADATA_KEY_MARKERS)
-        or normalized in {"auth", "key"}
-        or normalized.endswith("_key")
-    )
-
-
-def _redact_metadata(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: "<redacted>"
-            if _is_sensitive_metadata_key(key)
-            else _redact_metadata(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_metadata(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_metadata(item) for item in value)
-    if isinstance(value, set):
-        return {_redact_metadata(item) for item in value}
-    if isinstance(value, str):
-        value = re.sub(
-            r"(?i)(api[_-]?key|authorization|bearer|password|secret|token)"
-            r"\s*[:=]\s*[^\s,;]+",
-            r"\1=<redacted>",
-            value,
-        )
-        return re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "<redacted>", value)
-    return value
-
 
 class SessionStatus(str, Enum):
     """Session 的 Runtime 生命周期状态。
@@ -339,7 +280,7 @@ class Session(BaseModel):
         data = value.model_dump()
         if data.get("source_message") is not None:
             data["source_message"] = "<redacted>"
-        data["metadata"] = _redact_metadata(data.get("metadata", {}))
+        data["metadata"] = redact_sensitive_data(data.get("metadata", {}))
         return data
 
     @field_serializer("runtime_state")
@@ -347,7 +288,7 @@ class Session(BaseModel):
         self,
         value: AgentRuntimeState,
     ) -> dict[str, Any]:
-        return _redact_metadata(value.model_dump(mode="json"))
+        return redact_sensitive_data(value.model_dump(mode="json"))
 
 
 class ReconciliationVerdict(str, Enum):

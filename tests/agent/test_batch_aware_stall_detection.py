@@ -173,6 +173,78 @@ def test_two_complete_cached_turns_stop_only_after_all_results() -> None:
     assert result.batch_premature_stop_count == 0
     assert result.progress_guard_unprocessed_safe_tool_call_count == 0
     assert len([message for message in result.messages if message.role == "tool"]) == 9
+    advisory = [
+        json.loads(message.content or "{}")
+        for message in model.requests[2].messages
+        if message.role == "user" and "no_progress_advisory" in (message.content or "")
+    ]
+    assert len(advisory) == 1
+    assert "cached_batch_stall" in advisory[0]["no_progress_advisory"]["reason"]
+
+
+def test_memory_restoration_cache_hits_do_not_count_as_stalled_turns() -> None:
+    invocations: list[tuple[str, str]] = []
+    model = _NativeModel(
+        [
+            _calls(("seed", "read_file", "a.py")),
+            _calls(("restore-1", "read_file", "a.py")),
+            _calls(("restore-2", "read_file", "a.py")),
+            _failed(),
+        ]
+    )
+
+    result = run_agent_loop(
+        model,
+        _registry(invocations),
+        [],
+        cacheable_tools=frozenset({"read_file"}),
+        cached_no_progress_exempt_provider=lambda call, version: True,
+    )
+
+    assert result.stop_reason is StopReason.FAILED
+    assert result.steps_used == 4
+    assert invocations == [("read_file", "a.py")]
+    restored = [
+        json.loads(message.content or "{}")
+        for message in result.messages
+        if message.provider_call_id in {"restore-1", "restore-2"}
+    ]
+    assert all(item["memory_restoration"] is True for item in restored)
+
+
+def test_parallel_exploration_limit_rejects_excess_calls_with_results() -> None:
+    invocations: list[tuple[str, str]] = []
+    calls = tuple(
+        (f"read-{index}", "read_file", f"file-{index}.py")
+        for index in range(1, 7)
+    )
+    model = _NativeModel([_calls(*calls), _failed()])
+
+    result = run_agent_loop(
+        model,
+        _registry(invocations),
+        [],
+        cacheable_tools=frozenset({"read_file"}),
+        max_parallel_exploration_calls=4,
+    )
+
+    assert result.stop_reason is StopReason.FAILED
+    assert invocations == [
+        ("read_file", "file-1.py"),
+        ("read_file", "file-2.py"),
+        ("read_file", "file-3.py"),
+        ("read_file", "file-4.py"),
+    ]
+    assert result.declared_tool_calls == 6
+    assert result.processed_tool_calls == 6
+    assert result.rejected_tool_calls == 2
+    rejected = [
+        message
+        for message in result.messages
+        if message.provider_call_id in {"read-5", "read-6"}
+    ]
+    assert len(rejected) == 2
+    assert all("Exploration batch limit exceeded" in (item.content or "") for item in rejected)
 
 
 def test_repeated_test_skips_but_fresh_read_in_same_batch_executes() -> None:
